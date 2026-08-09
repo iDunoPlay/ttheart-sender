@@ -1,0 +1,75 @@
+# ttheart-sender configuration
+#
+# Every setting below is optional -- delete anything you are happy with and the
+# built-in default applies. For machine-specific tweaks create config.local.yaml
+# (git-ignored); it is merged on top of this file.
+
+app:
+  log_level: INFO          # DEBUG | INFO | WARNING | ERROR
+  log_dir: logs
+
+window:
+  # How to recognise the emulator. Run `python main.py windows` to see the real
+  # class name / title of your LDPlayer build and adjust if detection fails.
+  target:
+    class_names:
+      - LDPlayerMainFrame
+      - LDPlayerMainFrame2
+    title_contains:
+      - LDPlayer
+    exclude_class_names:
+      - LDMultiPlayerMainFrame
+      - LDMultiPlayerMainFrame2
+    exclude_title_contains:
+      - Multi-Instance
+    match_any: true        # true = class OR title; false = class AND title
+
+  instance: 0              # which detected instance to drive (0-based)
+  instance_title: null     # or pick one by title substring, e.g. "LDPlayer-2"
+
+  # Park the window here before automating so window coordinates are stable.
+  position:
+    x: 0
+    y: 0
+  size: null               # or {width: 960, height: 540} to force a size
+
+  move_on_prepare: true
+  focus_on_prepare: true
+
+  # Search inside the client area (no title bar). Use insets to cut LDPlayer's
+  # right-hand toolbar out of the search region -- measure it with
+  # `python main.py shot` and crop until only the Android screen remains.
+  # Measured on LDPlayer 9.5 at 578x994: top 35 skips LDPlayer's own title bar,
+  # right 42 skips the side toolbar. Verify yours before enabling them.
+  use_client_area: true
+  insets:
+    left: 0
+    top: 0
+    right: 0
+    bottom: 0
+
+  refresh_rect_each_capture: false
+
+matching:
+  templates_dir: templates
+  confidence: 0.85         # raise to reduce false hits, lower if matches are missed
+  grayscale: true          # faster and more tolerant of slight colour shifts
+  scales: [1.0]            # e.g. [0.95, 1.0, 1.05] if the emulator gets resized
+  ignore_alpha: false      # false = transparent PNG pixels are excluded from matching
+  debug_dir: logs/debug
+  save_failures: false     # save a screenshot every time a lookup misses
+
+input:
+  move_duration: 0.12      # cursor travel time; 0 teleports
+  click_jitter: 2          # random pixels added around the target
+  click_hold: 0.05         # seconds the button stays down
+  post_click_delay: 0.15
+  failsafe: true           # slam the cursor into a screen corner to abort
+
+runner:
+  flows_dir: flows
+  step_delay: 0.05
+  default_timeout: 10.0    # default wait for find_click / wait_for
+  default_poll_interval: 0.25
+  stop_key: f12            # panic key, polled during every step and wait
+  max_iterations: 100000

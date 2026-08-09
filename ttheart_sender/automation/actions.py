@@ -1,0 +1,489 @@
+"""Built-in flow actions.
+
+Each action is a function taking ``(ctx, params)`` and returning an
+:class:`~.registry.ActionResult`. Register new ones with the ``@action``
+decorator -- see :mod:`.registry`.
+
+Conventions followed by every action here:
+
+* Coordinates default to the emulator content area; pass ``space: screen`` for
+  absolute desktop coordinates.
+* Anything that searches accepts ``template``, ``region``, ``confidence``,
+  ``scales``, ``timeout`` and ``poll_interval``.
+* A "not found" outcome is a soft failure (``ActionResult.fail``), not an
+  exception, so ``optional: true`` and ``retries:`` can handle it.
+"""
+
+from __future__ import annotations
+
+import logging
+import random
+import time
+
+from ..exceptions import ActionError, FlowAborted
+from ..geometry import Point
+from .context import RunContext
+from .params import Params
+from .registry import ActionResult, action
+
+log = logging.getLogger(__name__)
+
+
+# --------------------------------------------------------------------------
+# Timing / bookkeeping
+# --------------------------------------------------------------------------
+@action("wait", aliases=("sleep",), primary="seconds", summary="Pause for N seconds")
+def act_wait(ctx: RunContext, params: Params) -> ActionResult:
+    # `wait: 0.5`, `wait: {seconds: 0.5}` and `wait: {min: 0.3, max: 0.9}`.
+    if params.has("min") or params.has("max"):
+        low = params.number("min", 0.0)
+        high = params.number("max", low)
+        seconds = random.uniform(min(low, high), max(low, high))
+    else:
+        seconds = params.duration("seconds", 1.0)
+    log.info("%swait %.2fs", ctx.indent, seconds)
+    ctx.sleep(seconds)
+    return ActionResult.ok(seconds)
+
+
+@action("log", primary="message", summary="Write a message to the log")
+def act_log(ctx: RunContext, params: Params) -> ActionResult:
+    message = params.string("message", "")
+    level = params.string("level", "info").lower()
+    getattr(log, level if level in {"debug", "info", "warning", "error"} else "info")(
+        "%s%s", ctx.indent, message
+    )
+    return ActionResult.ok(message)
+
+
+@action("set", summary="Assign flow variables")
+def act_set(ctx: RunContext, params: Params) -> ActionResult:
+    # Every parameter is a variable name, so `- set: {taps: 5, mode: fast}`
+    # reads naturally. `values:` is accepted for names that clash with a
+    # common step key (name, optional, retries...).
+    values = dict(params.mapping("values"))
+    for key in list(params.step.params):
+        if key != "values":
+            values[key] = params.raw(key)
+    for key, value in values.items():
+        ctx.set_var(key, value)
+    log.debug("%sset %s", ctx.indent, values)
+    return ActionResult.ok(values)
+
+
+@action("stop", primary="message", summary="End the flow early")
+def act_stop(ctx: RunContext, params: Params) -> ActionResult:
+    message = params.string("message", "stop requested by flow")
+    success = params.boolean("success", True)
+    raise FlowAborted(message, success=success)
+
+
+# --------------------------------------------------------------------------
+# Pointer
+# --------------------------------------------------------------------------
+@action("click", primary="at", summary="Click at fixed coordinates")
+def act_click(ctx: RunContext, params: Params) -> ActionResult:
+    at = params.point("at")
+    space = params.string("space", "content")
+    button = params.string("button", "left")
+    clicks = params.integer("clicks", 1)
+    interval = params.number("interval", 0.08)
+    if at is None:
+        raise ActionError(f"{params.step.location}: 'at' is required")
+
+    target = ctx.to_screen(at, space)
+    log.info("%sclick %s (%s space) button=%s", ctx.indent, at, space, button)
+    ctx.click_screen(target, button=button, clicks=clicks, interval=interval)
+    return ActionResult.ok(target)
+
+
+@action("move", primary="at", summary="Move the cursor without clicking")
+def act_move(ctx: RunContext, params: Params) -> ActionResult:
+    at = params.point("at")
+    space = params.string("space", "content")
+    if at is None:
+        raise ActionError(f"{params.step.location}: 'at' is required")
+    target = ctx.to_screen(at, space)
+    if not ctx.dry_run:
+        ctx.mouse.move(target)
+    return ActionResult.ok(target)
+
+
+@action("drag", summary="Drag from one point to another")
+def act_drag(ctx: RunContext, params: Params) -> ActionResult:
+    start = params.point("from")
+    end = params.point("to")
+    space = params.string("space", "content")
+    button = params.string("button", "left")
+    duration = params.duration("duration", 0.4)
+    if start is None or end is None:
+        raise ActionError(f"{params.step.location}: 'from' and 'to' are both required")
+
+    screen_start = ctx.to_screen(start, space)
+    screen_end = ctx.to_screen(end, space)
+    log.info("%sdrag %s -> %s", ctx.indent, start, end)
+    if not ctx.dry_run:
+        ctx.mouse.drag(screen_start, screen_end, button=button, duration=duration)
+    return ActionResult.ok((screen_start, screen_end))
+
+
+@action("scroll", primary="amount", summary="Scroll the wheel")
+def act_scroll(ctx: RunContext, params: Params) -> ActionResult:
+    amount = params.integer("amount")
+    at = params.point("at", None)
+    space = params.string("space", "content")
+    target = ctx.to_screen(at, space) if at is not None else None
+    log.info("%sscroll %d", ctx.indent, amount)
+    if not ctx.dry_run:
+        ctx.mouse.scroll(amount, target)
+    return ActionResult.ok(amount)
+
+
+# --------------------------------------------------------------------------
+# Keyboard
+# --------------------------------------------------------------------------
+@action("key", aliases=("press",), primary="key", summary="Press a key")
+def act_key(ctx: RunContext, params: Params) -> ActionResult:
+    key = params.string("key")
+    presses = params.integer("presses", 1)
+    interval = params.number("interval", 0.05)
+    log.info("%skey %s x%d", ctx.indent, key, presses)
+    if not ctx.dry_run:
+        ctx.keyboard.press(key, presses=presses, interval=interval)
+    return ActionResult.ok(key)
+
+
+@action("hotkey", primary="keys", summary="Press a key combination")
+def act_hotkey(ctx: RunContext, params: Params) -> ActionResult:
+    keys = params.string_list("keys")
+    if not keys:
+        raise ActionError(f"{params.step.location}: 'keys' must list at least one key")
+    log.info("%shotkey %s", ctx.indent, "+".join(keys))
+    if not ctx.dry_run:
+        ctx.keyboard.hotkey(*keys)
+    return ActionResult.ok(keys)
+
+
+@action("type", aliases=("type_text",), primary="text", summary="Type literal text")
+def act_type(ctx: RunContext, params: Params) -> ActionResult:
+    text = params.string("text")
+    interval = params.number("interval", 0.02)
+    log.info("%stype %r", ctx.indent, text)
+    if not ctx.dry_run:
+        ctx.keyboard.type_text(text, interval=interval)
+    return ActionResult.ok(text)
+
+
+# --------------------------------------------------------------------------
+# Vision
+# --------------------------------------------------------------------------
+def _search_kwargs(params: Params) -> dict:
+    """The parameter block shared by every template-searching action."""
+    return {
+        "region": params.raw("region", None),
+        "confidence": params.optional_number("confidence", None),
+        "scales": params.number_list("scales", None),
+        # Grayscale (the default) ignores color, so it can't tell same-shaped
+        # icons apart when only their color differs (e.g. gold/silver/bronze
+        # medals). Set `grayscale: false` on a lookup to use color matching.
+        "grayscale": params.raw("grayscale", None),
+    }
+
+
+@action("find", primary="template", summary="Look for a template (no click)")
+def act_find(ctx: RunContext, params: Params) -> ActionResult:
+    template = params.string("template")
+    timeout = params.number("timeout", 0.0)
+    poll_interval = params.optional_number("poll_interval", None)
+    save_as = params.optional_string("save_as", None)
+    search = _search_kwargs(params)
+
+    if timeout > 0:
+        match = ctx.wait_for(template, timeout=timeout, poll_interval=poll_interval, **search)
+    else:
+        match = ctx.find(template, **search)
+
+    if save_as:
+        ctx.set_var(save_as, None if match is None else match.center.as_tuple())
+        ctx.set_var(f"{save_as}_confidence", 0.0 if match is None else round(match.confidence, 4))
+
+    if match is None:
+        log.info("%sfind %s -> not found", ctx.indent, template)
+        return ActionResult.fail(f"template {template!r} not found")
+    log.info("%sfind %s -> %s conf=%.3f", ctx.indent, template, match.center, match.confidence)
+    return ActionResult.ok(match)
+
+
+@action("find_click", aliases=("click_image", "tap"), primary="template",
+        summary="Find a template and click it")
+def act_find_click(ctx: RunContext, params: Params) -> ActionResult:
+    template = params.string("template")
+    timeout = params.number("timeout", ctx.config.runner.default_timeout)
+    poll_interval = params.optional_number("poll_interval", None)
+    offset = params.offset("offset", Point(0, 0))
+    button = params.string("button", "left")
+    clicks = params.integer("clicks", 1)
+    interval = params.number("interval", 0.08)
+    save_as = params.optional_string("save_as", None)
+    search = _search_kwargs(params)
+
+    if timeout > 0:
+        match = ctx.wait_for(template, timeout=timeout, poll_interval=poll_interval, **search)
+    else:
+        match = ctx.find(template, **search)
+
+    if match is None:
+        log.info("%sfind_click %s -> not found", ctx.indent, template)
+        return ActionResult.fail(f"template {template!r} not found within {timeout:g}s")
+
+    target = match.center.offset(offset.x, offset.y)
+    if save_as:
+        ctx.set_var(save_as, target.as_tuple())
+    log.info(
+        "%sfind_click %s -> %s conf=%.3f", ctx.indent, template, target, match.confidence
+    )
+    ctx.click_screen(target, button=button, clicks=clicks, interval=interval)
+    return ActionResult.ok(match)
+
+
+@action("click_all", primary="template", summary="Click every match of a template")
+def act_click_all(ctx: RunContext, params: Params) -> ActionResult:
+    template = params.string("template")
+    limit = params.integer("limit", 20)
+    offset = params.offset("offset", Point(0, 0))
+    button = params.string("button", "left")
+    search = _search_kwargs(params)
+    # Touch 'delay' now so it's marked consumed even if no matches are found
+    # below -- the actual re-rolled value is read fresh in the loop.
+    params.raw("delay", None)
+
+    matches = ctx.find_all(template, max_results=limit, **search)
+    if not matches:
+        return ActionResult.fail(f"template {template!r} not found")
+
+    log.info("%sclick_all %s -> %d match(es)", ctx.indent, template, len(matches))
+    for match in matches:
+        ctx.stop.check()
+        ctx.click_screen(match.center.offset(offset.x, offset.y), button=button)
+        # Re-rolled every iteration so a {min, max} delay varies each time,
+        # not just once for the whole click_all call.
+        ctx.sleep(params.duration("delay", 0.15))
+    return ActionResult.ok(matches)
+
+
+@action("wait_for", primary="template", summary="Block until a template appears")
+def act_wait_for(ctx: RunContext, params: Params) -> ActionResult:
+    template = params.string("template")
+    timeout = params.number("timeout", ctx.config.runner.default_timeout)
+    poll_interval = params.optional_number("poll_interval", None)
+    save_as = params.optional_string("save_as", None)
+    search = _search_kwargs(params)
+
+    match = ctx.wait_for(template, timeout=timeout, poll_interval=poll_interval, **search)
+    if save_as and match is not None:
+        ctx.set_var(save_as, match.center.as_tuple())
+    if match is None:
+        return ActionResult.fail(f"{template!r} did not appear within {timeout:g}s")
+    log.info("%swait_for %s -> appeared", ctx.indent, template)
+    return ActionResult.ok(match)
+
+
+@action("wait_until_gone", primary="template", summary="Block until a template disappears")
+def act_wait_until_gone(ctx: RunContext, params: Params) -> ActionResult:
+    template = params.string("template")
+    timeout = params.number("timeout", ctx.config.runner.default_timeout)
+    poll_interval = params.optional_number("poll_interval", None)
+    search = _search_kwargs(params)
+
+    still_visible = ctx.wait_for(
+        template, timeout=timeout, poll_interval=poll_interval, gone=True, **search
+    )
+    if still_visible is not None:
+        return ActionResult.fail(f"{template!r} was still visible after {timeout:g}s")
+    log.info("%swait_until_gone %s -> gone", ctx.indent, template)
+    return ActionResult.ok()
+
+
+@action("screenshot", primary="path", summary="Save a screenshot")
+def act_screenshot(ctx: RunContext, params: Params) -> ActionResult:
+    label = params.optional_string("path", None)
+    region = params.raw("region", None)
+    image, _ = ctx.grab(region)
+    path = ctx.save_debug(image, label or "screenshot")
+    log.info("%sscreenshot -> %s", ctx.indent, path)
+    return ActionResult.ok(path)
+
+
+# --------------------------------------------------------------------------
+# Control flow
+# --------------------------------------------------------------------------
+@action("if_found", primary="template", child_keys=("then", "else"),
+        summary="Branch on whether a template is visible")
+def act_if_found(ctx: RunContext, params: Params) -> ActionResult:
+    template = params.string("template")
+    timeout = params.number("timeout", 0.0)
+    poll_interval = params.optional_number("poll_interval", None)
+    search = _search_kwargs(params)
+    then_steps = params.steps("then")
+    else_steps = params.steps("else")
+
+    if timeout > 0:
+        match = ctx.wait_for(template, timeout=timeout, poll_interval=poll_interval, **search)
+    else:
+        match = ctx.find(template, **search)
+
+    branch = "then" if match is not None else "else"
+    log.info("%sif_found %s -> %s", ctx.indent, template, branch)
+    steps = then_steps if match is not None else else_steps
+    if not steps:
+        return ActionResult.ok(match)
+    return ActionResult(bool(ctx.execute(steps)), match)
+
+
+@action("repeat", child_keys=("steps",), summary="Repeat nested steps")
+def act_repeat(ctx: RunContext, params: Params) -> ActionResult:
+    steps = params.steps("steps")
+    times = params.optional_number("times", None)
+    forever = params.boolean("forever", False)
+    while_found = params.optional_string("while_found", None)
+    until_found = params.optional_string("until_found", None)
+    duration = params.optional_number("duration", None)
+    counter_var = params.string("counter", "index")
+    max_iterations = params.integer("max_iterations", ctx.config.runner.max_iterations)
+    stop_on_failure = params.boolean("stop_on_failure", False)
+    # while_found/until_found naturally run out of iterations when something
+    # unexpected is covering the screen (a popup, a stuck animation...). By
+    # default that's silently treated as "done" like any other exhausted
+    # loop; require_found makes it a reportable failure instead, since
+    # exhausting the budget without the condition ever triggering usually
+    # means the flow is now looking at a screen it doesn't recognize.
+    require_found = params.boolean("require_found", False)
+    search = _search_kwargs(params)
+    # Touch 'delay' now so it's marked consumed even if the loop below never
+    # runs (e.g. until_found/while_found's condition resolves on the very
+    # first check) -- the actual re-rolled value is read fresh in the loop.
+    params.raw("delay", None)
+
+    if not steps:
+        return ActionResult.ok(0)
+
+    modes = [
+        times is not None,
+        forever,
+        while_found is not None,
+        until_found is not None,
+        duration is not None,
+    ]
+    if sum(1 for m in modes if m) > 1:
+        raise ActionError(
+            f"{params.step.location}: choose exactly one of times / forever / "
+            f"while_found / until_found / duration"
+        )
+    if not any(modes):
+        times = 1.0
+
+    limit = int(times) if times is not None else max_iterations
+    limit = min(limit, max_iterations)
+    deadline = time.monotonic() + duration if duration is not None else None
+
+    completed = 0
+    condition_met = False
+    for index in range(limit):
+        ctx.stop.check()
+
+        if deadline is not None and time.monotonic() >= deadline:
+            log.info("%srepeat: %.1fs elapsed, stopping", ctx.indent, duration)
+            break
+        if while_found is not None and ctx.find(while_found, **search) is None:
+            log.info("%srepeat: %r no longer visible, stopping", ctx.indent, while_found)
+            condition_met = True
+            break
+        if until_found is not None and ctx.find(until_found, **search) is not None:
+            log.info("%srepeat: %r appeared, stopping", ctx.indent, until_found)
+            condition_met = True
+            break
+
+        ctx.set_var(counter_var, index)
+        ctx.set_var(f"{counter_var}_1based", index + 1)
+        log.info("%srepeat iteration %d/%s", ctx.indent, index + 1, limit if times is not None else "?")
+
+        succeeded = ctx.execute(steps)
+        completed += 1
+        if not succeeded and stop_on_failure:
+            return ActionResult.fail(f"iteration {index + 1} failed", completed)
+        # Re-rolled every iteration so a {min, max} delay varies each time.
+        ctx.sleep(params.duration("delay", 0.0))
+
+    if require_found and (while_found is not None or until_found is not None) and not condition_met:
+        target = while_found if while_found is not None else until_found
+        return ActionResult.fail(
+            f"{target!r} condition was never met after {completed} attempt(s)", completed
+        )
+
+    return ActionResult.ok(completed)
+
+
+@action("while_found", primary="template", child_keys=("steps",),
+        summary="Repeat nested steps while a template stays visible")
+def act_while_found(ctx: RunContext, params: Params) -> ActionResult:
+    template = params.string("template")
+    steps = params.steps("steps")
+    max_iterations = params.integer("max_iterations", ctx.config.runner.max_iterations)
+    search = _search_kwargs(params)
+    # Touch 'delay' now so it's marked consumed even if the loop below never
+    # runs (e.g. the template isn't visible on the very first check) -- the
+    # actual re-rolled value is read fresh inside the loop.
+    params.raw("delay", None)
+
+    completed = 0
+    while completed < max_iterations:
+        ctx.stop.check()
+        if ctx.find(template, **search) is None:
+            break
+        ctx.set_var("index", completed)
+        ctx.execute(steps)
+        completed += 1
+        # Re-rolled every iteration so a {min, max} delay varies each time.
+        ctx.sleep(params.duration("delay", 0.0))
+    return ActionResult.ok(completed)
+
+
+@action("run_flow", aliases=("call",), primary="flow", summary="Run another flow file")
+def act_run_flow(ctx: RunContext, params: Params) -> ActionResult:
+    from .flow import load_flow_by_name
+
+    name = params.string("flow")
+    variables = params.mapping("vars", {})
+    isolate = params.boolean("isolate", True)
+
+    flow = load_flow_by_name(ctx.config.flows_dir, name)
+    log.info("%srun_flow %s", ctx.indent, flow.name)
+
+    saved = dict(ctx.variables)
+    ctx.variables.update(flow.vars)
+    ctx.variables.update(variables)
+    try:
+        success = ctx.execute(flow.steps)
+    finally:
+        if isolate:
+            ctx.variables.clear()
+            ctx.variables.update(saved)
+    return ActionResult(success, flow.name)
+
+
+@action("prepare_window", summary="Re-detect, reposition and focus the emulator window")
+def act_prepare_window(ctx: RunContext, params: Params) -> ActionResult:
+    focus = params.boolean("focus", True)
+    if ctx.window is None:
+        return ActionResult.fail("no window attached")
+    ctx.window.restore()
+    if params.boolean("move", ctx.config.window.move_on_prepare):
+        size = (ctx.config.window.size.width, ctx.config.window.size.height) if ctx.config.window.size else None
+        ctx.window.move_to(
+            Point(ctx.config.window.position.x, ctx.config.window.position.y), size
+        )
+    if focus:
+        ctx.window.focus()
+    rect = ctx.refresh_window()
+    log.info("%sprepare_window -> %s", ctx.indent, rect)
+    return ActionResult.ok(rect)

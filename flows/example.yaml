@@ -1,0 +1,99 @@
+# Reference flow -- every action and syntax the engine supports.
+# Run it with:  python main.py run example --dry-run
+#
+# It expects templates named heart_button / confirm_dialog / popup_close to
+# exist; with --dry-run and optional steps it is safe to run without them.
+
+name: example
+description: Annotated tour of the flow language
+
+# Defaults for this flow's variables. Override at launch: --var taps=25
+vars:
+  taps: 5
+  gap: 0.6
+
+# Fallback parameter values applied to every step in this file.
+defaults:
+  confidence: 0.85
+
+steps:
+  # --- basics -----------------------------------------------------------
+  - log: "Starting example flow (${taps} taps)"
+
+  # Make sure the emulator is parked and focused before we touch anything.
+  - prepare_window
+
+  # Clear a popup if one happens to be showing. `optional: true` means a miss
+  # is a warning, not a failed run.
+  - if_found:
+      template: popup_close
+      then:
+        - log: "Dismissing popup"
+        - find_click: {template: popup_close}
+        - wait: 0.4
+
+  # --- the main loop ----------------------------------------------------
+  - repeat:
+      times: ${taps}
+      delay: 0.2
+      counter: tap          # exposes ${tap} and ${tap_1based}
+      steps:
+        - log: "Tap ${tap_1based} of ${taps}"
+
+        # Wait up to 5s for the button, then click its centre.
+        - find_click:
+            template: heart_button
+            timeout: 5
+            offset: [0, 0]        # nudge the click away from the centre
+            save_as: last_tap     # stores the clicked point in ${last_tap}
+          retries: 2              # re-run the whole step twice more on failure
+          retry_delay: 0.8
+
+        # A random pause reads less like a machine than a fixed one.
+        # NOTE: inside {braces}, ${vars} must be quoted -- YAML reads a bare
+        # `{` as the start of a nested mapping.
+        - wait: {min: 0.3, max: "${gap}"}
+
+        # Confirmation dialogs are not always shown -- don't fail the run.
+        - find_click: {template: confirm_dialog, timeout: 1}
+          optional: true
+
+  # --- other things you can do -----------------------------------------
+  # Fixed coordinates, relative to the emulator content area by default.
+  # - click: [540, 960]
+  # - click: {at: [100, 200], space: screen, button: right}
+
+  # Keyboard input.
+  # - key: esc
+  # - hotkey: [ctrl, v]
+  # - type: "hello world"
+
+  # Gestures.
+  # - drag: {from: [500, 1500], to: [500, 500], duration: 0.5}
+  # - scroll: -3
+
+  # Click every match at once (e.g. collecting several rewards).
+  # - click_all: {template: reward_icon, limit: 10, delay: 0.25}
+
+  # Keep going while something is on screen.
+  # - while_found:
+  #     template: next_arrow
+  #     steps:
+  #       - find_click: {template: next_arrow}
+  #       - wait: 0.5
+
+  # Search only part of the screen -- faster and far fewer false matches.
+  # [x, y, width, height] relative to the content area; or region: screen.
+  # - find: {template: heart_button, region: [0, 800, 1080, 400]}
+
+  # Split large routines into files and call them.
+  # - run_flow: {flow: login, vars: {account: main}}
+
+  # Bail out early.
+  # - if_found:
+  #     template: error_banner
+  #     then:
+  #       - screenshot: error_banner
+  #       - stop: {message: "Error banner detected", success: false}
+
+  - log: "Done"

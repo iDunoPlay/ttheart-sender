@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Environments
+.venv/
+venv/
+env/
+
+# Tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Runtime output
+logs/
+*.log
+
+# Local overrides
+config.local.yaml
+.env
+
+# OS / editors
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
