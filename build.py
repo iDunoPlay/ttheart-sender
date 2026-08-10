@@ -1,13 +1,14 @@
 """Build the Windows .exe with PyInstaller.
 
-    python build.py                 one folder in dist/ttheart-sender (recommended)
-    python build.py --onefile       a single dist/ttheart-sender.exe
+    python build.py                 one folder in dist/ttheart-sender
+    python build.py --onefile       one self-contained .exe, no folder needed
     python build.py --console       keep a console window (for debugging)
 
-Either way ``config.yaml``, ``flows/`` and ``templates/`` are copied next to the
-.exe so they can be edited without rebuilding, *and* baked into the bundle so a
-lone .exe still runs. See ``default_app_root()`` in ttheart_sender/config.py for
-which copy wins.
+``config.yaml``, ``flows/`` and ``templates/`` are always baked into the bundle,
+so a lone .exe runs with no files beside it. The folder build also drops
+editable copies next to the .exe (``--with-data`` does the same for --onefile);
+those copies win when present. See ``default_app_root()`` in
+ttheart_sender/config.py for the exact rule.
 """
 
 from __future__ import annotations
@@ -41,7 +42,7 @@ def _add_data(source: Path, destination: str) -> List[str]:
     return ["--add-data", f"{source};{destination}"]
 
 
-def build(*, onefile: bool, console: bool, clean: bool) -> int:
+def build(*, onefile: bool, console: bool, clean: bool, with_data: bool = False) -> int:
     if not ENTRY.exists():
         raise SystemExit(f"Entry point missing: {ENTRY}")
 
@@ -92,9 +93,16 @@ def build(*, onefile: bool, console: bool, clean: bool) -> int:
     if result.returncode != 0:
         return result.returncode
 
-    target = (ROOT / "dist") if onefile else (ROOT / "dist" / NAME)
-    _copy_editable_data(target)
-    _report(target, onefile)
+    target = (ROOT / "dist" / f"{NAME}-portable") if onefile else (ROOT / "dist" / NAME)
+    target.mkdir(parents=True, exist_ok=True)
+    if onefile:
+        shutil.move(str(ROOT / "dist" / f"{NAME}.exe"), str(target / f"{NAME}.exe"))
+    # A one-file build is meant to be one file, so the editable copies are
+    # opt-in there -- emitting them by default would recreate the very folder
+    # the user asked to get rid of.
+    if with_data or not onefile:
+        _copy_editable_data(target)
+    _report(target, onefile, with_data)
     return 0
 
 
@@ -112,16 +120,24 @@ def _copy_editable_data(target: Path) -> None:
         shutil.copytree(source, target / name, dirs_exist_ok=True)
 
 
-def _report(target: Path, onefile: bool) -> None:
+def _report(target: Path, onefile: bool, with_data: bool) -> None:
     exe = target / f"{NAME}.exe"
     size = exe.stat().st_size / (1024 * 1024) if exe.exists() else 0.0
-    print("\n" + "=" * 62)
+    print("\n" + "=" * 66)
     print(f"Built {exe}  ({size:.1f} MB)")
-    if not onefile:
+    if onefile and not with_data:
+        print("Self-contained: copy that one file anywhere and run it.")
+        print("Drop a config.yaml (plus flows\\ and templates\\) beside it to")
+        print("override the built-in copies, or rebuild with --with-data to")
+        print("get editable copies emitted for you.")
+    elif onefile:
+        print("Self-contained, but the config.yaml / flows\\ / templates\\ next")
+        print("to it now take priority over the copies inside the .exe.")
+    else:
         print(f"Ship the whole {target.name}\\ folder -- the .exe needs _internal\\.")
     print("Double-click it: the icon appears in the system tray (next to the")
     print("clock; you may need to expand the overflow arrow the first time).")
-    print("=" * 62)
+    print("=" * 66)
 
 
 def main() -> int:
@@ -133,6 +149,11 @@ def main() -> int:
     )
     parser.add_argument(
         "--console", action="store_true", help="Keep a console window for log output"
+    )
+    parser.add_argument(
+        "--with-data",
+        action="store_true",
+        help="With --onefile, also emit editable config/flows/templates beside the .exe",
     )
     parser.add_argument(
         "--no-clean", action="store_true", help="Reuse the previous build cache"
@@ -147,7 +168,12 @@ def main() -> int:
             f"    {sys.executable} -m pip install pyinstaller"
         )
 
-    return build(onefile=args.onefile, console=args.console, clean=not args.no_clean)
+    return build(
+        onefile=args.onefile,
+        console=args.console,
+        clean=not args.no_clean,
+        with_data=args.with_data,
+    )
 
 
 if __name__ == "__main__":

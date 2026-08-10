@@ -1,0 +1,52 @@
+name: claim_mailbox
+description: Claim everything in an already-open mailbox
+
+# Shared building block, not a standalone routine. It assumes the mailbox is
+# already open and finished loading -- getting there is the caller's job,
+# because start.yaml and resume.yaml open it under different conditions.
+#
+# Use it from any other flow with:
+#
+#   - run_flow: claim_mailbox     # or the shorter alias: - call: claim_mailbox
+#
+# Improve the steps here once and every caller picks the change up.
+
+steps:
+    - find_click:
+        template: claim_all_button
+        timeout: 5
+
+    - wait: {min: 0.4, max: 0.7}
+
+    - find_click:
+        template: toggle_hearts_button
+        timeout: 3
+
+    - wait: {min: 0.2, max: 0.45}
+
+    - find_click:
+        template: toggle_medals_button
+        timeout: 3
+
+    - wait: {min: 0.4, max: 0.7}
+
+    - find_click:
+        template: claim_all_ok_button
+        timeout: 3
+
+    # Which of these two shows depends on whether there was anything to claim,
+    # and both fade on their own -- never worth failing the flow over.
+    - if_found:
+        template: gift_received
+        timeout: 4
+        then:
+          - find_click: gift_received
+
+    - if_found:
+        template: no_gift_can_claim_all
+        timeout: 4
+        then:
+          - find_click: no_gift_can_claim_all
+
+    - wait: {min: 0.4, max: 0.7}
+        

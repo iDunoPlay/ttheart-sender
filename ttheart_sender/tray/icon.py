@@ -133,7 +133,7 @@ class TrayIcon:
     # -- appearance ------------------------------------------------------
     def refresh(self) -> None:
         """Re-read the tooltip and icon from their factories."""
-        if not self._added or self._hwnd is None:
+        if not self._added or not self._alive():
             return
         flags = win32gui.NIF_MESSAGE | win32gui.NIF_TIP
         hicon = self._current_icon()
@@ -149,7 +149,7 @@ class TrayIcon:
 
     def notify(self, title: str, message: str, *, error: bool = False) -> None:
         """Show a balloon / toast from the tray icon."""
-        if not self._added or self._hwnd is None:
+        if not self._added or not self._alive():
             return
         icon_flag = win32gui.NIIF_ERROR if error else win32gui.NIIF_INFO
         payload = (
@@ -215,6 +215,9 @@ class TrayIcon:
             self._safely(self._show_menu)
         elif event == win32con.WM_LBUTTONDBLCLK and self._on_double_click:
             self._safely(self._on_double_click)
+        else:
+            # Balloon show/hide/timeout and hover events all arrive here.
+            log.debug("Unhandled tray event: %s", event)
 
     def _drain_callbacks(self) -> None:
         while True:
@@ -223,6 +226,10 @@ class TrayIcon:
             except IndexError:
                 return
             self._safely(callback)
+
+    def _alive(self) -> bool:
+        """True while our window still exists and can be messaged."""
+        return self._hwnd is not None and bool(win32gui.IsWindow(self._hwnd))
 
     @staticmethod
     def _safely(callback: Callable[[], None]) -> None:
@@ -314,7 +321,10 @@ class TrayIcon:
 
     # -- menu ------------------------------------------------------------
     def _show_menu(self) -> None:
-        if self._hwnd is None:
+        # TrackPopupMenu runs a nested message loop, so a WM_CLOSE can be
+        # dispatched (and the window destroyed) while a menu is still up. Check
+        # the handle on the way in, and again before touching it on the way out.
+        if not self._alive():
             return
         try:
             items = self._menu_factory()
@@ -347,7 +357,8 @@ class TrayIcon:
                 None,
             )
         finally:
-            win32gui.PostMessage(self._hwnd, win32con.WM_NULL, 0, 0)
+            if self._alive():
+                win32gui.PostMessage(self._hwnd, win32con.WM_NULL, 0, 0)
             # DestroyMenu frees attached submenus too, so only the root.
             try:
                 win32gui.DestroyMenu(hmenu)
@@ -355,7 +366,7 @@ class TrayIcon:
                 log.debug("DestroyMenu failed", exc_info=True)
 
         action = build.actions.get(command)
-        if action is not None:
+        if action is not None and self._alive():
             self._safely(action)
 
     def _build_menu(self, items: Sequence[MenuItem], build: _MenuBuild) -> int:

@@ -253,3 +253,33 @@ def test_shipped_icons_exist():
     from ttheart_sender.tray.app import ICON_IDLE, ICON_RUNNING
 
     assert ICON_IDLE.exists() and ICON_RUNNING.exists()
+
+
+# --------------------------------------------------------------------------
+# Teardown safety
+# --------------------------------------------------------------------------
+def test_icon_operations_are_no_ops_without_a_live_window(tray):
+    """TrackPopupMenu pumps messages, so the window can die mid-menu.
+
+    Everything that touches the handle has to tolerate that instead of raising
+    inside a window procedure.
+    """
+    icon = tray._icon
+    assert icon._alive() is False, "no window has been created yet"
+
+    icon._show_menu()
+    icon.refresh()
+    icon.notify("title", "message")
+    icon.quit()
+
+    icon._hwnd = 0xDEAD  # a handle whose window has been destroyed
+    assert icon._alive() is False
+    icon._show_menu()
+    icon.refresh()
+
+
+def test_tooltip_is_clipped_to_what_the_shell_accepts():
+    from ttheart_sender.tray.icon import _TOOLTIP_LIMIT, _clip
+
+    assert _clip("  spaced   out  ", 99) == "spaced out"
+    assert len(_clip("x" * 500, _TOOLTIP_LIMIT)) == _TOOLTIP_LIMIT

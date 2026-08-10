@@ -149,20 +149,26 @@ adding one is a single `Mode(...)` entry naming a flow in `flows/`.
 .\.venv\Scripts\python build.py
 ```
 
-That writes `dist\ttheart-sender\` — ship the **whole folder**; the `.exe` needs
-the `_internal\` directory beside it. Double-clicking it goes straight to the
-tray (no console window).
+Double-clicking the result goes straight to the tray — no console window.
 
-| Flag | Effect |
-| --- | --- |
-| *(none)* | One folder in `dist\ttheart-sender\` — fastest startup, recommended |
-| `--onefile` | A single `dist\ttheart-sender.exe` that unpacks itself on each launch |
-| `--console` | Keep a console window so log output is visible while debugging |
+| Flag | Output | Notes |
+| --- | --- | --- |
+| *(none)* | `dist\ttheart-sender\` | Ship the **whole folder**; the `.exe` needs `_internal\`. Starts in well under a second |
+| `--onefile` | `dist\ttheart-sender-portable\ttheart-sender.exe` | **One file, nothing else needed.** ~72 MB, ~4–5 s to start (it unpacks itself each launch) |
+| `--console` | either | Keep a console window so log output is visible while debugging |
+| `--with-data` | `--onefile` only | Also emit editable `config.yaml` / `flows\` / `templates\` beside the `.exe` |
 
-`config.yaml`, `flows\` and `templates\` are copied next to the `.exe` **and**
-baked inside it. The copies beside the `.exe` win, so you can retune a flow or
-re-snip a template without rebuilding; delete them and the built-in copies take
-over. Logs always land in `logs\` next to the `.exe`.
+`config.yaml`, `flows\` and `templates\` are **always baked into the `.exe`**, so
+the one-file build runs from an empty folder with no data files at all.
+
+The folder build additionally drops editable copies next to the `.exe`, and
+those copies take priority when present — so you can retune a flow or re-snip a
+template without rebuilding. Delete them and the built-in copies take over
+again. That override works for the one-file build too: drop a `config.yaml`
+beside it (add `flows\` and `templates\` if you want to change those as well).
+
+Logs always land in `logs\` next to the `.exe`, never inside the temporary
+unpack directory.
 
 To start it with Windows, put a shortcut to the `.exe` in
 `shell:startup` — add `--start` to its Target if you want it running on boot.
@@ -301,5 +307,5 @@ ttheart_tray.py      windowed entry point the .exe is built from
 .\.venv\Scripts\python -m pytest -q
 ```
 
-81 tests covering config, geometry, flow parsing, matching, the runner and the
+83 tests covering config, geometry, flow parsing, matching, the runner and the
 tray. They run headless — no emulator or screen access required.
