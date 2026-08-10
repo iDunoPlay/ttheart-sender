@@ -1,0 +1,293 @@
+name: click_tsumtsum
+description: Detect LDPlayer, launch TsumTsum, and clear the root-detection prompt
+
+steps:
+  # `python main.py run` already detects + parks LDPlayer before this flow
+  # starts. This step is here too so the flow still works standalone if it's
+  # ever called from another flow via run_flow.
+  - prepare_window
+
+  - find_click:
+      template: tsumtsum
+      timeout: 30
+      save_as: tsumtsum_pos
+
+  # The app shows a "Root Detection" dialog on some launches, not every time
+  # (only when LDPlayer looks rooted to it, which it usually does). Optional
+  # so a launch that skips the dialog doesn't fail the flow.
+  - wait_for:
+      template: permit_button
+      timeout: 30
+
+  - find_click:
+      template: permit_button
+      timeout: 8
+    optional: true
+
+  - wait: {min: 4.5, max: 6}
+
+  # Second tap at the exact same spot as the first -- not a re-scan, since the
+  # icon may already be mid-launch (highlighted/animating) and no longer match
+  # the template.
+  # Skip app animation
+  - click:
+      at: ${tsumtsum_pos}
+      space: screen
+
+  # Click tap to start
+  - find_click:
+      template: tap_to_start_button
+      timeout: 8
+
+  # Block here until the main screen has actually loaded -- don't touch
+  # anything else until play_button is on screen.
+  - wait_for:
+      template: play_button
+      timeout: 30
+
+  # Close any announcement(s). No blind wait needed -- find_click's own
+  # timeout already polls until the button appears, so each iteration gives
+  # the next announcement 3s to render. The first iteration where nothing
+  # shows up in that window is the exit: find_click fails, stop_on_failure
+  # ends the loop, and `optional` on the repeat itself keeps that expected
+  # failure from failing the flow. times caps a stuck screen at 20 clicks.
+  - repeat:
+      times: 20
+      stop_on_failure: true
+      delay: {min: 0.4, max: 0.7}
+      steps:
+        - find_click:
+            template: announcement_close_button
+            timeout: 3
+    optional: true
+
+  # Everything below is the repeatable cycle: check mailbox, do the ranking /
+  # heart-sending pass, go home, and loop back to the mailbox check again.
+  # Runs until you stop it (F12) -- this is a live bot loop, not a one-shot.
+  - repeat:
+      forever: true
+      steps:
+        # Only bother with the whole mailbox-claiming sequence if there's
+        # actually a notification badge to act on.
+        - if_found:
+            template: mailbox_with_red
+            then:
+              # Receiving all gift from mailbox
+              - find_click:
+                  template: mailbox_with_red
+                  timeout: 5
+
+              - wait_until_gone:
+                  template: mailbox_loading
+                  timeout: 5
+
+              - find_click:
+                  template: claim_all_button
+                  timeout: 5
+
+              - wait: {min: 0.4, max: 0.7}
+
+              - find_click:
+                  template: toggle_hearts_button
+                  timeout: 3
+
+              - wait: {min: 0.2, max: 0.45}
+
+              - find_click:
+                  template: toggle_medals_button
+                  timeout: 3
+
+              - wait: {min: 0.4, max: 0.7}
+
+              - find_click:
+                  template: claim_all_ok_button
+                  timeout: 3
+
+              - find_click:
+                  template: gift_received
+                  timeout: 4
+                optional: true
+
+              - find_click:
+                  template: no_gift_can_claim_all
+                  timeout: 4
+                optional: true
+
+              - wait: {min: 0.4, max: 0.7}
+
+              - find_click:
+                  template: announcement_close_button
+                  timeout: 4
+
+              - wait: {min: 0.4, max: 0.7}
+
+        # Begin send heart
+
+        - find_click:
+            template: rankings_button
+            timeout: 4
+
+        - wait_for:
+            template: weekly_ranking
+            timeout: 4
+
+        # Scroll the list by repeating the drag until rank_1 is on screen. Checks
+        # before each drag, so it stops as soon as it's already visible without an
+        # extra unnecessary swipe. require_found: if a popup covers the list and
+        # rank_1 never shows up within 20 tries, fail loudly instead of silently
+        # continuing on to send-heart logic against the wrong screen.
+        #
+        # rank_1/2/3 badges are the same shape, differing only by color
+        # (gold/silver/bronze) and digit, and the shared shape dominates the
+        # match score -- grayscale (ignores color) matched rank_1 against the
+        # rank 2 badge at 0.977, and even color matching alone still hit rank
+        # 3 at 0.963 elsewhere on screen. Two fixes combined:
+        #   - region: only the fixed band right below the sticky "Weekly
+        #     Ranking" header, where the CURRENT top-of-list entry renders.
+        #     Structurally excludes every row except that one, regardless of
+        #     which rank happens to be sitting in it.
+        #   - grayscale: false: for when the wrong rank is still the
+        #     topmost/only-candidate row (e.g. rank 2 before any scrolling),
+        #     color drops that false match to 0.77, safely under threshold.
+        - repeat:
+            until_found: rank_1
+            max_iterations: 20
+            delay: {min: 0.3, max: 0.55}
+            require_found: true
+            grayscale: false
+            region: [0, 150, 578, 270]
+            steps:
+              - drag:
+                  from: [488, 317]
+                  to: [481, 964]
+                  duration: {min: 0.6, max: 0.9}
+
+        # Work through the ranking list: send a heart to whoever needs one, or
+        # scroll for more names, until the footer comes into view.
+        #
+        # ranking_footer can already be on screen alongside an unsent
+        # send_heart -- e.g. a short list needs no scrolling at all to show
+        # everyone plus the footer. `until_found: ranking_footer` checks
+        # BEFORE running steps each iteration, so that footer being visible
+        # from the very first check meant send_heart never got tried, even
+        # though it was right there. Fix: drain every send_heart currently on
+        # screen with while_found first (handles the whole visible batch,
+        # footer or not), then scroll-and-drain in the footer-gated loop for
+        # whatever's further down.
+        - while_found:
+            template: send_heart
+            delay: {min: 0.2, max: 0.45}
+            max_iterations: 10
+            steps:
+              - find_click:
+                  template: send_heart
+                  timeout: 3
+              - wait: {min: 0.4, max: 0.7}
+              - find_click:
+                  template: claim_all_ok_button
+                  timeout: 3
+              # Just a fading confirmation toast, not a button -- not worth
+              # failing the loop over if the timing window is missed.
+              - find_click:
+                  template: heart_sent
+                  timeout: 3
+                optional: true
+
+        - repeat:
+            until_found: ranking_footer
+            max_iterations: 30
+            delay: {min: 0.3, max: 0.55}
+            require_found: true
+            steps:
+              - drag:
+                  from: [492, 698]
+                  to: [490, 318]
+                  duration: {min: 0.6, max: 0.9}
+
+              - while_found:
+                  template: send_heart
+                  delay: {min: 0.2, max: 0.45}
+                  max_iterations: 10
+                  steps:
+                    - find_click:
+                        template: send_heart
+                        timeout: 3
+                    - wait: {min: 0.4, max: 0.7}
+                    - find_click:
+                        template: claim_all_ok_button
+                        timeout: 3
+                    - find_click:
+                        template: heart_sent
+                        timeout: 3
+                      optional: true
+
+        # go home to refresh loop
+        - find_click:
+            template: home_button
+            timeout: 3
+
+        - wait: 3
+
+        # play game
+        - chance:
+            percent: 10
+            then:
+            # Main screen -> the pre-match screen with the equipped tsum and Start.
+            - find_click:
+                template: play_button
+                timeout: 15
+                
+            - wait: 3
+
+            - find_click:
+                template: start_button
+                timeout: 15
+
+            # Nothing is dragged until the in-play UI is actually up. play_tsum has no
+            # countdown of its own, so this wait_for IS the countdown -- and it waits on
+            # the real thing rather than guessing how long the 3-2-1 takes.
+            - wait_for:
+                template: gameplay_footer
+                timeout: 20
+
+            # The round itself. It ends when the results screen appears; `duration` is
+            # only the backstop for a round where that template never matches, so keep it
+            # comfortably longer than a real round (60s, plus whatever FEVER adds).
+            #
+            # Every knob the `play` command has is available under `options:` -- e.g.
+            # {min_chain: 4, per_step: 0.006, base_only: true}. Unknown names are
+            # rejected when the step runs rather than silently ignored.
+            - play_tsum:
+                duration: 90
+                until_found: timeup
+                require_played: 1
+                options:
+                    min_chain: 3
+                    max_chain: 8
+
+            - find_click:
+                template: cancel_button
+                timeout: 5
+              optional: true
+
+            # An alternative ending, if `scoreboard` turns out to also match during play:
+            # stop on the timer instead by swapping the two lines above for
+            #   until_found: gameplay_clock_zero
+            # Check which one is safe with `python main.py find scoreboard` mid-round.
+
+            - wait_for:
+                template: scoreboard
+                timeout: 30
+
+            - repeat:
+                times: 8
+                stop_on_failure: true
+                delay: {min: 0.5, max: 0.9}
+                steps:
+                    - find_click:
+                        template: announcement_close_button
+                        timeout: 3
+
+        - wait: {min: 75, max: 110}
+
+

@@ -103,8 +103,72 @@ also aborts (pyautogui's fail-safe).
 | `flows` / `validate [FLOW]` | List flows / parse them without running |
 | `actions` | List every action the flow language supports |
 | `run FLOW [--var K=V] [--loops N] [--dry-run]` | Run a flow |
+| `tray [--mode M] [--start]` | Sit in the system tray; right-click to pick a mode |
 
 Global flags: `-c/--config`, `-v/--verbose`, `-q/--quiet`.
+
+## Tray mode
+
+For day-to-day use there is no need for a console window. `python main.py tray`
+(or the built `.exe`) puts a heart icon next to the clock — grey when idle, red
+while a flow is running.
+
+Right-click it:
+
+```
+Idle (Resume)          <- status, not clickable
+─────────────
+Mode        > ● Resume     python main.py run resume
+              ○ Start      python main.py run start
+              ○ Play       python main.py run play  (repeats until stopped)
+─────────────
+Start Resume           <- runs whichever mode is ticked
+Stop (F12)
+─────────────
+Open logs folder
+─────────────
+Exit
+```
+
+Picking a mode only *selects* it; **Start** is what launches it. **Stop** does
+exactly what pressing **F12** does — both set the same flag, which every flow
+checks between steps and during waits, so a run stops within a second or two
+even in the middle of a long pause. Double-clicking the icon is a Start/Stop
+toggle, and a balloon tells you how each run ended.
+
+Only one tray instance runs at a time; launching a second one exits immediately
+rather than having two bots fight over the same emulator.
+
+Modes live in [`ttheart_sender/tray/modes.py`](ttheart_sender/tray/modes.py) —
+adding one is a single `Mode(...)` entry naming a flow in `flows/`.
+
+## Building the .exe
+
+```powershell
+.\.venv\Scripts\pip install pyinstaller
+.\.venv\Scripts\python build.py
+```
+
+That writes `dist\ttheart-sender\` — ship the **whole folder**; the `.exe` needs
+the `_internal\` directory beside it. Double-clicking it goes straight to the
+tray (no console window).
+
+| Flag | Effect |
+| --- | --- |
+| *(none)* | One folder in `dist\ttheart-sender\` — fastest startup, recommended |
+| `--onefile` | A single `dist\ttheart-sender.exe` that unpacks itself on each launch |
+| `--console` | Keep a console window so log output is visible while debugging |
+
+`config.yaml`, `flows\` and `templates\` are copied next to the `.exe` **and**
+baked inside it. The copies beside the `.exe` win, so you can retune a flow or
+re-snip a template without rebuilding; delete them and the built-in copies take
+over. Logs always land in `logs\` next to the `.exe`.
+
+To start it with Windows, put a shortcut to the `.exe` in
+`shell:startup` — add `--start` to its Target if you want it running on boot.
+
+The icons are generated, not hand-drawn: `python scripts/make_icons.py` rewrites
+`ttheart_sender/tray/assets/*.ico` if you change the artwork.
 
 ## Coordinates
 
@@ -150,7 +214,7 @@ area, or `screen`).
 
 Actions: `find`, `find_click` (`tap`), `click_all`, `wait_for`,
 `wait_until_gone`, `click`, `move`, `drag`, `scroll`, `key`, `hotkey`, `type`,
-`wait`, `log`, `set`, `screenshot`, `if_found`, `repeat`, `while_found`,
+`wait`, `log`, `set`, `screenshot`, `if_found`, `chance`, `repeat`, `while_found`,
 `run_flow`, `prepare_window`, `stop`. Run `python main.py actions` for the
 one-line summary of each, and read [flows/example.yaml](flows/example.yaml) for
 an annotated tour of all of them.
@@ -226,6 +290,9 @@ ttheart_sender/
   screen/            capture (mss), template library, matcher (OpenCV)
   control/           mouse, keyboard, stop key
   automation/        registry, flow parser, params, context, actions, runner
+  tray/              system tray icon, menu, mode definitions, run service
+build.py             PyInstaller build (see "Building the .exe")
+ttheart_tray.py      windowed entry point the .exe is built from
 ```
 
 ## Tests
@@ -234,5 +301,5 @@ ttheart_sender/
 .\.venv\Scripts\python -m pytest -q
 ```
 
-53 tests covering config, geometry, flow parsing, matching and the runner. They
-run headless — no emulator or screen access required.
+81 tests covering config, geometry, flow parsing, matching, the runner and the
+tray. They run headless — no emulator or screen access required.

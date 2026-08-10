@@ -1,0 +1,88 @@
+name: play_round
+description: Start a round from the main screen, play the board, clear the results
+
+# Assumes the main screen is already up (play_button visible) -- `start.yaml`
+# gets you there. Call it from another flow with:
+#
+#   - run_flow: play
+#
+# and stop it at any time with the stop key (F12 by default).
+
+steps:
+  # Clear anything left over from a previous round (the score tally, the High
+  # Score popup, a login bonus) before looking for Play. Without this the flow
+  # only works from a clean main screen, which is exactly the state it is NOT
+  # in when it loops back around after playing.
+  - repeat:
+      times: 6
+      stop_on_failure: true
+      delay: {min: 0.4, max: 0.7}
+      steps:
+        - find_click:
+            template: announcement_close_button
+            timeout: 3
+    optional: true
+
+  # Main screen -> the pre-match screen with the equipped tsum and Start.
+  - find_click:
+      template: play_button
+      timeout: 15
+      
+  - wait: 1
+
+  - find_click:
+      template: start_button
+      timeout: 15
+
+  # Nothing is dragged until the in-play UI is actually up. play_tsum has no
+  # countdown of its own, so this wait_for IS the countdown -- and it waits on
+  # the real thing rather than guessing how long the 3-2-1 takes.
+  - wait_for:
+      template: gameplay_footer
+      timeout: 20
+
+  # The round itself. It ends when the results screen appears; `duration` is
+  # only the backstop for a round where that template never matches, so keep it
+  # comfortably longer than a real round (60s, plus whatever FEVER adds).
+  #
+  # Every knob the `play` command has is available under `options:` -- e.g.
+  # {min_chain: 4, per_step: 0.006, base_only: true}. Unknown names are
+  # rejected when the step runs rather than silently ignored.
+  - play_tsum:
+      duration: 90
+      until_found: timeup
+      require_played: 1
+      options:
+        min_chain: 3
+        max_chain: 8
+
+  - find_click:
+      template: cancel_button
+      timeout: 5
+    optional: true
+
+  # An alternative ending, if `scoreboard` turns out to also match during play:
+  # stop on the timer instead by swapping the two lines above for
+  #   until_found: gameplay_clock_zero
+  # Check which one is safe with `python main.py find scoreboard` mid-round.
+
+  - wait_for:
+      template: scoreboard
+      timeout: 30
+
+  # Results, coin bonus, "next" -- these tap through whatever the game puts up
+  # until the main screen is back. Optional so a screen that doesn't appear
+  # this run doesn't fail the flow.
+  - repeat:
+      times: 8
+      stop_on_failure: true
+      delay: {min: 0.5, max: 0.9}
+      steps:
+        - find_click:
+            template: announcement_close_button
+            timeout: 3
+    optional: true
+
+  - wait_for:
+      template: play_button
+      timeout: 30

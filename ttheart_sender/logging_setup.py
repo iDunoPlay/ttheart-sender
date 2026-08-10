@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import logging.handlers
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -31,10 +32,13 @@ def setup_logging(
         handler.close()
     root.setLevel(logging.DEBUG)
 
-    console = logging.StreamHandler()
-    console.setLevel(numeric_level)
-    console.setFormatter(logging.Formatter(_CONSOLE_FORMAT, _TIME_FORMAT))
-    root.addHandler(console)
+    # A windowed (--noconsole) build has no stderr at all, and a StreamHandler
+    # wrapped around None swallows every record into a logging-internal error.
+    if sys.stderr is not None:
+        console = logging.StreamHandler()
+        console.setLevel(numeric_level)
+        console.setFormatter(logging.Formatter(_CONSOLE_FORMAT, _TIME_FORMAT))
+        root.addHandler(console)
 
     if log_dir is not None:
         log_dir = Path(log_dir)

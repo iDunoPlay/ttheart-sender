@@ -340,6 +340,35 @@ def act_if_found(ctx: RunContext, params: Params) -> ActionResult:
     return ActionResult(bool(ctx.execute(steps)), match)
 
 
+@action("chance", aliases=("maybe",), primary="p", child_keys=("then", "else"),
+        summary="Roll the dice and branch on the outcome")
+def act_chance(ctx: RunContext, params: Params) -> ActionResult:
+    # `chance: 0.3`, `chance: {percent: 30, then: [...]}`. The roll itself is
+    # never a failure -- only the branch's own steps can fail the step.
+    if params.has("percent"):
+        probability = params.number("percent") / 100.0
+    else:
+        probability = params.number("p", 0.5)
+    probability = min(1.0, max(0.0, probability))
+    save_as = params.optional_string("save_as", None)
+    then_steps = params.steps("then")
+    else_steps = params.steps("else")
+
+    roll = random.random()
+    hit = roll < probability
+    if save_as:
+        ctx.set_var(save_as, hit)
+
+    log.info(
+        "%schance %.0f%% -> %s (roll %.3f)",
+        ctx.indent, probability * 100, "then" if hit else "else", roll,
+    )
+    steps = then_steps if hit else else_steps
+    if not steps:
+        return ActionResult.ok(hit)
+    return ActionResult(bool(ctx.execute(steps)), hit)
+
+
 @action("repeat", child_keys=("steps",), summary="Repeat nested steps")
 def act_repeat(ctx: RunContext, params: Params) -> ActionResult:
     steps = params.steps("steps")

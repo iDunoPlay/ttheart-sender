@@ -119,6 +119,58 @@ def test_set_and_variable_interpolation_across_steps(caplog):
     assert "hi world" in caplog.text
 
 
+def test_chance_takes_the_then_branch_when_the_roll_lands():
+    report, ctx = run(
+        """
+        name: t
+        steps:
+          - chance:
+              percent: 100
+              save_as: rolled
+              then:
+                - set: {branch: then}
+              else:
+                - set: {branch: else}
+        """
+    )
+    assert report.success
+    assert ctx.variables["branch"] == "then"
+    assert ctx.variables["rolled"] is True
+
+
+def test_chance_takes_the_else_branch_when_the_roll_misses():
+    report, ctx = run(
+        """
+        name: t
+        steps:
+          - chance:
+              p: 0
+              save_as: rolled
+              then:
+                - set: {branch: then}
+              else:
+                - set: {branch: else}
+        """
+    )
+    assert report.success
+    assert ctx.variables["branch"] == "else"
+    assert ctx.variables["rolled"] is False
+
+
+def test_chance_without_a_matching_branch_is_not_a_failure():
+    report, _ = run(
+        """
+        name: t
+        steps:
+          - chance:
+              p: 0
+              then:
+                - set: {branch: then}
+        """
+    )
+    assert report.success
+
+
 def test_repeat_runs_n_times_and_exposes_the_counter():
     report, ctx = run(
         """

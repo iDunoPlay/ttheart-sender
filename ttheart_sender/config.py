@@ -34,10 +34,37 @@ def default_app_root() -> Path:
       *not* the PyInstaller temp extraction dir that ``__file__`` would point
       into. This is what lets someone drop ``config.yaml`` / ``templates/`` /
       ``flows/`` beside the .exe and edit them without rebuilding it.
+
+      A one-file build has no such directory until the user creates one, so if
+      there is no ``config.yaml`` next to the .exe we fall back to the copies
+      baked into the bundle. Dropping a ``config.yaml`` beside the .exe is
+      therefore the switch that takes over the whole data directory.
     """
     if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
+        exe_dir = Path(sys.executable).resolve().parent
+        if (exe_dir / DEFAULT_CONFIG_NAME).exists():
+            return exe_dir
+        return bundle_dir() or exe_dir
     return Path(__file__).resolve().parent.parent
+
+
+def bundle_dir() -> Optional[Path]:
+    """The PyInstaller one-file extraction directory, if we are running in one."""
+    meipass = getattr(sys, "_MEIPASS", None)
+    return Path(meipass).resolve() if meipass else None
+
+
+def default_output_root(root: Path) -> Path:
+    """Where logs and debug screenshots go.
+
+    Normally alongside everything else, but a one-file bundle is unpacked into
+    a temp directory that is deleted on exit -- logs written there would be
+    gone before anyone could read them. Send those next to the .exe instead.
+    """
+    bundle = bundle_dir()
+    if bundle is not None and root == bundle:
+        return Path(sys.executable).resolve().parent
+    return root
 
 
 # --------------------------------------------------------------------------
@@ -153,11 +180,18 @@ class Config:
 
     #: Directory the config was loaded from; all relative paths resolve here.
     root: Path = field(default_factory=Path.cwd)
+    #: Where runtime output is written. Same as ``root`` except inside a
+    #: one-file .exe, whose ``root`` is a temp directory wiped on exit.
+    output_root: Path = field(default_factory=Path.cwd)
 
     # -- path helpers ----------------------------------------------------
     def resolve(self, value: Union[str, Path]) -> Path:
         path = Path(value)
         return path if path.is_absolute() else (self.root / path)
+
+    def resolve_output(self, value: Union[str, Path]) -> Path:
+        path = Path(value)
+        return path if path.is_absolute() else (self.output_root / path)
 
     @property
     def templates_dir(self) -> Path:
@@ -169,11 +203,11 @@ class Config:
 
     @property
     def log_dir(self) -> Path:
-        return self.resolve(self.app.log_dir)
+        return self.resolve_output(self.app.log_dir)
 
     @property
     def debug_dir(self) -> Path:
-        return self.resolve(self.matching.debug_dir)
+        return self.resolve_output(self.matching.debug_dir)
 
 
 # --------------------------------------------------------------------------
@@ -206,8 +240,9 @@ def load_config(path: Optional[Union[str, Path]] = None, *, root: Optional[Path]
     if local_path.exists():
         data = deep_merge(data, _read_yaml_mapping(local_path))
 
-    config = from_dict(Config, data, exclude={"root"})
+    config = from_dict(Config, data, exclude={"root", "output_root"})
     config.root = project_root
+    config.output_root = default_output_root(project_root)
     return config
 
 

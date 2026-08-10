@@ -12,8 +12,10 @@
     python main.py flows                list available flows
     python main.py actions              list every action the flow language supports
     python main.py run send_heart       run a flow
+    python main.py play                 play a round of Tsum Tsum (--loops 0 = keep going)
+    python main.py tray                 sit in the system tray; right-click to pick a mode
 
-Any command that touches the screen (prepare/shot/snip/point/find/run) detects
+Any command that touches the screen (prepare/shot/snip/point/find/run/play) detects
 LDPlayer and parks it at the top-left before doing anything else -- that's
 what makes coordinates in flows and templates stable. Skip it with the
 global --no-window (don't attach at all) or --no-prepare (attach but leave
@@ -34,6 +36,7 @@ from .automation.flow import list_flows
 from .automation.registry import registered_actions
 from .exceptions import TTHeartError
 from .geometry import Rect
+from .tray.modes import DEFAULT_MODE, MODES
 
 log = logging.getLogger(__name__)
 
@@ -126,6 +129,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_validate.add_argument("flow", nargs="?", help="Flow name; omit to validate every flow")
     p_validate.set_defaults(func=cmd_validate, needs_window=False)
 
+    p_play = sub.add_parser(
+        "play",
+        help="Play rounds of Tsum Tsum (the 'play' flow: Play -> Start -> board -> results)",
+    )
+    p_play.add_argument("--loops", type=int, default=1,
+                        help="How many rounds to play (0 = keep going until the stop key)")
+    p_play.add_argument("--loop-delay", type=float, default=0.0,
+                        help="Seconds between rounds")
+    p_play.add_argument("--flow", default="play",
+                        help="Flow to run; only change this if you copied play.yaml")
+    p_play.set_defaults(func=cmd_run, needs_window=True, var=[], dry_run=False)
+
     p_run = sub.add_parser("run", help="Run a flow")
     p_run.add_argument("flow", help="Flow name, e.g. send_heart")
     p_run.add_argument(
@@ -139,6 +154,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--loop-delay", type=float, default=0.0, help="Seconds between loops")
     p_run.add_argument("--dry-run", action="store_true", help="Log clicks instead of performing them")
     p_run.set_defaults(func=cmd_run, needs_window=True)
+
+    p_tray = sub.add_parser(
+        "tray", help="Run in the system tray; right-click the icon to pick a mode"
+    )
+    p_tray.add_argument(
+        "--mode",
+        default=DEFAULT_MODE,
+        choices=[mode.key for mode in MODES],
+        help=f"Mode selected on launch (default: {DEFAULT_MODE})",
+    )
+    p_tray.add_argument(
+        "--start",
+        action="store_true",
+        help="Start that mode straight away instead of waiting for a click",
+    )
+    # The emulator is looked up per run, not at launch: the tray is expected to
+    # sit there before LDPlayer is even open (that is what 'start' mode is for).
+    p_tray.set_defaults(func=cmd_tray, needs_window=False)
 
     return parser
 
@@ -348,6 +381,12 @@ def cmd_validate(app: Application, args: argparse.Namespace) -> int:
     return 1 if failures else 0
 
 
+def cmd_tray(app: Application, args: argparse.Namespace) -> int:
+    from .tray import run_tray
+
+    return run_tray(app, mode=args.mode, autostart=args.start)
+
+
 def cmd_run(app: Application, args: argparse.Namespace) -> int:
     variables = _parse_vars(args.var)
     report = app.run_flow(
@@ -402,7 +441,7 @@ def _count_steps(steps) -> int:
 #: Every subcommand name, used to detect "the user didn't pass one".
 _COMMANDS = {
     "windows", "detect", "prepare", "shot", "snip", "point", "find",
-    "templates", "flows", "actions", "validate", "run",
+    "templates", "flows", "actions", "validate", "run", "play", "tray",
 }
 
 

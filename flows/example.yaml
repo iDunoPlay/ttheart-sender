@@ -32,6 +32,17 @@ steps:
         - find_click: {template: popup_close}
         - wait: 0.4
 
+  # Dice roll: run the `then` branch this often, the `else` branch otherwise.
+  # `percent: 20` and `p: 0.2` are the same thing; `save_as` keeps the outcome
+  # as a variable. Both branches are optional -- with only `then`, a miss just
+  # skips it (never a failure).
+  - chance:
+      percent: 20
+      save_as: took_a_break
+      then:
+        - log: "Idling for a bit"
+        - wait: {min: 3, max: 8}
+
   # --- the main loop ----------------------------------------------------
   - repeat:
       times: ${taps}
