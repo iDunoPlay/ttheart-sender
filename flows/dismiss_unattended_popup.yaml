@@ -1,0 +1,19 @@
+name: dismiss_unattended_popup
+description: Dismiss all unwanted popup
+
+steps:
+  - find_click:
+      template: announcement_close_button
+      timeout: 2
+
+  - if_found:
+      template: store_notification
+      timeout: 2
+      then:
+        - find_click: {template: cancel_button, timeout: 3}
+
+  - if_found:
+      template: new_box_notification
+      timeout: 2
+      then:
+        - find_click: {template: cancel_button, timeout: 3}

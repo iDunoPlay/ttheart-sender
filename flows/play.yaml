@@ -1,7 +1,7 @@
 name: play_round
 description: Start a round from the main screen, play the board, clear the results
 
-# Assumes the main screen is already up (play_button visible) -- `start.yaml`
+# Assumes the main screen is already up (play_button visible) -- `launch.yaml`
 # gets you there. Call it from another flow with:
 #
 #   - run_flow: play

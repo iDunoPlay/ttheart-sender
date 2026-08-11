@@ -15,6 +15,7 @@ import win32api
 import win32event
 import winerror
 
+from ..version import __version__
 from .icon import MenuItem, TrayIcon, separator
 from .modes import DEFAULT_MODE, MODES
 from .service import AutomationService, RunState
@@ -22,6 +23,9 @@ from .service import AutomationService, RunState
 log = logging.getLogger(__name__)
 
 APP_TITLE = "ttheart-sender"
+#: Shown in the menu and the tooltip, so a screenshot of the tray is enough to
+#: tell which build someone is running.
+APP_VERSION = f"{APP_TITLE} v{__version__}"
 #: One tray per session -- two of them would fight over the same emulator.
 MUTEX_NAME = "ttheart-sender-tray-singleton"
 
@@ -33,12 +37,20 @@ ICON_RUNNING = _ASSETS / "tray-running.ico"
 class TrayApp:
     """The tray front-end: a mode picker, Start/Stop, and a way out."""
 
-    def __init__(self, app, *, mode: str = DEFAULT_MODE, autostart: bool = False) -> None:
+    def __init__(
+        self,
+        app,
+        *,
+        mode: str = DEFAULT_MODE,
+        play: bool = False,
+        autostart: bool = False,
+    ) -> None:
         self._app = app
         self._autostart = autostart
         self._service = AutomationService(
             app,
             mode=mode,
+            play=play,
             on_change=self._on_change,
             on_notify=self._on_notify,
         )
@@ -58,7 +70,8 @@ class TrayApp:
             return 1
         try:
             log.info(
-                "Tray started -- right-click the icon to pick a mode. Stop key: %s",
+                "%s started -- right-click the icon to pick a mode. Stop key: %s",
+                APP_VERSION,
                 str(self._app.config.runner.stop_key).upper(),
             )
             if self._autostart:
@@ -88,9 +101,17 @@ class TrayApp:
         stop_label = f"Stop ({stop_key})" if stop_key else "Stop"
 
         return [
+            MenuItem(label=APP_VERSION, enabled=False),
             MenuItem(label=self._service.status_text(), enabled=False),
             separator(),
             MenuItem(label="Mode", items=modes),
+            # A tick, not a mode: the send-hearts cycle either rolls the dice on
+            # playing a round or it never does. Takes effect on the next Start.
+            MenuItem(
+                label="Play rounds",
+                action=self._service.toggle_play,
+                checked=self._service.play,
+            ),
             separator(),
             MenuItem(
                 label=f"Start {current.label}",
@@ -111,7 +132,7 @@ class TrayApp:
 
     # -- presentation ----------------------------------------------------
     def _tooltip(self) -> str:
-        return f"{APP_TITLE} - {self._service.status_text()}"
+        return f"{APP_VERSION} - {self._service.status_text()}"
 
     def _icon_path(self) -> Optional[Path]:
         return ICON_RUNNING if self._service.busy else ICON_IDLE

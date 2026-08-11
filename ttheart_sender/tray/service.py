@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import threading
 from enum import Enum
-from typing import Callable, Optional
+from typing import Any, Callable, Dict, Optional
 
 from ..exceptions import TTHeartError
 from .modes import DEFAULT_MODE, MODES, Mode, get_mode
@@ -22,6 +22,13 @@ log = logging.getLogger(__name__)
 #: stop request. Runs check the stop flag between steps and during waits, so
 #: this only ever expires if a single action is wedged.
 SHUTDOWN_TIMEOUT = 8.0
+
+#: Flow variable holding the odds (in percent) that a cycle plays a round.
+#: launch.yaml / resume.yaml declare their own value; the tray overrides it with
+#: :data:`PLAY_CHANCE_OFF` unless the user ticks "Play rounds".
+PLAY_CHANCE_VAR = "play_chance_percent"
+#: What that variable becomes while the tray toggle is off -- never play.
+PLAY_CHANCE_OFF = 0
 
 
 class RunState(Enum):
@@ -38,11 +45,13 @@ class AutomationService:
         app,
         *,
         mode: str = DEFAULT_MODE,
+        play: bool = False,
         on_change: Optional[Callable[[], None]] = None,
         on_notify: Optional[Callable[[str, str, bool], None]] = None,
     ) -> None:
         self._app = app
         self._mode: Mode = get_mode(mode) or MODES[0]
+        self._play = bool(play)
         self._state = RunState.IDLE
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.RLock()
@@ -54,6 +63,12 @@ class AutomationService:
     def mode(self) -> Mode:
         with self._lock:
             return self._mode
+
+    @property
+    def play(self) -> bool:
+        """Whether a run is allowed to break off and play a round."""
+        with self._lock:
+            return self._play
 
     @property
     def state(self) -> RunState:
@@ -95,6 +110,31 @@ class AutomationService:
         self._on_change()
         return True
 
+    def set_play(self, enabled: bool) -> bool:
+        """Turn the play-a-round dice roll on or off for the next Start.
+
+        Like :meth:`set_mode` this only decides what the *next* run is handed:
+        a live run keeps the variables it was started with.
+        """
+        enabled = bool(enabled)
+        with self._lock:
+            if self._play is enabled:
+                return False
+            self._play = enabled
+        log.info("Play rounds %s (%s)", "on" if enabled else "off", self._describe_play())
+        self._on_change()
+        return True
+
+    def toggle_play(self) -> bool:
+        return self.set_play(not self.play)
+
+    def _describe_play(self) -> str:
+        return "flow default" if self.play else f"{PLAY_CHANCE_VAR}={PLAY_CHANCE_OFF}"
+
+    def _variables(self) -> Optional[Dict[str, Any]]:
+        """Overrides for the next run; ``None`` leaves the flow's own vars be."""
+        return None if self.play else {PLAY_CHANCE_VAR: PLAY_CHANCE_OFF}
+
     def start(self) -> bool:
         """Run the selected mode. Does nothing if a run is already going."""
         with self._lock:
@@ -105,7 +145,9 @@ class AutomationService:
             self._state = RunState.RUNNING
             self._thread = threading.Thread(
                 target=self._run,
-                args=(mode,),
+                # Snapshot the overrides here so a mid-run toggle cannot change
+                # what this run was started with.
+                args=(mode, self._variables()),
                 name=f"ttheart-{mode.key}",
                 daemon=True,
             )
@@ -141,7 +183,7 @@ class AutomationService:
                 log.warning("Automation thread did not stop within %.0fs", timeout)
 
     # -- worker ----------------------------------------------------------
-    def _run(self, mode: Mode) -> None:
+    def _run(self, mode: Mode, variables: Optional[Dict[str, Any]] = None) -> None:
         log.info("=== tray: %s (%s) ===", mode.label, mode.command)
         try:
             self._app.stop.reset()
@@ -151,6 +193,7 @@ class AutomationService:
             self._app.startup(require_window=True, prepare=True)
             report = self._app.run_flow(
                 mode.flow,
+                variables=variables,
                 loops=mode.loops,
                 loop_delay=mode.loop_delay,
             )

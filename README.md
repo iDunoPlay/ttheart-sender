@@ -103,7 +103,7 @@ also aborts (pyautogui's fail-safe).
 | `flows` / `validate [FLOW]` | List flows / parse them without running |
 | `actions` | List every action the flow language supports |
 | `run FLOW [--var K=V] [--loops N] [--dry-run]` | Run a flow |
-| `tray [--mode M] [--start]` | Sit in the system tray; right-click to pick a mode |
+| `tray [--mode M] [--start] [--play]` | Sit in the system tray; right-click to pick a mode |
 
 Global flags: `-c/--config`, `-v/--verbose`, `-q/--quiet`.
 
@@ -116,11 +116,13 @@ while a flow is running.
 Right-click it:
 
 ```
+ttheart-sender v0.1.0  <- which build this is
 Idle (Resume)          <- status, not clickable
 ─────────────
 Mode        > ● Resume     python main.py run resume
-              ○ Start      python main.py run start
+              ○ Launch     python main.py run launch
               ○ Play       python main.py run play  (repeats until stopped)
+☐ Play rounds          <- tick: may break off to play; untick (default): never
 ─────────────
 Start Resume           <- runs whichever mode is ticked
 Stop (F12)
@@ -130,7 +132,20 @@ Open logs folder
 Exit
 ```
 
-Picking a mode only *selects* it; **Start** is what launches it. **Stop** does
+**Play rounds** is the on/off switch for the dice roll in the Resume/Launch
+cycle, and it starts **unticked**: the tray passes `play_chance_percent: 0`, so
+the cycle only claims gifts and sends hearts. Tick it and the flow's own
+`play_chance_percent` applies instead — 8% per cycle as shipped. Change those
+odds in `vars:` at the top of [`flows/resume.yaml`](flows/resume.yaml) and
+[`flows/launch.yaml`](flows/launch.yaml), or per run with
+`run resume --var play_chance_percent=25`. Start the tray with `--play` to have
+it ticked from the outset.
+(The dedicated **Play** mode is unaffected — it plays rounds outright.)
+
+A console `run resume` has no tray to ask, so it uses the flow's 8% as written.
+
+Picking a mode or toggling the tick only *selects* it; **Start** is what
+launches it, and a run keeps whatever it started with. **Stop** does
 exactly what pressing **F12** does — both set the same flag, which every flow
 checks between steps and during waits, so a run stops within a second or two
 even in the middle of a long pause. Double-clicking the icon is a Start/Stop
@@ -141,6 +156,18 @@ rather than having two bots fight over the same emulator.
 
 Modes live in [`ttheart_sender/tray/modes.py`](ttheart_sender/tray/modes.py) —
 adding one is a single `Mode(...)` entry naming a flow in `flows/`.
+
+A fuller command-by-command walkthrough — including the Tsum Tsum board reader
+and its calibration loop — lives in [`docs/COMMANDS.md`](docs/COMMANDS.md).
+
+## Version
+
+The number lives in one file,
+[`ttheart_sender/version.py`](ttheart_sender/version.py). Everything reads it
+from there — `main.py --version`, the top row of the tray menu, the icon
+tooltip, the first line of every tray log, and `pyproject.toml` (via
+`[tool.setuptools.dynamic]`). Releasing is a one-line edit; nothing else needs
+touching.
 
 ## Building the .exe
 

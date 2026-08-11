@@ -47,11 +47,11 @@ MODES: Tuple[Mode, ...] = (
         description="Send hearts without restarting LDPlayer",
     ),
     Mode(
-        key="start",
-        label="Start",
-        flow="start",
+        key="launch",
+        label="Launch",
+        flow="launch",
         loops=1,
-        description="Launch Tsum Tsum and clear the startup prompts",
+        description="Launch Tsum Tsum, clear the startup prompts, then resume",
     ),
     Mode(
         key="play",

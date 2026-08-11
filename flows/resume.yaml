@@ -1,6 +1,12 @@
 name: resume_send_heart
 description: Send heart without restart LDPlayer
 
+vars:
+  # How often a cycle stops to play a round. The tray's "Play rounds" toggle
+  # overrides this with 0 when it is unticked; a console run uses the value
+  # here unless `--var play_chance_percent=N` says otherwise.
+  play_chance_percent: 8
+
 steps:
   
   # Everything below is the repeatable cycle: check mailbox, do the ranking /
@@ -16,33 +22,20 @@ steps:
         # `then` and `else` must line up with `template` -- indent them any
         # further left and YAML hands them to the step instead of to if_found,
         # which drops the branch without any error.
-        - if_found:
-            template: mailbox_with_red
-            timeout: 5
-            then:
-              # Receiving all gift from mailbox
-              - find_click: {template: mailbox_with_red, timeout: 3}
-            else:
-              - find_click: {template: mailbox, timeout: 5}
+        - click: [453, 224]
 
-        - wait: 2
-
-        # Shared with start.yaml -- edit flows/claim_mailbox.yaml.
+        # Shared with launch.yaml -- edit flows/claim_mailbox.yaml.
         - run_flow: claim_mailbox
 
-        - find_click:
-            template: announcement_close_button
-            timeout: 4
+        - run_flow: dismiss_unattended_popup
 
         - wait: {min: 0.4, max: 0.7}
 
         - run_flow: send_heart
 
-        - wait: 3
-
         # play game
         - chance:
-            percent: 8
+            percent: ${play_chance_percent}
             then:
             - run_flow: play
 

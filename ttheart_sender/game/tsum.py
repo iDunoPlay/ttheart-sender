@@ -9,8 +9,6 @@ saved frames rather than a live game::
     python -m ttheart_sender.game.tsum synth -o board.png   # fake board to test on
     python -m ttheart_sender.game.tsum live -n 20           # grab LDPlayer, time the loop
 
-(``python scratchpad/tsum_path.py <same args>`` still works -- it forwards here.)
-
 `analyze` writes an overlay PNG (every detected tsum + the best chain drawn on
 top) and a JSON sidecar with the drag waypoints in image coordinates. `live`
 reports the real capture+detect+path cost per frame, which is the number that

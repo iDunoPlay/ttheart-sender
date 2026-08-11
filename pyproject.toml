@@ -4,7 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ttheart-sender"
-version = "0.1.0"
+# Single source of truth: ttheart_sender/version.py
+dynamic = ["version"]
 description = "Screenshot-driven Windows/LDPlayer click automation with declarative YAML flows"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -26,6 +27,9 @@ ttheart = "ttheart_sender.cli:main"
 
 [project.gui-scripts]
 ttheart-tray = "ttheart_sender.cli:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "ttheart_sender.version.__version__"}
 
 [tool.setuptools.packages.find]
 include = ["ttheart_sender*"]

@@ -11,12 +11,18 @@ from typing import Optional
 
 import pytest
 
+from ttheart_sender.automation.flow import load_flow_by_name
 from ttheart_sender.automation.runner import RunReport
 from ttheart_sender.config import Config
 from ttheart_sender.control.hotkey import StopKeyWatcher
 from ttheart_sender.exceptions import WindowNotFoundError
 from ttheart_sender.tray.modes import MODES, get_mode
-from ttheart_sender.tray.service import AutomationService, RunState
+from ttheart_sender.tray.service import (
+    PLAY_CHANCE_OFF,
+    PLAY_CHANCE_VAR,
+    AutomationService,
+    RunState,
+)
 
 
 class FakeApp:
@@ -26,6 +32,7 @@ class FakeApp:
         self.config = Config()
         self.stop = StopKeyWatcher(None)  # no real hotkey polling in tests
         self.calls = []
+        self.variables = []
         self.startups = 0
         self._error = error
         # When blocking, the "flow" waits until the test releases it, which is
@@ -40,8 +47,9 @@ class FakeApp:
             raise self._error
         return None
 
-    def run_flow(self, name, *, loops=1, loop_delay=0.0, **kwargs):
+    def run_flow(self, name, *, variables=None, loops=1, loop_delay=0.0, **kwargs):
         self.calls.append({"flow": name, "loops": loops, "loop_delay": loop_delay})
+        self.variables.append(variables)
         if self._block:
             self.entered.set()
             self.release.wait(5)
@@ -90,6 +98,87 @@ def test_set_mode_notifies_and_ignores_unknown():
 def test_play_mode_repeats_until_stopped():
     play = get_mode("play")
     assert play.loops == 0, "play.yaml is one round; the tray must loop it"
+
+
+# --------------------------------------------------------------------------
+# Play toggle
+# --------------------------------------------------------------------------
+def test_play_is_off_by_default_and_zeroes_the_chance_variable():
+    app = FakeApp()
+    service = AutomationService(app)
+
+    assert service.play is False
+    service.start()
+    wait_for(lambda: service.state is RunState.IDLE)
+    assert app.variables == [{PLAY_CHANCE_VAR: PLAY_CHANCE_OFF}]
+
+
+def test_play_on_leaves_the_flow_alone():
+    app = FakeApp()
+    changes = []
+    service = AutomationService(app, on_change=lambda: changes.append(1))
+
+    assert service.set_play(True) is True
+    assert service.play is True
+    assert len(changes) == 1
+    assert service.set_play(True) is False, "re-selecting should be a no-op"
+
+    service.start()
+    wait_for(lambda: service.state is RunState.IDLE)
+    assert app.variables == [None], "the flow's own play_chance_percent must win"
+
+
+def test_toggling_play_mid_run_does_not_change_the_live_run():
+    app = FakeApp(block=True)
+    service = AutomationService(app)
+
+    service.start()
+    app.entered.wait(5)
+    service.toggle_play()
+    assert service.play is True
+
+    app.release.set()
+    wait_for(lambda: service.state is RunState.IDLE)
+    assert app.variables == [{PLAY_CHANCE_VAR: PLAY_CHANCE_OFF}], (
+        "the run keeps the variables it started with"
+    )
+
+    # ...but the next one picks the new setting up.
+    service.start()
+    wait_for(lambda: service.state is RunState.IDLE)
+    assert app.variables[-1] is None
+
+
+def find_steps(steps, action):
+    for step in steps:
+        if step.action == action:
+            yield step
+        for children in step.children.values():
+            yield from find_steps(children, action)
+
+
+def test_the_chance_step_reads_the_variable_the_tray_overrides():
+    """The override is only meaningful if the flow reads it."""
+    flow = load_flow_by_name(Config().flows_dir, "resume")
+
+    assert PLAY_CHANCE_VAR in flow.vars, "resume.yaml must ship a default"
+    rolls = [step for step in find_steps(flow.steps, "chance")]
+    assert rolls, "resume.yaml no longer rolls for a play round"
+    assert all(step.params["percent"] == f"${{{PLAY_CHANCE_VAR}}}" for step in rolls)
+
+
+def test_launch_forwards_the_override_to_resume():
+    """run_flow re-applies the called flow's vars, so it has to be passed on."""
+    flow = load_flow_by_name(Config().flows_dir, "launch")
+    calls = [s for s in find_steps(flow.steps, "run_flow") if s.params.get("flow") == "resume"]
+
+    assert calls, "launch.yaml no longer hands off to resume"
+    assert PLAY_CHANCE_VAR in flow.vars, "launch.yaml needs its own standalone default"
+    for call in calls:
+        forwarded = call.params.get("vars", {})
+        assert forwarded.get(PLAY_CHANCE_VAR) == f"${{{PLAY_CHANCE_VAR}}}", (
+            "without this, resume.yaml's own default overwrites the tray's choice"
+        )
 
 
 # --------------------------------------------------------------------------
@@ -203,12 +292,23 @@ def test_menu_has_a_mode_group_a_start_and_a_stop(tray):
     rows = tray._build_menu()
     submenus = [item for item in rows if item.items]
     assert len(submenus) == 1
-    assert labels(submenus[0].items) == ["Resume", "Start", "Play"]
+    assert labels(submenus[0].items) == ["Resume", "Launch", "Play"]
     assert all(item.radio for item in submenus[0].items)
 
     assert "Start Resume" in labels(rows)
     assert "Stop (F12)" in labels(rows)
     assert "Exit" in labels(rows)
+
+
+def test_menu_play_row_is_a_tick_that_toggles(tray):
+    rows = {item.label: item for item in tray._build_menu() if item.label}
+    play = rows["Play rounds"]
+    assert play.checked is False and play.radio is False
+
+    play.action()
+    assert tray._service.play is True
+    refreshed = {item.label: item for item in tray._build_menu() if item.label}
+    assert refreshed["Play rounds"].checked is True
 
 
 def test_menu_checks_the_selected_mode(tray):
@@ -235,8 +335,36 @@ def test_start_and_stop_swap_availability_with_state(tray):
     wait_for(lambda: tray._service.state is RunState.IDLE)
 
 
-def test_tooltip_reports_the_state(tray):
-    assert tray._tooltip() == "ttheart-sender - Idle (Resume)"
+def test_tooltip_reports_the_version_and_the_state(tray):
+    from ttheart_sender import __version__
+
+    assert tray._tooltip() == f"ttheart-sender v{__version__} - Idle (Resume)"
+
+
+def test_menu_shows_the_version(tray):
+    """A screenshot of the tray should be enough to identify the build."""
+    from ttheart_sender import __version__
+
+    rows = tray._build_menu()
+    assert rows[0].label == f"ttheart-sender v{__version__}"
+    assert rows[0].enabled is False, "the version is a label, not a button"
+
+
+def test_one_version_number_for_the_whole_project():
+    """version.py is the source; pyproject must not carry a second copy."""
+    from pathlib import Path
+
+    tomllib = pytest.importorskip("tomllib")  # stdlib from 3.11; we support 3.9+
+
+    from ttheart_sender import __version__
+    from ttheart_sender.version import __version__ as file_version
+
+    assert __version__ == file_version
+
+    root = Path(__file__).resolve().parent.parent
+    project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    assert "version" not in project, "hardcoded version would drift from version.py"
+    assert "version" in project.get("dynamic", [])
 
 
 def test_icon_changes_while_running(tray):

@@ -169,8 +169,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Start that mode straight away instead of waiting for a click",
     )
+    p_tray.add_argument(
+        "--play",
+        action="store_true",
+        help="Launch with 'Play rounds' ticked (off by default)",
+    )
     # The emulator is looked up per run, not at launch: the tray is expected to
-    # sit there before LDPlayer is even open (that is what 'start' mode is for).
+    # sit there before LDPlayer is even open (that is what 'launch' mode is for).
     p_tray.set_defaults(func=cmd_tray, needs_window=False)
 
     return parser
@@ -384,7 +389,7 @@ def cmd_validate(app: Application, args: argparse.Namespace) -> int:
 def cmd_tray(app: Application, args: argparse.Namespace) -> int:
     from .tray import run_tray
 
-    return run_tray(app, mode=args.mode, autostart=args.start)
+    return run_tray(app, mode=args.mode, play=args.play, autostart=args.start)
 
 
 def cmd_run(app: Application, args: argparse.Namespace) -> int:

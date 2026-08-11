@@ -21,8 +21,14 @@ __all__ = [
 ]
 
 
-def run_tray(app, *, mode: str = DEFAULT_MODE, autostart: bool = False) -> int:
+def run_tray(
+    app,
+    *,
+    mode: str = DEFAULT_MODE,
+    play: bool = False,
+    autostart: bool = False,
+) -> int:
     """Show the tray icon and pump messages until the user quits."""
     from .app import TrayApp
 
-    return TrayApp(app, mode=mode, autostart=autostart).run()
+    return TrayApp(app, mode=mode, play=play, autostart=autostart).run()

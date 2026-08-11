@@ -1,6 +1,12 @@
 name: click_tsumtsum
 description: Detect LDPlayer, launch TsumTsum, and clear the root-detection prompt
 
+vars:
+  # Forwarded to resume.yaml at the bottom of this file -- see the note there.
+  # The tray's "Play rounds" tick overrides this with 0; a console run uses the
+  # value here unless `--var play_chance_percent=N` says otherwise.
+  play_chance_percent: 8
+
 steps:
   # `python main.py run` already detects + parks LDPlayer before this flow
   # starts. This step is here too so the flow still works standalone if it's
@@ -61,49 +67,11 @@ steps:
             timeout: 3
     optional: true
 
-  # Everything below is the repeatable cycle: check mailbox, do the ranking /
-  # heart-sending pass, go home, and loop back to the mailbox check again.
-  # Runs until you stop it (F12) -- this is a live bot loop, not a one-shot.
-  - repeat:
-      forever: true
-      steps:
-        # Open the mailbox whichever state it is in. The badge changes the
-        # icon enough that one template cannot cover both (plain mailbox.png
-        # only scores ~0.80 against the badged icon, under the 0.85 threshold),
-        # so look for the badged version first and fall back to the plain one.
-        # `then` and `else` must line up with `template` -- indent them any
-        # further left and YAML hands them to the step instead of to if_found,
-        # which drops the branch without any error.
-        - if_found:
-            template: mailbox_with_red
-            timeout: 5
-            then:
-              # Receiving all gift from mailbox
-              - find_click: {template: mailbox_with_red, timeout: 3}
-            else:
-              - find_click: {template: mailbox, timeout: 5}
-
-        - wait: 2
-
-        # Shared with start.yaml -- edit flows/claim_mailbox.yaml.
-        - run_flow: claim_mailbox
-
-        - find_click:
-            template: announcement_close_button
-            timeout: 4
-
-        - wait: {min: 0.4, max: 0.7}
-
-        - run_flow: send_heart
-
-        - wait: 3
-
-        # play game
-        - chance:
-            percent: 8
-            then:
-            - run_flow: play
-
-        - wait: {min: 75, max: 110}
+  # Resume flow. Pass play_chance_percent explicitly: run_flow applies the
+  # called flow's own `vars:` on entry, so resume.yaml's 8 would otherwise
+  # overwrite whatever the tray (or --var) set here.
+  - run_flow:
+      flow: resume
+      vars: {play_chance_percent: "${play_chance_percent}"}
 
 
