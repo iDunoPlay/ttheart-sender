@@ -35,6 +35,7 @@ import logging
 import math
 import time
 from dataclasses import dataclass, field
+from itertools import product
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional, Sequence
 
@@ -703,7 +704,8 @@ def _components(nodes: Iterable[int], adj: list[set[int]]) -> list[list[int]]:
     return out
 
 
-def longest_path(component: Sequence[int], adj: list[set[int]], budget: float = 0.4) -> list[int]:
+def longest_path(component: Sequence[int], adj: list[set[int]], budget: float = 0.4,
+                 tsums: Optional[Sequence[Tsum]] = None) -> list[int]:
     """Longest simple path through a component -- the longest drag you can make.
 
     You can only chain tsums you can drag *through* in one stroke, so component
@@ -712,10 +714,18 @@ def longest_path(component: Sequence[int], adj: list[set[int]], budget: float = 
     won't beat the best so far", with a wall-clock budget because the search is
     exponential in the worst case. Components are small (rarely past 20) so the
     budget almost never binds; when it does we return the best found so far.
+
+    Pass `tsums` to break ties on total drag length. Node count still decides;
+    this only chooses between paths that tie on it, and there are usually
+    several. Without it the winner is whichever the search happened to reach
+    first, which is how a chain ends up zig-zagging across a clump it could
+    have walked in order -- every leg legal, but each one a long jump that the
+    emulator's touch sampling is more likely to drop.
     """
     inside = set(component)
     deadline = time.perf_counter() + budget
     best: list[int] = []
+    best_cost = 0.0
 
     def reachable(start: int, visited: set[int]) -> int:
         stack, seen = [start], {start}
@@ -728,14 +738,21 @@ def longest_path(component: Sequence[int], adj: list[set[int]], budget: float = 
         return len(seen)
 
     def dfs(node: int, visited: set[int], path: list[int]) -> None:
-        nonlocal best
-        if len(path) > len(best):
-            best = list(path)
+        nonlocal best, best_cost
+        cost = _tour_length(path, tsums) if tsums else 0.0
+        if len(path) > len(best) or (tsums and len(path) == len(best) and cost < best_cost):
+            best, best_cost = list(path), cost
         if time.perf_counter() > deadline:
             return
+        # Ties are pruned, deliberately. Exploring them to find the shortest
+        # path of maximal length is exponential, and this runs inside a loop
+        # that wants ten decisions a second. Nearest-first ordering below gets
+        # most of the same effect for nothing: the first maximal path the
+        # search reaches is already one that took short hops.
         if len(path) + reachable(node, visited) - 1 <= len(best):
             return
-        for nxt in sorted(adj[node] & inside - visited, key=lambda n: len(adj[n])):
+        for nxt in sorted(adj[node] & inside - visited,
+                          key=lambda n: (_leg(tsums, node, n) if tsums else len(adj[n]))):
             visited.add(nxt)
             path.append(nxt)
             dfs(nxt, visited, path)
@@ -751,6 +768,37 @@ def longest_path(component: Sequence[int], adj: list[set[int]], budget: float = 
         if len(best) == len(component):
             break  # can't do better than the whole component
     return best
+
+
+def _leg(tsums: Sequence[Tsum], a: int, b: int) -> float:
+    return math.hypot(tsums[a].x - tsums[b].x, tsums[a].y - tsums[b].y)
+
+
+def orient_chain(path: Sequence[int], tsums: Sequence[Tsum],
+                 first_leg_px: float = 0.0) -> list[int]:
+    """Point the drag at the end whose opening hop is shortest, and trim it.
+
+    The first leg is not like the others. The tsum you press first decides the
+    character for the whole stroke, so if that opening hop is too long to
+    register, nothing connects and the entire drag is wasted -- where a bad leg
+    later on costs one skipped tsum and the stroke carries on. A path a-b-c-d
+    is the same set of tsums dragged either way, so the direction is free: take
+    whichever end opens shorter.
+
+    With `first_leg_px` set, a chain that still opens too wide gives up its
+    leading tsum rather than the drag, down to the game's three-tsum minimum.
+    """
+    path = list(path)
+    if len(path) < 2:
+        return path
+    if _leg(tsums, path[-1], path[-2]) < _leg(tsums, path[0], path[1]):
+        path.reverse()
+    while (first_leg_px > 0 and len(path) > MIN_CHAIN
+           and _leg(tsums, path[0], path[1]) > first_leg_px):
+        path.pop(0)
+        if _leg(tsums, path[-1], path[-2]) < _leg(tsums, path[0], path[1]):
+            path.reverse()
+    return path
 
 
 def _nearest_neighbor_tour(members: Sequence[int], tsums: Sequence[Tsum]) -> list[int]:
@@ -814,6 +862,7 @@ def find_chains(
     base_only: bool = False,
     mode: str = "touch",
     max_chain: int = 0,
+    first_leg_px: float = 0.0,
 ) -> list[Chain]:
     """Every playable chain, best first.
 
@@ -822,16 +871,18 @@ def find_chains(
     so a 3-chain of the base beats a 7-chain of something else.
 
     `mode`:
-      "reach" (default) -- the drag can pass harmlessly over off-type tsums, so
-        any two same-kind tsums are linkable regardless of distance; the only
-        real constraint is visiting them all in one continuous stroke. Verified
+      "touch" (the default) -- the conservative model: only tsums whose circles
+        are within `link_px` pixels (or `link` diameters) and not blocked by a
+        third tsum on the segment between them count as linked. See
+        :func:`adjacency`.
+      "reach" -- the drag can pass harmlessly over off-type tsums, so any two
+        same-kind tsums are linkable regardless of distance; the only real
+        constraint is visiting them all in one continuous stroke. Verified
         against a hand-marked board: touching-only chains topped out around 3-4
         tsums where the actual game reaches 6+ by weaving between obstacles, so
-        this is the mode that matches how the game is actually played.
-      "touch" -- the older, conservative model: only tsums whose circles are
-        within `link` diameters and not blocked by a third tsum on the segment
-        between them (see `adjacency`) count as linked. Kept for comparison and
-        for anyone who wants the stricter behaviour.
+        this is arguably the mode that matches how the game is actually played.
+        It is not the default because it has not been A/B'd over a full round
+        against "touch" -- when it is, this comment should say which won.
     """
     chains: list[Chain] = []
     by_kind: dict[int, list[int]] = {}
@@ -844,7 +895,10 @@ def find_chains(
                 continue
             if len(members) < MIN_CHAIN:
                 continue
-            order = _compact_chain(members, tsums, max_chain)
+            order = orient_chain(_compact_chain(members, tsums, max_chain),
+                                 tsums, first_leg_px)
+            if len(order) < MIN_CHAIN:
+                continue
             chains.append(Chain(kind, tsums[order[0]].colour, order, is_base=kind == base_kind))
         chains.sort(key=lambda c: (c.is_base, len(c)), reverse=True)
         return chains
@@ -856,7 +910,11 @@ def find_chains(
         for comp in _components(members, adj):
             if len(comp) < MIN_CHAIN:
                 continue
-            path = longest_path(comp, adj)
+            path = longest_path(comp, adj, tsums=tsums)
+            # Orient before truncating, not after: the trim keeps a prefix, so
+            # deciding which end is the front has to happen while both ends are
+            # still there.
+            path = orient_chain(path, tsums, first_leg_px)
             if max_chain > 0:
                 path = path[:max_chain]
             if len(path) >= MIN_CHAIN:
@@ -982,6 +1040,10 @@ def synth(width: int = 540, height: int = 960, count: int = 46, seed: int = 7,
 # --------------------------------------------------------------------------
 # cli
 # --------------------------------------------------------------------------
+#: `label`'s marking modes, in the order their number keys select them.
+_LABEL_MODES = ("path", "missed", "false", "group")
+
+
 def _board_rect(shape, spec: Optional[str]):
     h, w = shape[:2]
     if spec is None:
@@ -998,13 +1060,40 @@ def _board_rect(shape, spec: Optional[str]):
 
 @dataclass
 class PlayReport:
-    """What one :func:`play_loop` run did."""
+    """What one :func:`play_loop` run did.
+
+    `played` alone cannot compare two settings: a run that plays fifteen
+    3-chains and one that plays eight 6-chains are not close, and the second
+    scores far better. `cleared` and `stalled` are what an A/B actually turns
+    on -- total tsums removed, and how many drags the game ignored.
+    """
 
     played: int = 0
+    #: Total tsums in chains that verifiably cleared. The throughput number.
+    cleared: int = 0
+    #: Drags that ran but changed nothing -- the cost of an over-permissive
+    #: link rule, and the half a positive-only label set cannot measure.
+    stalled: int = 0
+    #: --verify-hold only: chain members the game declined to mark, dropped
+    #: before the stroke walked to them.
+    trimmed: int = 0
+    #: --verify-hold only: presses released without dragging, because what the
+    #: game marked was already below min_chain.
+    abandoned: int = 0
     #: Why the loop ended -- shown by the CLI and returned to the flow.
     reason: str = ""
     #: True when the stop key ended it rather than a normal exit condition.
     stopped: bool = False
+
+    def describe(self) -> str:
+        chains = f"played {self.played} chains, cleared {self.cleared} tsums"
+        if self.played:
+            chains += f" (mean {self.cleared / self.played:.1f}/chain)"
+        out = f"{chains}, {self.stalled} drag(s) did not register"
+        if self.trimmed or self.abandoned:
+            out += (f"; the game trimmed {self.trimmed} member(s) and rejected "
+                    f"{self.abandoned} chain(s) outright")
+        return out
 
 
 @dataclass
@@ -1052,7 +1141,8 @@ class Driver:
 
 
 def drag_chain(points: Sequence[tuple[int, int]], *, step_px: float = 8.0,
-               hold: float = 0.05, per_step: float = 0.004) -> None:
+               hold: float = 0.05, per_step: float = 0.004,
+               after_press: Optional[Callable[[], Sequence[tuple[int, int]]]] = None) -> None:
     """Drag through every point in order, as one continuous stroke.
 
     The emulator turns mouse movement into touch movement, and it only sees the
@@ -1060,6 +1150,14 @@ def drag_chain(points: Sequence[tuple[int, int]], *, step_px: float = 8.0,
     cursor straight past the tsums in between, so each leg is walked in ~8px
     steps -- the chain is built from what the finger passes *over*, not from
     where it stops.
+
+    `after_press` runs once the first point is held and before anything moves,
+    and returns the points to actually walk. That window is the only moment the
+    game will tell you which tsums it accepts from here -- see
+    :func:`marked_by_game` -- and it costs nothing to use, because pressing the
+    first tsum is the start of the drag either way. Returning a single point
+    walks nowhere and releases, which is how a chain the game rejects gets
+    abandoned before it wastes a stroke.
     """
     import pyautogui
 
@@ -1068,6 +1166,8 @@ def drag_chain(points: Sequence[tuple[int, int]], *, step_px: float = 8.0,
     time.sleep(hold)
     pyautogui.mouseDown()
     try:
+        if after_press is not None:
+            points = list(after_press()) or list(points[:1])
         for (x0, y0), (x1, y1) in zip(points, points[1:]):
             steps = max(1, int(math.hypot(x1 - x0, y1 - y0) / step_px))
             for s in range(1, steps + 1):
@@ -1076,6 +1176,44 @@ def drag_chain(points: Sequence[tuple[int, int]], *, step_px: float = 8.0,
         time.sleep(hold)
     finally:
         pyautogui.mouseUp()
+
+
+def marked_by_game(drv, before_crop: np.ndarray, board: tuple, tsums: Sequence[Tsum],
+                   nodes: Sequence[int], *, delay: float, threshold: float,
+                   aura: float) -> list[int]:
+    """Of a chain's members, which ones did the game light up?
+
+    Holding a tsum makes the game mark everything you can link to it -- both
+    the same character *and* actually reachable, which are the two judgements
+    this module makes worst. Measured on a real board, pressing one Piglet
+    marked five more that colour clustering had filed under three different
+    kinds. So this asks the game rather than trusting the clusters.
+
+    Members inside `aura` of the pressed tsum are kept regardless. The glow is
+    about 90px across and washes over whatever is under it, so a reaction there
+    means nothing either way -- and a tsum that close was probably linkable in
+    any case. Only distant members are ever dropped, which makes this a
+    conservative trim: it removes the long reaches that the guesswork gets
+    wrong, and never second-guesses the near ones.
+    """
+    bx, by, bw, bh = board
+    time.sleep(delay)
+    crop = drv.grab()[by:by + bh, bx:bx + bw]
+    diff = cv2.absdiff(crop, before_crop).max(axis=2)
+
+    head = tsums[nodes[0]]
+    r = max(2, int(min(t.r for t in tsums) * 0.55))
+    keep = [nodes[0]]
+    for n in nodes[1:]:
+        t = tsums[n]
+        if math.hypot(t.x - head.x, t.y - head.y) <= aura:
+            keep.append(n)
+            continue
+        m = np.zeros(diff.shape, np.uint8)
+        cv2.circle(m, (int(t.x), int(t.y)), r, 1, -1)
+        if float(diff[m.astype(bool)].mean()) > threshold:
+            keep.append(n)
+    return keep
 
 
 def _settle(drv: Driver, *, max_wait: float, tol: float = 2.5):
@@ -1248,12 +1386,16 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
     lengths: deque = deque(maxlen=max(opts.repeat_len, opts.repeat_window))
     per_step = opts.per_step
     skip_kinds: set[int] = set()
+    #: Set when the last pass ended without touching the board, so the next one
+    #: can skip waiting for movement that cannot have happened.
+    no_settle = False
 
     try:
         while True:
             drv.check_stop()
-            frame = (drv.grab() if opts.dry_run or palette is None
+            frame = (drv.grab() if opts.dry_run or palette is None or no_settle
                      else _settle(drv, max_wait=opts.settle))
+            no_settle = False
 
             # Asked before anything on this frame is touched: once the round is
             # over the board is gone, and a chain "found" on the results screen
@@ -1317,7 +1459,8 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
                 say(f"base tsum: cluster #{base} (Lab distance {base_dist:.1f})")
             chains = find_chains(tsums, radius, opts.link, block=opts.block,
                                  link_px=opts.link_px, base_kind=base, base_only=opts.base_only,
-                                 mode=opts.mode, max_chain=opts.max_chain)
+                                 mode=opts.mode, max_chain=opts.max_chain,
+                                 first_leg_px=opts.first_leg_px)
             think = (time.perf_counter() - t0) * 1000
 
             # A real board is crowded but bounded. Menus and the results screen
@@ -1482,7 +1625,54 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
                 break
 
             before = crop
-            drag_chain(screen, step_px=opts.step_px, per_step=per_step, hold=opts.hold)
+            probe: dict = {}
+
+            def _ask_the_game():
+                """Trim the chain to what the game marks, while it is held."""
+                kept = marked_by_game(drv, before, (bx, by, bw, bh), tsums,
+                                      best.nodes, delay=opts.hold_delay,
+                                      threshold=opts.hold_threshold,
+                                      aura=opts.hold_aura)
+                probe["dropped"] = len(best.nodes) - len(kept)
+                probe["kept"] = len(kept)
+                if len(kept) < opts.min_chain:
+                    # Abandon before moving. Releasing on one tsum clears
+                    # nothing, which is cheaper than dragging a chain the game
+                    # has already said it will not accept.
+                    probe["abandoned"] = True
+                    return [drv.to_screen(bx + tsums[best.nodes[0]].x,
+                                          by + tsums[best.nodes[0]].y)]
+                return [drv.to_screen(bx + tsums[i].x, by + tsums[i].y) for i in kept]
+
+            drag_chain(screen, step_px=opts.step_px, per_step=per_step, hold=opts.hold,
+                       after_press=_ask_the_game if opts.verify_hold else None)
+
+            if probe.get("abandoned"):
+                misses += 1
+                report.abandoned += 1
+                # Without this the next scan finds the identical chain, presses
+                # it, and is rejected again -- the board has not changed, so
+                # nothing about the answer would either. Same cure the stall
+                # path uses: stop offering this kind until something clears.
+                skip_kinds.add(best.kind)
+                # And do not wait for a board to settle that never moved.
+                no_settle = True
+                say(f"    the game marked only {probe['kept']} of {len(best.nodes)} "
+                      f"-- released without dragging, skipping #{best.kind}")
+                # Same exits as every other dead end, or a one-shot run would
+                # never return and a timed one could overrun --duration.
+                if deadline is None:
+                    report.reason = "the game rejected the only chain found"
+                    break
+                if time.perf_counter() >= deadline:
+                    report.reason = f"{opts.duration:.0f}s elapsed"
+                    say(report.reason)
+                    break
+                continue
+            if probe.get("dropped"):
+                report.trimmed += probe["dropped"]
+                say(f"    game marked {probe['kept']}/{len(best.nodes)}; "
+                      f"dropped {probe['dropped']} it would not accept")
 
             # Did anything actually clear? A drag the emulator only half-sampled
             # registers as a 2-link, which is below the game's minimum, so
@@ -1493,6 +1683,9 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
                 changed = float(np.mean(cv2.absdiff(after, before)))
                 if changed < opts.change_tol:
                     stalls += 1
+                    # `stalls` is a streak, cleared on the next success; this is
+                    # the run total, which is what a comparison needs.
+                    report.stalled += 1
                     # Two cures, applied together: walk the path more slowly so
                     # every tsum gets sampled, and stop re-offering the chain
                     # that just failed.
@@ -1531,6 +1724,9 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
                 skip_kinds.clear()
 
             played += 1
+            # What was dragged, not what was proposed: with --verify-hold the
+            # chain may have been trimmed after the press.
+            report.cleared += probe.get("kept", len(best))
 
             if deadline is None:
                 report.reason = "one chain played"
@@ -1544,11 +1740,11 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
         # report what was played, then let it travel on to whoever is driving
         # (the CLI exits, the flow runner stops the whole flow).
         report.played, report.stopped = played, True
-        say(f"stopped after {played} chains")
+        say(f"stopped -- {report.describe()}")
         raise
 
     report.played = played
-    say(f"played {played} chains")
+    say(report.describe())
     return report
 
 
@@ -1579,13 +1775,389 @@ def _play(args) -> int:
     return 0 if report.played or args.duration > 0 else 1
 
 
-def _label(args) -> int:
-    """Click a board's tsums in order to record the path you'd actually drag.
+def _grab(args) -> int:
+    """Save a burst of real boards off the live emulator, for labelling later.
 
-    The point isn't the drawing, it's the measurement it enables: every
+    Tuning detection needs frames, and a round only lasts 60s -- long enough to
+    take one screenshot by hand, not the ten it takes to say anything about a
+    parameter. So this sits in the round and grabs on a timer.
+
+    Frames whose detection count is outside [--min-tsums, --max-tsums] are
+    dropped rather than saved: those are the countdown, the results screen and
+    the Home screen, and a label file for one of those is worse than no label
+    file, because `eval` would count the nonsense as ground truth.
+    """
+    from ..app import Application
+    from ..control.hotkey import StopKeyWatcher, interruptible_sleep
+
+    app = Application.create()
+    app.attach_window(prepare=not args.no_prepare)
+    rect = app.content_rect()
+    watcher = StopKeyWatcher(app.config.runner.stop_key)
+
+    out = Path(args.dir)
+    out.mkdir(parents=True, exist_ok=True)
+    # Never overwrite an existing board: its .label.json is hand-made and the
+    # two are matched by name.
+    n = 1
+    def _next_path() -> Path:
+        nonlocal n
+        while (p := out / f"{args.prefix}{n}.png").exists():
+            n += 1
+        return p
+
+    print(f"grabbing {args.frames} boards every {args.interval:.1f}s into {out}")
+    print(f"start a round now -- {watcher.describe()} to stop")
+
+    saved, skipped = 0, 0
+    palette, radius = None, args.radius
+    try:
+        # interruptible_sleep, not time.sleep: the stop key is read by polling
+        # whether it is down *right now*, so a press during a plain 3s sleep is
+        # simply never seen.
+        interruptible_sleep(args.countdown, watcher)
+        while saved < args.frames:
+            watcher.check()
+            frame = app.capture.grab(rect)
+            bx, by, bw, bh = _board_rect(frame.shape, args.board)
+            tsums, radius, palette = detect(frame[by:by + bh, bx:bx + bw], k=args.k,
+                                            radius=radius, palette=palette,
+                                            include_dark=args.include_dark)
+            if not (args.min_tsums <= len(tsums) <= args.max_tsums):
+                skipped += 1
+                print(f"  skip: {len(tsums)} tsums -- not a board")
+            else:
+                path = _next_path()
+                # imencode, not imwrite: imwrite can't take a non-ASCII path on
+                # Windows, and the scratchpad may sit under a user folder.
+                ok, buf = cv2.imencode(".png", frame)
+                if ok:
+                    buf.tofile(str(path))
+                    saved += 1
+                    print(f"  {saved}/{args.frames}  {path.name}  {len(tsums)} tsums")
+            interruptible_sleep(args.interval, watcher)
+    except StopRequested as exc:
+        print(exc)
+    finally:
+        app.close()
+
+    print(f"\nsaved {saved} board(s), skipped {skipped} non-board frame(s)")
+    if saved:
+        print(f"next: python -m ttheart_sender.game.tsum label {out}/{args.prefix}1.png")
+    return 0 if saved else 1
+
+
+def _idle(args) -> int:
+    """Touch nothing and film the hint the game offers an idle player.
+
+    The game suggests a move when you stop playing, and a suggestion is a chain
+    it knows is legal -- which is character-identity ground truth, produced by
+    the only party that actually knows it, for free. This films the hint rather
+    than assuming its shape: if it steps through the chain one tsum at a time,
+    the frames hold a complete labelled group; if it only ever marks one tsum,
+    they say that instead.
+
+    Too slow to play with -- a hint costs seconds and a round lasts sixty --
+    but a labeller that needs no clicking is worth a great deal more than one
+    that does.
+    """
+    from ..app import Application
+    from ..control.hotkey import StopKeyWatcher, interruptible_sleep
+
+    app = Application.create()
+    app.attach_window(prepare=not args.no_prepare)
+    rect = app.content_rect()
+    watcher = StopKeyWatcher(app.config.runner.stop_key)
+    out = Path(args.dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    print(f"start a round, then take your hands off -- {watcher.describe()} to abort")
+    interruptible_sleep(args.countdown, watcher)
+
+    drv = Driver.from_app(app, rect, watcher=watcher, say=print)
+    # Generously: the first run of this probe was still watching the pile fall
+    # eight seconds in, which drowned every per-tsum reading in settling.
+    base = _settle(drv, max_wait=args.settle)
+    bx, by, bw, bh = _board_rect(base.shape, args.board)
+    crop = base[by:by + bh, bx:bx + bw]
+    tsums, radius, _ = detect(crop, k=args.k, include_dark=args.include_dark)
+    if not tsums:
+        app.close()
+        raise SystemExit("no tsums detected -- is a round actually running?")
+    print(f"{len(tsums)} tsums, r~{radius:.1f}px -- filming {args.seconds:.0f}s "
+          f"at {args.fps:.0f}fps, hands off")
+
+    masks = []
+    for t in tsums:
+        m = np.zeros((bh, bw), np.uint8)
+        cv2.circle(m, (int(t.x), int(t.y)), max(2, int(radius * 0.55)), 1, -1)
+        masks.append(m.astype(bool))
+
+    timeline, frames = [], []
+    prev = crop
+    deadline = time.perf_counter() + args.seconds
+    while time.perf_counter() < deadline:
+        watcher.check()
+        frame = app.capture.grab(rect)[by:by + bh, bx:bx + bw]
+        # Against the previous frame, not the baseline. A hint animates, and
+        # frame-to-frame change finds anything that moves however far the board
+        # has drifted from where filming started -- whereas a fixed baseline
+        # reports every settled tsum forever and buries the signal.
+        diff = cv2.absdiff(frame, prev).max(axis=2)
+        lit = [(float(diff[m].mean()), i) for i, m in enumerate(masks)]
+        lit = sorted((c for c in lit if c[0] > args.threshold), reverse=True)
+        timeline.append((time.perf_counter(), float(diff.mean()), lit[:6]))
+        frames.append(frame)
+        prev = frame
+        time.sleep(max(0.0, 1.0 / args.fps))
+    app.close()
+
+    t0 = timeline[0][0]
+    print(f"\n{'t':>6} {'whole board':>11}  tsums changing past {args.threshold}")
+    hot_any = set()
+    quiet = 0
+    for when, overall, lit in timeline:
+        quiet += not lit
+        if not lit:
+            continue
+        hot_any.update(i for _, i in lit)
+        marks = "  ".join(f"#{i}@{int(tsums[i].x)},{int(tsums[i].y)}={c:.0f}" for c, i in lit)
+        print(f"{when - t0:6.1f}s {overall:11.2f}  {marks}")
+
+    print(f"\n{quiet}/{len(timeline)} frames were completely still")
+    if not hot_any:
+        print("nothing on the board moved at all. The hint did not fire in "
+              f"{args.seconds:.0f}s -- try --seconds 45, and check the game is "
+              "not simply waiting on something else.")
+    else:
+        print(f"\n{len(hot_any)} distinct tsum(s) lit at some point: "
+              f"{sorted(hot_any)}")
+        print("If they came up one after another, that sequence IS a labelled "
+              "chain. If it is always the same one, the hint marks a start only.")
+
+    # Keep the frames: whatever the numbers say, the pictures are the evidence.
+    step = max(1, len(frames) // args.keep)
+    for n, f in enumerate(frames[::step][:args.keep]):
+        ok, buf = cv2.imencode(".png", f)
+        if ok:
+            buf.tofile(str(out / f"idle_{n:02d}.png"))
+    print(f"wrote {min(args.keep, len(frames))} frame(s) to {out}/idle_*.png")
+    return 0
+
+
+def _hold(args) -> int:
+    """Press a tsum, photograph the board while held, release. Then diff.
+
+    The premise worth testing: the game knows which tsums are the same
+    character and this module only guesses, so if pressing one makes the game
+    mark the rest, that mark is ground truth free for the taking -- and it
+    would replace the colour clustering that currently gets character identity
+    wrong about 40% of the time.
+
+    Writes before/held/diff frames and prints where the board changed. If only
+    the pressed tsum lights up, the idea is dead and the diff says so plainly.
+    """
+    from ..app import Application
+    from ..control.hotkey import StopKeyWatcher, interruptible_sleep
+
+    app = Application.create()
+    app.attach_window(prepare=not args.no_prepare)
+    rect = app.content_rect()
+    watcher = StopKeyWatcher(app.config.runner.stop_key)
+    out = Path(args.dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    if args.countdown > 0:
+        print(f"start a round -- {watcher.describe()} to abort")
+        interruptible_sleep(args.countdown, watcher)
+
+    # No countdown by default. Waiting around is what made the game decide the
+    # player was idle and put up a hint, which is the thing this probe was
+    # briefly fooled by -- so it presses as soon as the board is still.
+    drv = Driver.from_app(app, rect, watcher=watcher, say=print)
+    before = _settle(drv, max_wait=args.settle)
+    bx, by, bw, bh = _board_rect(before.shape, args.board)
+    crop = before[by:by + bh, bx:bx + bw]
+    tsums, radius, _ = detect(crop, k=args.k, include_dark=args.include_dark)
+    if not tsums:
+        app.close()
+        raise SystemExit("no tsums detected -- is a round actually running?")
+
+    # Refuse to press a board that is still moving: every reading would be the
+    # pile shifting rather than anything the press did, which is precisely how
+    # the previous run produced a boardful of false highlights.
+    again = _settle(drv, max_wait=args.settle)
+    drift = float(cv2.absdiff(again, before).mean())
+    if drift > 1.0:
+        app.close()
+        raise SystemExit(f"board still moving (drift {drift:.2f}) -- let the "
+                         f"pile settle and run again, or raise --settle")
+    before, crop = again, again[by:by + bh, bx:bx + bw]
+
+    # Pick from the middle of the board only. A tsum at the edge is half out of
+    # the play area and may sit under the FEVER bar, so pressing it tells you
+    # nothing -- an earlier version weighted centrality so weakly that it just
+    # took the largest tsum anywhere, and picked one on the bottom boundary.
+    # Press the head of the best chain we can find, not merely a big tsum in
+    # the middle. Pressing one with no partners proves nothing: the game has
+    # nothing to mark, and the run cannot distinguish "it marks nothing" from
+    # "there was nothing to mark" -- which is exactly what happened once.
+    chains = find_chains(tsums, radius, block=args.block, link_px=args.link_px,
+                         mode="touch", max_chain=args.max_chain)
+    expect: list[int] = []
+    if chains:
+        expect = list(chains[0].nodes)
+        pick = tsums[expect[0]]
+    else:
+        inner = [t for t in tsums
+                 if 0.2 * bw < t.x < 0.8 * bw and 0.2 * bh < t.y < 0.8 * bh]
+        if not inner:
+            app.close()
+            raise SystemExit("no tsum near the middle of the board to press")
+        pick = max(inner, key=lambda t: t.r)
+        print("no chain found -- pressing a central tsum instead, which can "
+              "only show whether the press registers at all")
+
+    sx, sy = int(rect.left + bx + pick.x), int(rect.top + by + pick.y)
+    print(f"{len(tsums)} tsums, r~{radius:.1f}px, board still (drift {drift:.2f})")
+    if expect:
+        print(f"we think {len(expect)} tsums share its character: "
+              f"{', '.join(f'({tsums[i].x:.0f},{tsums[i].y:.0f})' for i in expect)}")
+    print(f"pressing the tsum at board ({pick.x:.0f}, {pick.y:.0f}) "
+          f"= screen ({sx}, {sy}) for {args.hold:.1f}s -- watch it")
+
+    import pyautogui
+
+    # Mirror drag_chain's opening exactly. It settles the cursor before
+    # pressing, and -- the part that matters -- it *moves* afterwards. The
+    # emulator turns mouse movement into touch movement, so a press with no
+    # motion behind it appears never to flush a touch-down at all: the first
+    # run of this probe measured zero change on the tsum it had just pressed.
+    pyautogui.PAUSE = 0.0
+    # Focus first, with a click we are happy to lose. An unfocused window eats
+    # the first click to activate itself instead of passing it to the app, and
+    # this probe presses within a second of starting -- unlike `play`, where
+    # something has always clicked before the first drag, which is why the
+    # problem never shows up there. A bare tap on a tsum clears nothing.
+    pyautogui.moveTo(sx, sy)
+    time.sleep(0.05)
+    pyautogui.click()
+    time.sleep(0.35)
+    # Re-baseline after focusing, so nothing the focus click did counts as a
+    # reaction to the hold.
+    before = app.capture.grab(rect)
+    crop = before[by:by + bh, bx:bx + bw]
+
+    pyautogui.moveTo(sx, sy)
+    time.sleep(0.05)
+    pyautogui.mouseDown()
+    shots = []
+    try:
+        for dx in (1, 0, -1, 0):
+            pyautogui.moveTo(sx + dx, sy)
+            time.sleep(0.02)
+        # Sample throughout rather than once at the end: a highlight that
+        # animates in, or one that shows briefly and stops, would be missed by
+        # a single grab timed badly.
+        deadline = time.perf_counter() + args.hold
+        while time.perf_counter() < deadline:
+            shots.append(app.capture.grab(rect))
+            time.sleep(0.1)
+    finally:
+        pyautogui.mouseUp()
+    app.close()
+
+    held = shots[-1]
+    # Strongest reaction at any moment during the hold, not just the last one.
+    crops = [s[by:by + bh, bx:bx + bw] for s in shots]
+    diff = np.maximum.reduce([cv2.absdiff(c, crop).max(axis=2) for c in crops])
+    held_crop = crops[-1]
+    full = max(float(cv2.absdiff(s, before).mean()) for s in shots)
+    print(f"{len(shots)} frames during the hold; whole screen changed by "
+          f"{full:.2f} at most")
+
+    # How much did each tsum change? The pressed one is the control: anything
+    # that moves with it is the game marking a match, and everything that stays
+    # put is the game saying nothing.
+    changes = []
+    for t in tsums:
+        m = np.zeros(diff.shape, np.uint8)
+        cv2.circle(m, (int(t.x), int(t.y)), max(2, int(radius * 0.5)), 1, -1)
+        changes.append(float(diff[m.astype(bool)].mean()))
+    pressed = changes[tsums.index(pick)]
+    others = sorted((c for t, c in zip(tsums, changes) if t is not pick), reverse=True)
+
+    vis = held_crop.copy()
+    for t, c in zip(tsums, changes):
+        hot = c > args.threshold
+        cv2.circle(vis, (int(t.x), int(t.y)), int(radius * 0.85),
+                   (0, 255, 255) if t is pick else ((0, 255, 0) if hot else (90, 90, 90)),
+                   2 if hot or t is pick else 1, cv2.LINE_AA)
+        cv2.putText(vis, f"{c:.0f}", (int(t.x) - 12, int(t.y) + 4),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1, cv2.LINE_AA)
+
+    # The full frame too: a chain counter or badge drawn outside the board rect
+    # would be invisible in the crop, and that is exactly the sort of thing the
+    # game puts in its header.
+    for name, im in (("hold_before", crop), ("hold_held", held_crop),
+                     ("hold_diff", diff), ("hold_marked", vis),
+                     ("hold_full", held), ("hold_full_diff", cv2.absdiff(held, before))):
+        ok, buf = cv2.imencode(".png", im)
+        if ok:
+            buf.tofile(str(out / f"{name}.png"))
+
+    print(f"\npressed tsum changed by {pressed:.1f}")
+    print(f"every other tsum, most-changed first: "
+          f"{', '.join(f'{c:.1f}' for c in others[:12])}")
+    lit = sum(1 for c in others if c > args.threshold)
+    print(f"{lit} other tsum(s) changed by more than {args.threshold}")
+
+    # The one comparison that settles it. If the game marks matches, the tsums
+    # we predicted share the character should react and the rest should not.
+    if expect and len(expect) > 1:
+        idx = tsums.index(pick)
+        partners = [changes[i] for i in expect if i != idx]
+        rest = [c for i, c in enumerate(changes) if i != idx and i not in expect]
+        print(f"\npredicted partners ({len(partners)}): "
+              f"{', '.join(f'{c:.1f}' for c in partners)}")
+        print(f"everything else: median {np.median(rest):.1f}, "
+              f"max {max(rest):.1f}" if rest else "everything else: none")
+        hot_partners = sum(1 for c in partners if c > args.threshold)
+        if hot_partners and rest and np.median(partners) > 3 * max(1.0, np.median(rest)):
+            print(f"-> {hot_partners}/{len(partners)} predicted partners reacted and "
+                  f"the rest of the board did not. The game IS marking matches, and "
+                  f"that mark is character ground truth worth reading.")
+        elif hot_partners:
+            print(f"-> {hot_partners} partners reacted, but so did the rest of the "
+                  f"board -- that is motion, not marking. Re-run on a stiller board.")
+        else:
+            print("-> the pressed tsum reacted and its predicted partners did not. "
+                  "The game marks only what you are touching, so there is nothing "
+                  "to read off and this route is closed.")
+    elif lit == 0:
+        print("-> only the pressed tsum reacted, but it had no partners to mark, "
+              "so this run cannot tell you which. Re-run for a board with a chain.")
+    print(f"wrote hold_before/held/diff/marked.png to {out}")
+    return 0
+
+
+def _label(args) -> int:
+    """Mark up a board: the paths you'd drag, and where detection got it wrong.
+
+    Four things get recorded, and they answer two different questions.
+
+    `path` mode is the original one, and it calibrates *distance*: every
     consecutive pair in a path you mark is one example of a link the game
-    accepts. Collect a few boards and `score` can read the real link threshold
-    straight off them, instead of me picking a number and hoping.
+    accepts, so `score` can read the real link threshold straight off them
+    instead of someone picking a number and hoping.
+
+    `missed`, `false` and `group` calibrate *identification*, which had no
+    ground truth at all before: a tsum detection can be wrong by not existing,
+    by not being found, or by being found and filed under the wrong colour
+    cluster. `eval` needs all three marked to score a parameter change, and it
+    only counts boards you flag as fully reviewed (`r`) -- a half-marked board
+    reads as a board with no errors, which would quietly reward whatever
+    setting misses the most.
     """
     img = cv2.imdecode(np.fromfile(args.image, np.uint8), cv2.IMREAD_COLOR)
     if img is None:
@@ -1596,14 +2168,49 @@ def _label(args) -> int:
     tsums, radius, _ = detect(crop, k=args.k, radius=args.radius,
                               include_dark=args.include_dark, merge=args.merge)
     print(f"{len(tsums)} tsums detected, r~{radius:.1f}px")
-    print("click tsums in drag order | n=new path  u=undo  c=clear  s=save  q=quit")
+    print("modes: 1=path  2=missed  3=false  4=same-kind group")
+    print("       click to mark | n=next path/group  u=undo  c=clear")
+    print("       r=toggle 'board fully reviewed'  s=save  q=quit")
 
     paths: list[list[int]] = [[]]
+    groups: list[list[int]] = [[]]
+    missed: list[tuple[float, float]] = []
+    bad: list[int] = []            # indices of detections that are not tsums
+    mode = "path"
+    reviewed = False
+
+    def _nearest(x: int, y: int) -> Optional[int]:
+        if not tsums:
+            return None
+        i = min(range(len(tsums)),
+                key=lambda n: (tsums[n].x - x) ** 2 + (tsums[n].y - y) ** 2)
+        d2 = (tsums[i].x - x) ** 2 + (tsums[i].y - y) ** 2
+        return i if d2 <= (radius * 1.4) ** 2 else None
 
     def redraw() -> np.ndarray:
         vis = crop.copy()
-        for t in tsums:
-            cv2.circle(vis, (int(t.x), int(t.y)), int(radius * 0.9), t.colour, 2, cv2.LINE_AA)
+        for i, t in enumerate(tsums):
+            colour = (0, 0, 255) if i in bad else t.colour
+            cv2.circle(vis, (int(t.x), int(t.y)), int(radius * 0.9), colour, 2, cv2.LINE_AA)
+        # A detection you called false gets an X through it, so "marked wrong"
+        # never reads as "marked and kept" at a glance.
+        for i in bad:
+            t = tsums[i]
+            d = int(radius * 0.6)
+            for dx in (-d, d):
+                cv2.line(vis, (int(t.x) - d, int(t.y) - dx), (int(t.x) + d, int(t.y) + dx),
+                         (0, 0, 255), 2, cv2.LINE_AA)
+        for (mx, my) in missed:
+            cv2.circle(vis, (int(mx), int(my)), int(radius * 0.9), (255, 0, 255), 2, cv2.LINE_AA)
+            cv2.drawMarker(vis, (int(mx), int(my)), (255, 0, 255), cv2.MARKER_CROSS, 14, 2)
+        for gi, group in enumerate(groups):
+            live = gi == len(groups) - 1
+            for i in group:
+                t = tsums[i]
+                cv2.circle(vis, (int(t.x), int(t.y)), int(radius * 1.05),
+                           (255, 255, 255) if live else (170, 170, 170), 2, cv2.LINE_AA)
+                cv2.putText(vis, chr(ord("A") + gi), (int(t.x) - 18, int(t.y) - 12),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2, cv2.LINE_AA)
         for pi, path in enumerate(paths):
             done = pi < len(paths) - 1
             colour = (150, 150, 150) if done else (60, 255, 255)
@@ -1615,16 +2222,34 @@ def _label(args) -> int:
                 cv2.circle(vis, (px, py), 12, (0, 0, 0), -1, cv2.LINE_AA)
                 cv2.putText(vis, str(n), (px - 6, py + 5), cv2.FONT_HERSHEY_SIMPLEX,
                             0.45, colour, 1, cv2.LINE_AA)
+        banner = (f"[{mode}]  paths {sum(1 for p in paths if len(p) >= 2)}  "
+                  f"missed {len(missed)}  false {len(bad)}  "
+                  f"groups {sum(1 for g in groups if len(g) >= 2)}  "
+                  f"{'REVIEWED' if reviewed else 'not reviewed'}")
+        cv2.rectangle(vis, (0, 0), (vis.shape[1], 22), (0, 0, 0), -1)
+        cv2.putText(vis, banner, (6, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.42,
+                    (0, 255, 0) if reviewed else (200, 200, 200), 1, cv2.LINE_AA)
         return vis
 
     def on_mouse(event, x, y, _flags, _param):
         if event != cv2.EVENT_LBUTTONDOWN:
             return
-        near = min(range(len(tsums)),
-                   key=lambda i: (tsums[i].x - x) ** 2 + (tsums[i].y - y) ** 2)
-        if (tsums[near].x - x) ** 2 + (tsums[near].y - y) ** 2 <= (radius * 1.4) ** 2:
-            paths[-1].append(near)
-            cv2.imshow("label", redraw())
+        if mode == "missed":
+            # No snapping: the whole point is that nothing was detected here,
+            # so there is nothing to snap to.
+            missed.append((float(x), float(y)))
+        else:
+            near = _nearest(x, y)
+            if near is None:
+                return
+            if mode == "path":
+                paths[-1].append(near)
+            elif mode == "false":
+                # Toggle, so a misclick is undone by clicking the same tsum.
+                bad.remove(near) if near in bad else bad.append(near)
+            elif mode == "group" and near not in groups[-1]:
+                groups[-1].append(near)
+        cv2.imshow("label", redraw())
 
     cv2.namedWindow("label")
     cv2.setMouseCallback("label", on_mouse)
@@ -1634,29 +2259,66 @@ def _label(args) -> int:
         key = cv2.waitKey(30) & 0xFF
         if key == ord("q"):
             break
-        if key == ord("u") and paths[-1]:
-            paths[-1].pop()
+        if key in (ord("1"), ord("2"), ord("3"), ord("4")):
+            mode = _LABEL_MODES[key - ord("1")]
+            print(f"mode: {mode}")
+        elif key == ord("u"):
+            if mode == "path" and paths[-1]:
+                paths[-1].pop()
+            elif mode == "missed" and missed:
+                missed.pop()
+            elif mode == "false" and bad:
+                bad.pop()
+            elif mode == "group" and groups[-1]:
+                groups[-1].pop()
         elif key == ord("c"):
-            paths[-1] = []
-        elif key == ord("n") and paths[-1]:
-            paths.append([])
+            if mode == "path":
+                paths[-1] = []
+            elif mode == "missed":
+                missed.clear()
+            elif mode == "false":
+                bad.clear()
+            elif mode == "group":
+                groups[-1] = []
+        elif key == ord("n"):
+            if mode == "path" and paths[-1]:
+                paths.append([])
+            elif mode == "group" and groups[-1]:
+                groups.append([])
+        elif key == ord("r"):
+            reviewed = not reviewed
+            print(f"board fully reviewed: {reviewed}")
         elif key == ord("s"):
             kept = [p for p in paths if len(p) >= 2]
-            if not kept:
+            kept_groups = [g for g in groups if len(g) >= 2]
+            if not (kept or kept_groups or missed or bad or reviewed):
                 print("nothing to save")
                 continue
+
+            def pt(i: int) -> list:
+                return [round(tsums[i].x + bx, 1), round(tsums[i].y + by, 1)]
+
             out = Path(args.image).with_suffix(".label.json")
             out.write_text(json.dumps({
                 "image": Path(args.image).name,
                 "board": [bx, by, bw, bh],
                 "radius": radius,
                 # Full-image coordinates, so a label survives re-detection with
-                # different settings -- `score` re-detects and matches by
-                # position rather than trusting these indices.
-                "paths": [{"nodes": [[round(tsums[i].x + bx, 1),
-                                      round(tsums[i].y + by, 1)] for i in p]} for p in kept],
+                # different settings -- `score` and `eval` re-detect and match
+                # by position rather than trusting these indices.
+                "paths": [{"nodes": [pt(i) for i in p]} for p in kept],
+                # Every detection present when the board was reviewed. Without
+                # it "false positives" would only cover the ones clicked, and a
+                # re-run under different parameters would have no way to tell a
+                # newly-appeared detection from an approved one.
+                "detected": [pt(i) for i in range(len(tsums))],
+                "false_positives": [pt(i) for i in sorted(bad)],
+                "missed": [[round(mx + bx, 1), round(my + by, 1)] for mx, my in missed],
+                "groups": [{"nodes": [pt(i) for i in g]} for g in kept_groups],
+                "reviewed": reviewed,
             }, indent=2))
-            print(f"saved {len(kept)} path(s) -> {out}")
+            print(f"saved {len(kept)} path(s), {len(missed)} missed, {len(bad)} false, "
+                  f"{len(kept_groups)} group(s), reviewed={reviewed} -> {out}")
         cv2.imshow("label", redraw())
 
     cv2.destroyAllWindows()
@@ -1688,6 +2350,7 @@ def _score(args) -> int:
         raise SystemExit(f"no *.label.json found in {args.dir} -- run `label` first")
 
     gaps: list[float] = []
+    px: list[float] = []
     per_file = []
     for lf in labels:
         data = json.loads(lf.read_text())
@@ -1696,7 +2359,9 @@ def _score(args) -> int:
         for path in data["paths"]:
             nodes = path["nodes"]
             for (x0, y0), (x1, y1) in zip(nodes, nodes[1:]):
-                gaps.append(math.hypot(x1 - x0, y1 - y0) / (2 * r))
+                d = math.hypot(x1 - x0, y1 - y0)
+                px.append(d)
+                gaps.append(d / (2 * r))
                 n_pairs += 1
         per_file.append((lf.name, len(data["paths"]), n_pairs))
 
@@ -1705,13 +2370,29 @@ def _score(args) -> int:
         print(f"  {name}: {np_} path(s), {npair} pairs")
 
     arr = np.array(gaps)
-    print("\ngap between consecutive tsums you linked, in tsum diameters:")
+    arr_px = np.array(px)
+
+    # Pixels first, because --link-px is the setting the play loop actually
+    # uses; diameters follow only because --link is still there as a fallback.
+    print("\ngap between consecutive tsums you linked, in PIXELS (--link-px):")
+    for p in (50, 75, 90, 95, 99, 100):
+        print(f"  p{p:<3d} {np.percentile(arr_px, p):6.1f}px")
+    print("\nwhat each candidate --link-px would capture:")
+    for t in (70, 80, 90, 100, 110, 125, 150):
+        print(f"  link-px {t:<4}: {100 * (arr_px <= t).mean():5.1f}% of your links")
+
+    print("\nsame gaps in tsum diameters (--link, only used when --link-px 0):")
     for p in (50, 75, 90, 95, 99, 100):
         print(f"  p{p:<3d} {np.percentile(arr, p):.2f}")
 
     print("\nwhat each candidate --link would capture:")
     for t in (1.2, 1.35, 1.5, 1.7, 2.0, 2.5, 3.0):
         print(f"  link {t:<4}: {100 * (arr <= t).mean():5.1f}% of your links")
+
+    px90 = float(np.percentile(arr_px, 90))
+    print(f"\n-> suggested --link-px {round(px90 / 5) * 5:.0f} (p90 = {px90:.0f}px)")
+
+    _score_adjacency(labels, Path(args.dir), args.tol)
 
     # Deliberately NOT reading the verdict off p99: with a few dozen labelled
     # pairs, p99 is essentially the single largest value, so one stray click
@@ -1736,6 +2417,297 @@ def _score(args) -> int:
     else:
         print("-> links routinely run well past touching: 'reach' is the right model")
     return 0
+
+
+#: Every `detect` keyword `eval --sweep` is allowed to vary. Spelled out rather
+#: than introspected so a typo is an error instead of a silently ignored knob.
+_SWEEPABLE = ("k", "radius", "include_dark", "dark_l", "merge", "heal_frac",
+              "open_ratio", "recolour", "floor_frac", "hole_frac", "scale")
+
+#: Not `detect` arguments -- these shrink the board rect before the crop is
+#: taken, so they tune :data:`LAYOUTS` rather than detection. Sweepable because
+#: the rect is not a free parameter you can reason about from a screenshot: it
+#: decides which board furniture the k-means fit even sees, so a trim changes
+#: the palette and the radius estimate, not just which detections survive.
+_TRIMS = ("trim_top", "trim_bottom", "trim_left", "trim_right")
+
+
+def _match(truth: Sequence[Sequence[float]], found: Sequence[Sequence[float]],
+           tol: float) -> tuple[list[tuple[int, int]], list[int], list[int]]:
+    """Pair up two sets of points, closest pair first, one-to-one.
+
+    Greedy rather than optimal (Hungarian): at `tol` well under the spacing
+    between tsums the two agree, and greedy is deterministic and obvious to
+    read. Returns (pairs, unmatched_truth, unmatched_found).
+    """
+    cand = []
+    t2 = tol * tol
+    for i, (tx, ty) in enumerate(truth):
+        for j, (fx, fy) in enumerate(found):
+            d2 = (tx - fx) ** 2 + (ty - fy) ** 2
+            if d2 <= t2:
+                cand.append((d2, i, j))
+    cand.sort()
+    used_t: set[int] = set()
+    used_f: set[int] = set()
+    pairs = []
+    for _, i, j in cand:
+        if i in used_t or j in used_f:
+            continue
+        used_t.add(i)
+        used_f.add(j)
+        pairs.append((i, j))
+    return (pairs,
+            [i for i in range(len(truth)) if i not in used_t],
+            [j for j in range(len(found)) if j not in used_f])
+
+
+def _truth_points(data: dict) -> list[list[float]]:
+    """The tsums a reviewed board actually has, in full-image pixels.
+
+    Everything detection found at label time, minus what the reviewer struck
+    out, plus what it missed. Both parts matter: without the strike-outs a
+    parameter that keeps a phantom scores as well as one that drops it, and
+    without the misses one that finds nothing at all scores perfectly.
+    """
+    bogus = {tuple(p) for p in data.get("false_positives", [])}
+    keep = [p for p in data.get("detected", []) if tuple(p) not in bogus]
+    return keep + [list(p) for p in data.get("missed", [])]
+
+
+def _detect_labelled(data: dict, folder: Path, params: dict) -> tuple[list[Tsum], list[list[float]], float]:
+    """Re-detect a labelled board and return its tsums in full-image pixels.
+
+    Ground truth is stored in full-image coordinates precisely so that a
+    different board rect stays comparable: trimming the rect just means fewer
+    detections to match, with every truth point still where it was.
+    """
+    img_path = folder / data["image"]
+    img = cv2.imdecode(np.fromfile(str(img_path), np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        raise SystemExit(f"could not read {img_path} (referenced by the label file)")
+
+    params = dict(params)
+    trims = {name: int(params.pop(name, 0) or 0) for name in _TRIMS}
+    bx, by, bw, bh = data["board"]
+    bx += trims["trim_left"]
+    by += trims["trim_top"]
+    bw -= trims["trim_left"] + trims["trim_right"]
+    bh -= trims["trim_top"] + trims["trim_bottom"]
+
+    tsums, radius, _ = detect(img[by:by + bh, bx:bx + bw], **params)
+    return tsums, [[t.x + bx, t.y + by] for t in tsums], radius
+
+
+def _eval_once(labels: Sequence[tuple[Path, dict]], params: dict,
+               tol_frac: float, verbose: bool) -> dict:
+    """Score one parameter set against every reviewed board."""
+    tp = fp = fn = 0
+    splits = merges = grouped = 0
+    per_board = []
+
+    for path, data in labels:
+        truth = _truth_points(data)
+        tsums, found, _ = _detect_labelled(data, path.parent, params)
+        tol = tol_frac * float(data["radius"])
+        pairs, missed, extra = _match(truth, found, tol)
+        tp += len(pairs)
+        fn += len(missed)
+        fp += len(extra)
+
+        # Kind agreement. Each labelled group is a set of tsums a human says
+        # are the same character; detection is right about a group only if it
+        # filed every member under one cluster, and only if no *other* group
+        # landed in that same cluster.
+        by_group: list[set[int]] = []
+        for g in data.get("groups", []):
+            nodes = g["nodes"]
+            gp, _, _ = _match(nodes, found, tol)
+            kinds = {tsums[j].kind for _, j in gp}
+            if not kinds:
+                continue
+            grouped += 1
+            splits += len(kinds) - 1
+            by_group.append(kinds)
+        for gi, a in enumerate(by_group):
+            for b in by_group[gi + 1:]:
+                if a & b:
+                    merges += 1
+
+        per_board.append((path.name, len(pairs), len(extra), len(missed)))
+
+    prec = tp / (tp + fp) if tp + fp else 0.0
+    rec = tp / (tp + fn) if tp + fn else 0.0
+    f1 = 2 * prec * rec / (prec + rec) if prec + rec else 0.0
+    if verbose:
+        for name, a, b, c in per_board:
+            print(f"  {name:24s} hit {a:3d}  false {b:3d}  missed {c:3d}")
+    return {"tp": tp, "fp": fp, "fn": fn, "precision": prec, "recall": rec, "f1": f1,
+            "splits": splits, "merges": merges, "grouped": grouped}
+
+
+def _parse_sweep(specs: Sequence[str]) -> dict[str, list]:
+    """`--sweep k=8,12,16` -> {"k": [8, 12, 16]}, with values typed."""
+    def value(text: str):
+        low = text.strip().lower()
+        if low in ("true", "false"):
+            return low == "true"
+        try:
+            return int(text)
+        except ValueError:
+            return float(text)
+
+    out: dict[str, list] = {}
+    for spec in specs:
+        if "=" not in spec:
+            raise SystemExit(f"--sweep wants NAME=v1,v2,... -- got {spec!r}")
+        name, _, values = spec.partition("=")
+        name = name.strip()
+        if name not in _SWEEPABLE and name not in _TRIMS:
+            raise SystemExit(f"--sweep {name}: not a detect parameter. "
+                             f"Try one of: {', '.join(_SWEEPABLE + _TRIMS)}")
+        out[name] = [value(v) for v in values.split(",")]
+    return out
+
+
+def _eval(args) -> int:
+    """Score detection against the boards you reviewed in `label`.
+
+    `score` answers "how far apart are tsums I chain"; this answers the other
+    half -- "does detection find the right tsums at all", which until now was
+    judged by looking at an overlay and forming an impression.
+    """
+    folder = Path(args.dir)
+    all_labels = sorted(folder.glob("*.label.json"))
+    if not all_labels:
+        raise SystemExit(f"no *.label.json found in {folder} -- run `label` first")
+
+    labels, unreviewed = [], []
+    for lf in all_labels:
+        data = json.loads(lf.read_text())
+        (labels if data.get("reviewed") and data.get("detected") else unreviewed).append((lf, data))
+
+    if unreviewed:
+        print(f"skipping {len(unreviewed)} board(s) without a full identification review: "
+              f"{', '.join(p.name for p, _ in unreviewed)}")
+        print("  (open each in `label`, mark misses/false positives, press r, then s)\n")
+    if not labels:
+        raise SystemExit("no reviewed boards to score -- nothing to report")
+
+    base = {"k": args.k, "radius": args.radius, "include_dark": args.include_dark,
+            "merge": args.merge, "scale": args.scale}
+    truth_total = sum(len(_truth_points(d)) for _, d in labels)
+    print(f"{len(labels)} reviewed board(s), {truth_total} ground-truth tsums, "
+          f"match tolerance {args.tol:.2f}r\n")
+
+    if not args.sweep:
+        r = _eval_once(labels, base, args.tol, verbose=True)
+        print(f"\nprecision {r['precision']:.3f}  recall {r['recall']:.3f}  f1 {r['f1']:.3f}"
+              f"   (hit {r['tp']}, false {r['fp']}, missed {r['fn']})")
+        if r["grouped"]:
+            print(f"kind: {r['grouped']} labelled group(s), {r['splits']} split(s) "
+                  f"(one character read as several colours), "
+                  f"{r['merges']} merge(s) (two characters read as one colour)")
+        else:
+            print("kind: no same-kind groups labelled -- mode 4 in `label` fills this in")
+        return 0
+
+    grid = _parse_sweep(args.sweep)
+    combos = [dict(zip(grid, values)) for values in product(*grid.values())]
+    print(f"sweeping {len(combos)} combination(s) of {', '.join(grid)}\n")
+
+    rows = []
+    for combo in combos:
+        r = _eval_once(labels, {**base, **combo}, args.tol, verbose=False)
+        rows.append((combo, r))
+        print(f"  {_describe(combo):32s} f1 {r['f1']:.3f}")
+
+    rows.sort(key=lambda row: -row[1]["f1"])
+    width = max(len(_describe(c)) for c, _ in rows)
+    print(f"\n{'params'.ljust(width)}  {'prec':>5} {'rec':>5} {'f1':>5}  "
+          f"{'hit':>4} {'fls':>4} {'mis':>4}  {'splt':>4} {'mrg':>4}")
+    for combo, r in rows:
+        print(f"{_describe(combo).ljust(width)}  {r['precision']:5.3f} {r['recall']:5.3f} "
+              f"{r['f1']:5.3f}  {r['tp']:4d} {r['fp']:4d} {r['fn']:4d}  "
+              f"{r['splits']:4d} {r['merges']:4d}")
+
+    best = rows[0][0]
+    print(f"\nbest f1: {_describe(best)}")
+    # A sweep across a handful of boards overfits easily, and the gap between
+    # first and second place is the honest read on whether it found anything.
+    if len(rows) > 1:
+        gap = rows[0][1]["f1"] - rows[1][1]["f1"]
+        if gap < 0.01:
+            print(f"-> only {gap:.3f} f1 ahead of {_describe(rows[1][0])} -- "
+                  f"that is noise, not a winner. Label more boards.")
+    if len(labels) < 5:
+        print(f"-> {len(labels)} board(s) is thin; a winner here may not survive more data.")
+    return 0
+
+
+def _describe(combo: dict) -> str:
+    return " ".join(f"{k}={v}" for k, v in combo.items())
+
+
+def _score_adjacency(label_files: Sequence[Path], folder: Path, tol_frac: float) -> None:
+    """Of the links you actually drew, how many would `touch` mode accept?
+
+    The distance percentiles above are only half the rule. :func:`adjacency`
+    also rejects a pair when a third tsum sits on the line between them, and
+    it only ever links two tsums it filed under the *same* colour cluster. A
+    threshold read off distance alone therefore promises more than the code
+    delivers, so this replays each hand-drawn link through the real test and
+    reports which of the three gates it died at.
+    """
+    boards = []   # (tsums, radius, [(i, j), ...]) -- one entry per labelled board
+    total = 0
+    for lf in label_files:
+        data = json.loads(lf.read_text())
+        if not data.get("paths"):
+            continue
+        tsums, found, radius = _detect_labelled(data, folder, {"k": 12, "include_dark": True})
+        tol = tol_frac * float(data["radius"])
+        links = []
+        for path in data["paths"]:
+            nodes = path["nodes"]
+            pairs, _, _ = _match(nodes, found, tol)
+            at = {i: j for i, j in pairs}
+            links += [(at[a], at[a + 1]) for a in range(len(nodes) - 1)
+                      if a in at and a + 1 in at]
+        if links:
+            boards.append((tsums, radius, links))
+            total += len(links)
+
+    if not total:
+        print("\n(no labelled path survived re-detection, so the link rule "
+              "cannot be replayed -- re-label a board and try again)")
+        return
+
+    print(f"\nreplaying {total} of your links through adjacency() itself:")
+    print(f"  {'link-px':>8}  {'accepted':>8}  {'wrong kind':>10}  {'too far':>8}  {'blocked':>8}")
+    for cap in (90, 100, 105, 120, 150, 200, 0):
+        ok = kind = far = blocked = 0
+        for tsums, radius, links in boards:
+            # Once per board per threshold, not once per link: the graph is the
+            # same for every pair on it. `link` is set absurdly high so that
+            # link_px is the only distance gate in play.
+            adj = adjacency(tsums, radius, link=1e6, link_px=(cap or None))
+            for i, j in links:
+                if tsums[i].kind != tsums[j].kind:
+                    kind += 1
+                elif j in adj[i]:
+                    ok += 1
+                elif cap and math.hypot(tsums[i].x - tsums[j].x,
+                                        tsums[i].y - tsums[j].y) > cap:
+                    far += 1
+                else:
+                    blocked += 1
+        label = f"{cap}" if cap else "inf"
+        print(f"  {label:>8}  {100 * ok / total:7.1f}%  {kind:10d}  {far:8d}  {blocked:8d}")
+
+    print("  'wrong kind' is a detection error, not a distance one: two tsums you")
+    print("  say are the same character were read as different colours, so no")
+    print("  --link-px can ever join them. 'blocked' is the third-tsum test.")
 
 
 def _live(args) -> int:
@@ -1776,7 +2748,8 @@ def _live(args) -> int:
             base, _ = read_base_kind(frame, palette, spec=args.base, debug_dir=args.debug_dir)
         chains = find_chains(tsums, radius, args.link, block=args.block,
                          link_px=args.link_px, base_kind=base, base_only=args.base_only,
-                                 mode=args.mode, max_chain=args.max_chain)
+                                 mode=args.mode, max_chain=args.max_chain,
+                                 first_leg_px=getattr(args, "first_leg_px", 0.0))
         path_ms.append((time.perf_counter() - t) * 1000)
 
         overlay = frame.copy()
@@ -1810,7 +2783,30 @@ def add_play_args(play, *, merge_default: bool):
                            "links tsums that are not touching (--mode touch only)")
     play.add_argument("--link-px", type=float, default=100.0, help="link distance in PIXELS (stable across frames; from labelled links: p90=95). Set 0 to fall back to --link diameters")
     play.add_argument("--max-chain", type=int, default=8, help="cap chain length; picks the tightest cluster of N rather than truncating a board-wide path. 0 = no cap")
-    play.add_argument("--mode", choices=["touch", "reach"], default="touch", help='"reach" (default): any two same-kind tsums link regardless of distance, matching how the game is actually played. "touch": only physically-touching tsums link (conservative, for comparison)')
+    play.add_argument("--verify-hold", action="store_true",
+                      help="while the first tsum is held, read which tsums the "
+                           "game marks as linkable and drop the chain members it "
+                           "did not mark. Costs one capture per drag, because the "
+                           "press is the start of the stroke either way")
+    play.add_argument("--hold-delay", type=float, default=0.10,
+                      help="seconds to wait after pressing before reading the marks. "
+                           "Paid on every drag, so it is the main speed cost of "
+                           "--verify-hold; too low and the marks have not rendered")
+    play.add_argument("--hold-threshold", type=float, default=8.0,
+                      help="mean pixel change that counts as 'the game marked it'")
+    play.add_argument("--hold-aura", type=float, default=90.0,
+                      help="the glow washes over this radius, so members within it "
+                           "are kept regardless -- only distant ones get dropped")
+    play.add_argument("--first-leg-px", type=float, default=0.0,
+                      help="drop leading tsums until the chain's OPENING hop is "
+                           "no longer than this. The first tsum sets the "
+                           "character for the whole stroke, so an opening hop "
+                           "that does not register wastes the entire drag. 0 = "
+                           "off, which is the measured default: orienting the "
+                           "drag to start at its tighter end already brings the "
+                           "opening hop to ~64px, and capping below that only "
+                           "shortens chains")
+    play.add_argument("--mode", choices=["touch", "reach"], default="touch", help='"touch" (default): only tsums within --link-px of each other, with nothing blocking the line between them, count as linked. "reach": any two same-kind tsums link regardless of distance, which is closer to how the game is actually played -- distance stops mattering and --link-px/--link/--block are ignored')
     play.add_argument("--block", type=float, default=0.75,
                       help="a tsum within this many radii of the line blocks the link")
     play.add_argument("--scale", type=float, default=1.0)
@@ -1907,7 +2903,7 @@ def main() -> int:
     a.add_argument("--link", type=float, default=1.35, help="link distance in tsum diameters (--mode touch only)")
     a.add_argument("--link-px", type=float, default=100.0, help="link distance in PIXELS (stable across frames; from labelled links: p90=95). Set 0 to fall back to --link diameters")
     a.add_argument("--max-chain", type=int, default=8, help="cap chain length; picks the tightest cluster of N rather than truncating a board-wide path. 0 = no cap")
-    a.add_argument("--mode", choices=["touch", "reach"], default="touch", help='"reach" (default): any two same-kind tsums link regardless of distance, matching how the game is actually played. "touch": only physically-touching tsums link (conservative, for comparison)')
+    a.add_argument("--mode", choices=["touch", "reach"], default="touch", help='"touch" (default): only tsums within --link-px of each other, with nothing blocking the line between them, count as linked. "reach": any two same-kind tsums link regardless of distance, which is closer to how the game is actually played -- distance stops mattering and --link-px/--link/--block are ignored')
     a.add_argument("--block", type=float, default=0.75, help="occlusion radius for blocking a link")
     a.add_argument("--scale", type=float, default=1.0, help="run detection on a downscaled copy (0.5 = ~4x faster)")
     a.add_argument("--no-dark", dest="include_dark", action="store_false",
@@ -1926,13 +2922,75 @@ def main() -> int:
     s.add_argument("--tilt", type=float, default=1.0,
                    help="0 = all upright, 1 = fully random rotation")
 
-    lab = sub.add_parser("label", help="click a board's tsums to record the path you would drag")
+    g = sub.add_parser("grab", help="save a burst of real boards to label later")
+    g.add_argument("-n", "--frames", type=int, default=10, help="how many boards to keep")
+    g.add_argument("--dir", default="scratchpad", help="where to write them")
+    g.add_argument("--prefix", default="board", help="filename stem; a free number is appended")
+    g.add_argument("--interval", type=float, default=3.0,
+                   help="seconds between grabs -- long enough that the board has changed")
+    g.add_argument("--countdown", type=float, default=5.0,
+                   help="seconds before the first grab, to get a round started")
+    g.add_argument("--board")
+    g.add_argument("-k", type=int, default=12)
+    g.add_argument("--radius", type=float)
+    g.add_argument("--no-dark", dest="include_dark", action="store_false")
+    g.add_argument("--no-prepare", action="store_true")
+    g.add_argument("--min-tsums", type=int, default=20)
+    g.add_argument("--max-tsums", type=int, default=110)
+
+    idl = sub.add_parser("idle", help="film the hint the game shows an idle player")
+    idl.add_argument("--seconds", type=float, default=45.0, help="how long to film")
+    idl.add_argument("--fps", type=float, default=5.0)
+    idl.add_argument("--countdown", type=float, default=3.0)
+    idl.add_argument("--settle", type=float, default=10.0,
+                     help="seconds to wait for the pile to stop moving first")
+    idl.add_argument("--keep", type=int, default=12, help="frames to save")
+    idl.add_argument("--threshold", type=float, default=8.0)
+    idl.add_argument("--dir", default="scratchpad")
+    idl.add_argument("--board")
+    idl.add_argument("-k", type=int, default=12)
+    idl.add_argument("--no-dark", dest="include_dark", action="store_false")
+    idl.add_argument("--no-prepare", action="store_true")
+
+    hp = sub.add_parser("hold", help="press one tsum and photograph what the game marks")
+    hp.add_argument("--hold", type=float, default=3.0,
+                    help="seconds to keep it pressed -- long enough to watch")
+    hp.add_argument("--countdown", type=float, default=0.0,
+                    help="0 = press as soon as the board is still. Waiting is "
+                         "what makes the game put up its idle hint")
+    hp.add_argument("--settle", type=float, default=3.0)
+    hp.add_argument("--dir", default="scratchpad")
+    hp.add_argument("--threshold", type=float, default=8.0,
+                    help="mean pixel change that counts as 'the game marked this one'")
+    hp.add_argument("--link-px", type=float, default=105.0)
+    hp.add_argument("--block", type=float, default=1.25)
+    hp.add_argument("--max-chain", type=int, default=8)
+    hp.add_argument("--board")
+    hp.add_argument("-k", type=int, default=12)
+    hp.add_argument("--no-dark", dest="include_dark", action="store_false")
+    hp.add_argument("--no-prepare", action="store_true")
+
+    lab = sub.add_parser("label", help="mark up a board: chains you'd drag, and detection's mistakes")
     lab.add_argument("image", type=Path)
     lab.add_argument("--board")
     lab.add_argument("-k", type=int, default=12)
     lab.add_argument("--radius", type=float)
     lab.add_argument("--no-dark", dest="include_dark", action="store_false")
     lab.add_argument("--merge", action="store_true")
+
+    ev = sub.add_parser("eval", help="score detection against your reviewed boards")
+    ev.add_argument("--dir", default="scratchpad", help="folder holding *.label.json")
+    ev.add_argument("-k", type=int, default=12)
+    ev.add_argument("--radius", type=float)
+    ev.add_argument("--scale", type=float, default=1.0)
+    ev.add_argument("--no-dark", dest="include_dark", action="store_false")
+    ev.add_argument("--merge", action="store_true")
+    ev.add_argument("--tol", type=float, default=0.6,
+                    help="a detection counts as the same tsum within this many radii "
+                         "of a ground-truth point")
+    ev.add_argument("--sweep", action="append", metavar="NAME=v1,v2",
+                    help="try every value of a detect parameter and rank by f1; "
+                         "repeatable, e.g. --sweep k=8,12,16 --sweep floor_frac=0.35,0.42")
 
     sk = sub.add_parser("skillcheck", help="print the skill button's gold reading right now")
     sk.add_argument("--skill", default="76,854")
@@ -1942,6 +3000,9 @@ def main() -> int:
 
     sc = sub.add_parser("score", help="read your labels and report the link rule they imply")
     sc.add_argument("--dir", default="scratchpad", help="folder holding *.label.json")
+    sc.add_argument("--tol", type=float, default=0.6,
+                    help="how close a re-detected tsum must be to a labelled one "
+                         "to count as the same, in radii")
 
     live = sub.add_parser("live", help="grab the emulator N times and report real throughput")
     live.add_argument("-n", "--frames", type=int, default=20)
@@ -1952,7 +3013,7 @@ def main() -> int:
     live.add_argument("--link", type=float, default=1.35)
     live.add_argument("--link-px", type=float, default=100.0, help="link distance in PIXELS (stable across frames; from labelled links: p90=95). Set 0 to fall back to --link diameters")
     live.add_argument("--max-chain", type=int, default=8, help="cap chain length; picks the tightest cluster of N rather than truncating a board-wide path. 0 = no cap")
-    live.add_argument("--mode", choices=["touch", "reach"], default="touch", help='"reach" (default): any two same-kind tsums link regardless of distance, matching how the game is actually played. "touch": only physically-touching tsums link (conservative, for comparison)')
+    live.add_argument("--mode", choices=["touch", "reach"], default="touch", help='"touch" (default): only tsums within --link-px of each other, with nothing blocking the line between them, count as linked. "reach": any two same-kind tsums link regardless of distance, which is closer to how the game is actually played -- distance stops mattering and --link-px/--link/--block are ignored')
     live.add_argument("--block", type=float, default=0.75)
     live.add_argument("--scale", type=float, default=1.0)
     live.add_argument("--no-dark", dest="include_dark", action="store_false")
@@ -1974,8 +3035,20 @@ def main() -> int:
 
     args = ap.parse_args()
 
+    if args.cmd == "grab":
+        return _grab(args)
+
+    if args.cmd == "hold":
+        return _hold(args)
+
+    if args.cmd == "idle":
+        return _idle(args)
+
     if args.cmd == "label":
         return _label(args)
+
+    if args.cmd == "eval":
+        return _eval(args)
 
     if args.cmd == "skillcheck":
         return _skillcheck(args)
@@ -2016,7 +3089,8 @@ def main() -> int:
     t0 = time.perf_counter()
     chains = find_chains(tsums, radius, args.link, block=args.block,
                          link_px=args.link_px, base_kind=base, base_only=args.base_only,
-                                 mode=args.mode, max_chain=args.max_chain)
+                                 mode=args.mode, max_chain=args.max_chain,
+                                 first_leg_px=getattr(args, "first_leg_px", 0.0))
     t_path = time.perf_counter() - t0
 
     overlay = draw(crop, tsums, chains, radius)

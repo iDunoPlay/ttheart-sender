@@ -105,8 +105,10 @@ def act_play_tsum(ctx: RunContext, params: Params) -> ActionResult:
     report = play_loop(drv, opts, stop_when=_stop_checker(ctx, until_found, until_gone, confidence))
 
     ctx.set_var("tsum_chains_played", report.played)
+    ctx.set_var("tsum_tsums_cleared", report.cleared)
+    ctx.set_var("tsum_drags_stalled", report.stalled)
     ctx.set_var("tsum_stop_reason", report.reason)
-    log.info("%splay_tsum -> %d chain(s), %s", ctx.indent, report.played,
+    log.info("%splay_tsum -> %s, %s", ctx.indent, report.describe(),
              report.reason or "no reason given")
 
     # A round that never got a single chain away means the loop was looking at

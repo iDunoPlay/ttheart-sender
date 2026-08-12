@@ -28,7 +28,9 @@ steps:
       template: play_button
       timeout: 15
       
-  - wait: 1
+  - wait_for:
+      template: combo_items
+      timeout: 15
 
   - find_click:
       template: start_button
@@ -48,6 +50,15 @@ steps:
   # Every knob the `play` command has is available under `options:` -- e.g.
   # {min_chain: 4, per_step: 0.006, base_only: true}. Unknown names are
   # rejected when the step runs rather than silently ignored.
+  # link_px 105 / block 1.25. 150 was tried and is worse in play: a longer
+  # reach gathers more tsums that only *look* like the leading one, and the
+  # game adds none of them to the stroke, so the drag clears less and stalls
+  # more. Measured over the labelled boards, effective clears per drag peak
+  # around 105-120 and fall off at 150.
+  #
+  # block 1.25, up from 0.75: 0.75 radii is ~19px while a tsum is ~25px, so a
+  # tsum sitting bodily across the line did not count as blocking it. Raising
+  # it rejects 6% more of the links a human drew and stops the crossings.
   - play_tsum:
       duration: 90
       until_found: timeup
@@ -55,6 +66,8 @@ steps:
       options:
         min_chain: 3
         max_chain: 8
+        link_px: 105
+        block: 1.25
 
   - find_click:
       template: cancel_button
