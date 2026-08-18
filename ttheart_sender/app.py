@@ -15,6 +15,7 @@ from .automation.context import RunContext
 from .automation.flow import Flow, list_flows, load_flow_by_name
 from .automation.runner import FlowRunner, RunReport
 from .config import Config, load_config
+from .control.cursor import CursorGuard
 from .control.hotkey import StopKeyWatcher
 from .control.keyboard import NullKeyboard, PyAutoGuiKeyboard
 from .control.mouse import NullMouse, PyAutoGuiMouse
@@ -48,6 +49,11 @@ class Application:
             scales=config.matching.scales,
         )
         self.stop = StopKeyWatcher(config.runner.stop_key)
+        if config.runner.stop_on_cursor_exit:
+            self.stop.add_guard(
+                "cursor",
+                CursorGuard(self._emulator_rect, margin=config.runner.cursor_exit_margin),
+            )
 
         if dry_run:
             self.mouse: Any = NullMouse()
@@ -134,6 +140,21 @@ class Application:
     def window(self) -> Optional[WindowController]:
         return self._window
 
+    def _emulator_rect(self) -> Optional[Rect]:
+        """Whole emulator window, for the cursor stop zone.
+
+        The window rather than the content area, so the emulator's own toolbar
+        is inside the zone -- reaching for it is not a reason to stop a run.
+        A window that has gone away leaves the zone unknown, and an unknown
+        zone never trips the guard.
+        """
+        if self._window is None:
+            return None
+        try:
+            return self._window.info().window_rect
+        except Exception:  # noqa: BLE001 - window closed mid-run
+            return None
+
     def content_rect(self) -> Rect:
         if self._window is None:
             raise RuntimeError("No window attached; call attach_window() first")
@@ -184,6 +205,8 @@ class Application:
         runner = FlowRunner(ctx)
         if self.stop.enabled:
             log.info("Press %s at any time to stop.", str(self.config.runner.stop_key).upper())
+        if self.config.runner.stop_on_cursor_exit:
+            log.info("Moving the cursor out of the emulator also stops the run.")
         return runner.run(flow, variables=variables, loops=loops, loop_delay=loop_delay)
 
     # -- lifecycle -------------------------------------------------------

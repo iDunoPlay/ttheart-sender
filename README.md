@@ -103,7 +103,7 @@ also aborts (pyautogui's fail-safe).
 | `flows` / `validate [FLOW]` | List flows / parse them without running |
 | `actions` | List every action the flow language supports |
 | `run FLOW [--var K=V] [--loops N] [--dry-run]` | Run a flow |
-| `tray [--mode M] [--start] [--play]` | Sit in the system tray; right-click to pick a mode |
+| `tray [--mode M] [--start] [--play]` | Sit in the system tray; left-click for the panel |
 
 Global flags: `-c/--config`, `-v/--verbose`, `-q/--quiet`.
 
@@ -113,26 +113,37 @@ For day-to-day use there is no need for a console window. `python main.py tray`
 (or the built `.exe`) puts a heart icon next to the clock — grey when idle, red
 while a flow is running.
 
-Right-click it:
+**Left-click it** and the control panel opens in the bottom-right corner of the
+screen, above the taskbar:
 
 ```
-ttheart-sender v0.1.0  <- which build this is
-Idle (Resume)          <- status, not clickable
-─────────────
-Mode        > ● Resume     python main.py run resume
-              ○ Launch     python main.py run launch
-              ○ Play       python main.py run play  (repeats until stopped)
-☐ Play rounds          <- tick: may break off to play; untick (default): never
-─────────────
-Start Resume           <- runs whichever mode is ticked
-Stop (F12)
-─────────────
-Open logs folder
-─────────────
-Exit
+ttheart-sender v0.1.0   <- which build this is
+[x] Always on top
+Mode
+ (o) Resume  ( ) Launch  ( ) Play (beta)
+[ ] Auto Play
+────────────────────────
+Purchase box
+[ ] Premium box plus
+[x] Premium box
+[x] Pick-up capsule
+[x] Happiness capsule
+────────────────────────
+[      Buy tsum       ]  <- runs purchase_box with the ticks above
+[ Stop - Running: ... ]  <- Run when idle, Stop while a run is going
+[ Open logs ] [ Exit  ]
 ```
 
-**Play rounds** is the on/off switch for the dice roll in the Resume/Launch
+Right-clicking the icon does nothing: the panel replaced the old context menu,
+which is why **Exit** and **Open logs** are on it — they are the only way out
+of the app.
+
+Every choice is written to `ttheart-settings.json` next to the logs and reloaded
+at the next launch, so the panel opens the way you left it. Delete that file to
+go back to the defaults shown above. `--mode` and `--play` still work on the
+command line and win over the saved file for that session.
+
+**Auto Play** is the on/off switch for the dice roll in the Resume/Launch
 cycle, and it starts **unticked**: the tray passes `play_chance_percent: 0`, so
 the cycle only claims gifts and sends hearts. Tick it and the flow's own
 `play_chance_percent` applies instead — 8% per cycle as shipped. Change those
@@ -142,14 +153,28 @@ odds in `vars:` at the top of [`flows/resume.yaml`](flows/resume.yaml) and
 it ticked from the outset.
 (The dedicated **Play** mode is unaffected — it plays rounds outright.)
 
-A console `run resume` has no tray to ask, so it uses the flow's 8% as written.
+A console `run resume` has no panel to ask, so it uses the flow's 8% as written.
 
-Picking a mode or toggling the tick only *selects* it; **Start** is what
-launches it, and a run keeps whatever it started with. **Stop** does
+Picking a mode or toggling a tick only *selects* it; **Run** is what launches
+it, and a run keeps whatever it started with. **Buy tsum** greys out while
+anything is running, since one emulator cannot serve two flows. **Stop** does
 exactly what pressing **F12** does — both set the same flag, which every flow
 checks between steps and during waits, so a run stops within a second or two
-even in the middle of a long pause. Double-clicking the icon is a Start/Stop
-toggle, and a balloon tells you how each run ended.
+even in the middle of a long pause. A balloon tells you how each run ended.
+
+### Stopping a run
+
+Three things stop a run, all through the same switch:
+
+* **F12** anywhere, even while the emulator has focus.
+* The panel's **Stop** button.
+* **Moving the mouse out of the emulator window.** The flow drives the cursor,
+  so a cursor outside LDPlayer means either you have taken the mouse back or a
+  click went somewhere it should not have. The guard arms the first time it
+  sees the cursor inside the window — a run started from another monitor is
+  not stopped before its first click — and `runner.cursor_exit_margin` (16px)
+  keeps an edge click from counting as an escape. Turn it off with
+  `runner.stop_on_cursor_exit: false` in `config.yaml`.
 
 Only one tray instance runs at a time; launching a second one exits immediately
 rather than having two bots fight over the same emulator.
@@ -245,9 +270,18 @@ Any step that searches accepts `template`, `timeout`, `poll_interval`,
 `confidence`, `scales`, and `region` (`[x, y, w, h]` relative to the content
 area, or `screen`).
 
+`repeat` also takes `stop_when_still: true`, which ends the loop as soon as an
+iteration leaves `region` unchanged. It is what a scrolling loop wants: a list
+clamped at its top or bottom returns the identical picture every pass, so
+without it the loop spends its whole `max_iterations` budget on scrolls that
+cannot move anything. Give the `delay` enough room for the app's own settle
+animation, or every frame lands mid-bounce and nothing ever looks still.
+
 Actions: `find`, `find_click` (`tap`), `click_all`, `wait_for`,
 `wait_until_gone`, `click`, `move`, `drag`, `scroll`, `key`, `hotkey`, `type`,
-`wait`, `log`, `set`, `screenshot`, `if_found`, `chance`, `repeat`, `while_found`,
+`wait`, `log`, `set`, `add` (`incr`), `screenshot`, `if` (`when`), `if_found`,
+`chance`, `repeat`,
+`while_found`,
 `run_flow`, `prepare_window`, `stop`. Run `python main.py actions` for the
 one-line summary of each, and read [flows/example.yaml](flows/example.yaml) for
 an annotated tour of all of them.

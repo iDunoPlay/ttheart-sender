@@ -7,9 +7,12 @@ backend, or a no-op backend for tests means adding a class here.
 
 from __future__ import annotations
 
+import ctypes
 import logging
 import random
+import sys
 import time
+from ctypes import wintypes
 from typing import Optional, Protocol, runtime_checkable
 
 from ..config import InputConfig
@@ -18,6 +21,62 @@ from ..geometry import Point
 log = logging.getLogger(__name__)
 
 Button = str  # "left" | "right" | "middle"
+
+WHEEL_DELTA = 120  # one detent of a physical wheel
+_INPUT_MOUSE = 0
+_MOUSEEVENTF_WHEEL = 0x0800
+
+
+class _MOUSEINPUT(ctypes.Structure):
+    _fields_ = [
+        ("dx", wintypes.LONG),
+        ("dy", wintypes.LONG),
+        ("mouseData", wintypes.DWORD),
+        ("dwFlags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ctypes.POINTER(wintypes.ULONG)),
+    ]
+
+
+class _INPUT(ctypes.Structure):
+    class _VALUE(ctypes.Union):
+        _fields_ = [("mi", _MOUSEINPUT)]
+
+    _anonymous_ = ("value",)
+    _fields_ = [("type", wintypes.DWORD), ("value", _VALUE)]
+
+
+def send_wheel(notches: int, *, interval: float = 0.05) -> None:
+    """Spin the wheel ``notches`` detents at the current cursor position.
+
+    Deliberately not ``pyautogui.scroll``. pyautogui injects the wheel through
+    the legacy ``mouse_event`` API -- its source carries a TODO reading "ARG!
+    For some reason, SendInput isn't working for mouse events. I'm switching to
+    using the older mouse_event win32 function" -- and LDPlayer's render window
+    does not act on wheel events delivered that way. Measured against the game's
+    ranking list: pyautogui moved 0 pixels at every notch count in both
+    directions, while identical notches sent via ``SendInput`` scrolled it
+    normally.
+
+    One event per detent, matching a physical wheel, rather than a single
+    multiplied delta -- both work here, but per-detent is what apps expect and
+    is the safer default for anything with its own scroll acceleration.
+    """
+    if not notches:
+        return
+    step = WHEEL_DELTA if notches > 0 else -WHEEL_DELTA
+    for index in range(abs(int(notches))):
+        if index and interval > 0:
+            time.sleep(interval)
+        event = _INPUT(
+            type=_INPUT_MOUSE,
+            mi=_MOUSEINPUT(0, 0, step, _MOUSEEVENTF_WHEEL, 0, None),
+        )
+        sent = ctypes.windll.user32.SendInput(1, ctypes.byref(event), ctypes.sizeof(_INPUT))
+        if sent != 1:
+            raise OSError(
+                f"SendInput refused the wheel event (error {ctypes.get_last_error()})"
+            )
 
 
 @runtime_checkable
@@ -129,7 +188,10 @@ class PyAutoGuiMouse:
     def scroll(self, amount: int, point: Optional[Point] = None) -> None:
         if point is not None:
             self.move(point)
-        self._pyautogui.scroll(int(amount))
+        if sys.platform == "win32":
+            send_wheel(int(amount))
+        else:
+            self._pyautogui.scroll(int(amount))
 
 
 class NullMouse:

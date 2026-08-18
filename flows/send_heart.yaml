@@ -11,36 +11,45 @@ steps:
         template: weekly_ranking
         timeout: 4
 
-    # Scroll the list by repeating the drag until rank_1 is on screen. Checks
-    # before each drag, so it stops as soon as it's already visible without an
-    # extra unnecessary swipe. require_found: if a popup covers the list and
-    # rank_1 never shows up within 20 tries, fail loudly instead of silently
-    # continuing on to send-heart logic against the wrong screen.
+    # Scroll the list back to the top, then stop as soon as it stops moving.
     #
-    # rank_1/2/3 badges are the same shape, differing only by color
-    # (gold/silver/bronze) and digit, and the shared shape dominates the
-    # match score -- grayscale (ignores color) matched rank_1 against the
-    # rank 2 badge at 0.977, and even color matching alone still hit rank
-    # 3 at 0.963 elsewhere on screen. Two fixes combined:
-    #   - region: only the fixed band right below the sticky "Weekly
-    #     Ranking" header, where the CURRENT top-of-list entry renders.
-    #     Structurally excludes every row except that one, regardless of
-    #     which rank happens to be sitting in it.
-    #   - grayscale: false: for when the wrong rank is still the
-    #     topmost/only-candidate row (e.g. rank 2 before any scrolling),
-    #     color drops that false match to 0.77, safely under threshold.
+    # This used to wait for rank_1 to appear. Measured against the live list
+    # on 2026-08-18 that no longer works: with the list clamped at the top,
+    # rank_1 scores 0.697 -- under the 0.85 threshold, and barely above the
+    # 0.63-0.67 it scores when scrolled away, so it no longer tells the two
+    # apart. The layout it encodes has changed: there is now a ~128px gap
+    # between the sticky header and rank 1, and the badge 2 it includes sits
+    # at y~565, outside the y=220..580 band this loop searches.
+    #
+    # What is reliable is movement. The list clamps at the top, so "the
+    # screen stopped changing" IS "we are at the top", with no template,
+    # no threshold, and nothing to re-crop when the weekly list changes.
+    #
+    # The delay is not padding. Each wheel-up against a clamped list plays a
+    # bounce that takes ~1.8s to settle (measured: peak mean_diff 27.7 at
+    # ~1.0s, 0.007 at 1.55s, pixel-identical at ~1.8s, over three trials).
+    # Sampling inside that window -- as the old 0.5-0.9s delay did -- means
+    # no two frames ever match and the loop runs its whole budget. The
+    # tolerance covers the last sliver of settling without coming close to
+    # the double-digit differences real scrolling produces.
     - repeat:
-        until_found: rank_1
+        stop_when_still: true
+        still_tolerance: 0.5
         max_iterations: 20
-        delay: {min: 0.3, max: 0.55}
-        require_found: true
-        grayscale: false
-        region: [0, 150, 578, 270]
+        delay: {min: 1.7, max: 2.0}
+        region: [0, 220, 578, 360]
         steps:
-          - drag:
-              from: [488, 317]
-              to: [481, 964]
-              duration: {min: 0.6, max: 0.9}
+          # Wheel up = list travels back toward rank 1. `at` parks the cursor
+          # mid-list first, since the wheel goes to whatever is under it.
+          #
+          # A notch measures ~77px, so 25 covers ~1900px per pass.
+          # Overshooting is free because the list clamps at the top, and
+          # bigger passes mean fewer settle waits: measured from the same
+          # depth, 25 reached the top in 3 passes / 10.7s where 8 took
+          # 5 passes / 12.9s.
+          - scroll:
+              amount: 25
+              at: [287, 555]
 
     # Work through the ranking list: send a heart to whoever needs one, or
     # scroll for more names, until the footer comes into view.
@@ -57,14 +66,14 @@ steps:
     - while_found:
         template: send_heart
         delay: {min: 0.2, max: 0.45}
-        max_iterations: 10
+        max_iterations: 50
         steps:
           - find_click:
               template: send_heart
               timeout: 3
           - wait: {min: 0.4, max: 0.7}
           - find_click:
-              template: claim_all_ok_button
+              template: ok_button
               timeout: 3
           # Just a fading confirmation toast, not a button -- not worth
           # failing the loop over if the timing window is missed.
@@ -75,26 +84,37 @@ steps:
 
     - repeat:
         until_found: ranking_footer
-        max_iterations: 30
+        max_iterations: 100
         delay: {min: 0.3, max: 0.55}
         require_found: true
         steps:
-          - drag:
-              from: [492, 698]
-              to: [490, 318]
-              duration: {min: 0.6, max: 0.9}
+          # Wheel down = further down the list. Measured travel on this list:
+          # 1 notch 62px, 2 notches 146px, 3 notches 231px. 3 is the largest
+          # directly verified value and sits well under the 660px visible
+          # band, so nobody scrolls past unseen. It is shorter than the 380px
+          # drag it replaces, hence max_iterations raised 30 -> 45 to keep the
+          # same reach down a long list.
+          #
+          # Do not raise this casually: this loop drains send_heart between
+          # scrolls, so a scroll longer than a screenful skips names
+          # permanently.
+          - scroll:
+              amount: -3
+              at: [287, 555]
+
+          - wait: {min: 0.2, max: 0.4}
 
           - while_found:
               template: send_heart
-              delay: {min: 0.2, max: 0.45}
-              max_iterations: 10
+              delay: {min: 0.4, max: 0.95}
+              max_iterations: 50
               steps:
                 - find_click:
                     template: send_heart
                     timeout: 3
                 - wait: {min: 0.4, max: 0.7}
                 - find_click:
-                    template: claim_all_ok_button
+                    template: ok_button
                     timeout: 3
                 - find_click:
                     template: heart_sent

@@ -166,6 +166,12 @@ class RunnerConfig:
     default_poll_interval: float = 0.25
     #: Global panic key polled between steps and during waits.
     stop_key: Optional[str] = "f12"
+    #: Stop the run when the physical cursor leaves the emulator window.
+    #: Arms on the first checkpoint that sees the cursor inside it.
+    stop_on_cursor_exit: bool = True
+    #: Slack in pixels around the window before the guard trips, so a click
+    #: on the very edge (plus its jitter) is not treated as an escape.
+    cursor_exit_margin: int = 16
     #: Safety net for ``repeat: {forever: true}``.
     max_iterations: int = 100_000
 

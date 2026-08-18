@@ -278,76 +278,118 @@ def test_toggle_starts_then_stops():
 # Menu
 # --------------------------------------------------------------------------
 @pytest.fixture()
-def tray():
+def tray(tmp_path):
     from ttheart_sender.tray.app import TrayApp
 
-    return TrayApp(FakeApp())
+    app = FakeApp()
+    # Keep the saved-settings file out of the repo: TrayApp writes one on
+    # every toggle, and output_root defaults to the working directory.
+    app.config.output_root = tmp_path
+    return TrayApp(app)
 
 
 def labels(items):
     return [item.label for item in items if item.label]
 
 
-def test_menu_has_a_mode_group_a_start_and_a_stop(tray):
-    rows = tray._build_menu()
-    submenus = [item for item in rows if item.items]
-    assert len(submenus) == 1
-    assert labels(submenus[0].items) == ["Resume", "Launch", "Play"]
-    assert all(item.radio for item in submenus[0].items)
-
-    assert "Start Resume" in labels(rows)
-    assert "Stop (F12)" in labels(rows)
-    assert "Exit" in labels(rows)
+def test_panel_offers_every_mode_including_the_beta_label(tray):
+    state = tray._panel_state()
+    assert state["mode"] == "resume"
+    assert [mode.label for mode in MODES] == ["Resume", "Launch", "Play (beta)"]
 
 
-def test_menu_play_row_is_a_tick_that_toggles(tray):
-    rows = {item.label: item for item in tray._build_menu() if item.label}
-    play = rows["Play rounds"]
-    assert play.checked is False and play.radio is False
+def test_panel_shows_the_version(tray):
+    """A screenshot of the panel should be enough to identify the build."""
+    from ttheart_sender import __version__
 
-    play.action()
+    assert tray._panel._version_text == f"ttheart-sender v{__version__}"
+
+
+def test_right_click_menu_is_gone(tray):
+    """Left-click opens the panel; the context menu was retired with it."""
+    assert tray._icon._menu_factory is None
+    assert tray._icon._on_left_click is not None
+    assert tray._icon._on_double_click is None
+
+
+def test_panel_toggles_reach_the_service_and_the_saved_file(tray):
+    assert tray._panel_state()["auto_play"] is False
+
+    tray._set_toggle("auto_play", True)
     assert tray._service.play is True
-    refreshed = {item.label: item for item in tray._build_menu() if item.label}
-    assert refreshed["Play rounds"].checked is True
+    assert tray._panel_state()["auto_play"] is True
+
+    tray._set_toggle("always_on_top", False)
+    tray._set_mode("play")
+    assert tray._panel_state()["mode"] == "play"
+
+    # Everything above must survive a restart.
+    from ttheart_sender.tray.settings import PanelSettings
+
+    reloaded = PanelSettings.load(tray._settings_path)
+    assert reloaded.auto_play is True
+    assert reloaded.always_on_top is False
+    assert reloaded.mode == "play"
 
 
-def test_menu_checks_the_selected_mode(tray):
-    tray._service.set_mode("play")
-    modes = [item for item in tray._build_menu() if item.items][0].items
-    assert [item.checked for item in modes] == [False, False, True]
+def test_purchase_ticks_are_saved_and_passed_to_the_flow(tray):
+    defaults = tray._panel_state()["purchase"]
+    assert defaults == {
+        "premium_box_plus": False,
+        "premium_box": True,
+        "pick_up_capsule": True,
+        "happiness_box": True,
+    }
+
+    tray._set_purchase("premium_box_plus", True)
+    tray._set_purchase("happiness_box", False)
+    tray._buy_tsum()
+    wait_for(lambda: tray._service.state is RunState.IDLE)
+
+    assert tray._app.calls[-1]["flow"] == "purchase_box"
+    assert tray._app.variables[-1] == {
+        "premium_box_plus": True,
+        "premium_box": True,
+        "pick_up_capsule": True,
+        "happiness_box": False,
+    }
 
 
-def test_start_and_stop_swap_availability_with_state(tray):
-    idle = {item.label: item for item in tray._build_menu() if item.label}
-    assert idle["Start Resume"].enabled is True
-    assert idle["Stop (F12)"].enabled is False
-    assert idle["Idle (Resume)"].enabled is False, "status row is a label, not a button"
+def test_run_and_buy_availability_swaps_with_state(tray):
+    idle = tray._panel_state()
+    assert idle["running"] is False and idle["status"] == "Idle (Resume)"
 
     tray._app._block = True
     tray._service.start()
     tray._app.entered.wait(5)
 
-    running = {item.label: item for item in tray._build_menu() if item.label}
-    assert running["Start Resume"].enabled is False
-    assert running["Stop (F12)"].enabled is True
+    running = tray._panel_state()
+    assert running["running"] is True
+    assert running["status"] == "Running: Resume"
 
     tray._app.release.set()
     wait_for(lambda: tray._service.state is RunState.IDLE)
+
+
+def test_buy_tsum_is_named_in_the_status_while_it_runs(tray):
+    """The Run button's status has to say which job is holding the service."""
+    tray._app._block = True
+    tray._buy_tsum()
+    tray._app.entered.wait(5)
+
+    assert tray._panel_state()["status"] == "Running: Buy tsum"
+    # A mode run must not be startable underneath it.
+    assert tray._service.start() is False
+
+    tray._app.release.set()
+    wait_for(lambda: tray._service.state is RunState.IDLE)
+    assert tray._panel_state()["status"] == "Idle (Resume)"
 
 
 def test_tooltip_reports_the_version_and_the_state(tray):
     from ttheart_sender import __version__
 
     assert tray._tooltip() == f"ttheart-sender v{__version__} - Idle (Resume)"
-
-
-def test_menu_shows_the_version(tray):
-    """A screenshot of the tray should be enough to identify the build."""
-    from ttheart_sender import __version__
-
-    rows = tray._build_menu()
-    assert rows[0].label == f"ttheart-sender v{__version__}"
-    assert rows[0].enabled is False, "the version is a label, not a button"
 
 
 def test_one_version_number_for_the_whole_project():

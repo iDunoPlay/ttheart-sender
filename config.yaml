@@ -72,4 +72,6 @@ runner:
   default_timeout: 10.0    # default wait for find_click / wait_for
   default_poll_interval: 0.25
   stop_key: f12            # panic key, polled during every step and wait
+  stop_on_cursor_exit: true  # stop if the cursor leaves the emulator window
+  cursor_exit_margin: 16     # px of slack around the window before it trips
   max_iterations: 100000

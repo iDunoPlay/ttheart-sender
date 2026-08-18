@@ -1,0 +1,191 @@
+name: purchase_box
+description: Buy out every box that is switched on, in a fixed order
+
+# Which boxes to buy. Flip them here, or per run:
+#   python main.py run purchase_box --var premium_box=false
+vars:
+  premium_box_plus: false
+  premium_box: true
+  pick_up_capsule: true
+  happiness_box: true
+  # Safety net only: the most purchases to attempt on one box before moving
+  # on. Every box does sell out eventually, so the sold-out marker is what
+  # normally ends the inner loop -- this just stops a runaway spend if the
+  # flow ends up looking at a screen it does not recognise.
+  max_per_box: 200
+
+steps:
+    - click: [456, 866]
+
+    - wait: {min: 0.4, max: 0.85}
+
+    - click: [456, 866]
+
+    - wait_for:
+        template: 1_time_purchase
+        timeout: 10
+
+    # How many boxes this run owes: one per flag that is on. `add` counts a
+    # boolean as 1/0, so these four lines are the tally.
+    #
+    # This and the working copies below are rebuilt at the top of every run on
+    # purpose. Variables live for the whole run, not per loop, so `--loops 3`
+    # and a `call: purchase_box` from resume.yaml would otherwise inherit the
+    # previous pass's spent flags and buy nothing.
+    - set: {expected: 0, bought: 0}
+    - add: {expected: "${premium_box_plus}"}
+    - add: {expected: "${premium_box}"}
+    - add: {expected: "${pick_up_capsule}"}
+    - add: {expected: "${happiness_box}"}
+
+    # Working copies. The chain ticks one off per pass; the originals stay
+    # untouched so they still read as the user's settings.
+    - set:
+        todo_premium_box_plus: ${premium_box_plus}
+        todo_premium_box: ${premium_box}
+        todo_pick_up_capsule: ${pick_up_capsule}
+        todo_happiness_box: ${happiness_box}
+
+    - log: "purchase_box: ${expected} box(es) to buy"
+
+    # ---- outer loop: one pass per enabled box, in a fixed order ----------
+    # `times: ${expected}` is the whole stop condition -- with every flag off
+    # it is 0 and the loop is skipped rather than failing.
+    - repeat:
+        times: ${expected}
+        counter: box
+        delay: {min: 0.5, max: 0.9}
+        steps:
+        # The chain only *picks* the box: first flag still standing wins the
+        # pass and clears itself, so the next pass falls through to the one
+        # below it. Everything after the chain is shared, which is why the
+        # purchase steps are written once instead of four times.
+        - if:
+            value: ${todo_premium_box_plus}
+            then:
+            - set:
+                box_name: premium box plus
+                box_at: [75, 638]
+                todo_premium_box_plus: false
+
+            else:
+            - if:
+                value: ${todo_premium_box}
+                then:
+                - set:
+                    box_name: premium box
+                    box_at: [200, 634]
+                    todo_premium_box: false
+
+                else:
+                - if:
+                    value: ${todo_pick_up_capsule}
+                    then:
+                    - set:
+                        box_name: pick up capsule
+                        box_at: [336, 636]
+                        todo_pick_up_capsule: false
+
+                    else:
+                    - if:
+                        value: ${todo_happiness_box}
+                        then:
+                        - set:
+                            box_name: happiness box
+                            box_at: [468, 635]
+                            todo_happiness_box: false
+
+        - log: "box ${box_1based}/${expected}: ${box_name}"
+
+        # Select the tab. The panel above swaps to this box's offer, which is
+        # where the purchase buttons and the sold-out marker both live -- so
+        # nothing below can be checked until this click has landed. The tab
+        # row stays on screen throughout, so there is nothing to back out of
+        # before the next box.
+        - click: {at: "${box_at}"}
+        - wait: {min: 0.6, max: 1.0}
+
+        # ---- inner loop: buy this box until it is sold out ---------------
+        # until_found is tested *before* every iteration, so a box that is
+        # already sold out costs one scan and no clicks, and the purchase
+        # that empties the stock ends the loop instead of clicking a dead
+        # button -- that is the "continue" to the next box.
+        #
+        # stop_on_failure ends the loop when neither purchase button is
+        # there for any other reason, rather than retrying into a screen the
+        # flow no longer recognises.
+        - repeat:
+            until_found: 1_time_purchase_sold_out
+            max_iterations: ${max_per_box}
+            stop_on_failure: true
+            delay: {min: 0.5, max: 0.9}
+            steps:
+            # 10-Time when the panel offers it, 1-Time otherwise. The
+            # sold-out button is a different image, so a match here means
+            # the button is really buyable. With under ten left, 10-Time
+            # drops out and the else branch keeps buying singles until the
+            # sold-out marker ends the loop.
+            - if_found:
+                template: 10_time_purchase
+                timeout: 2
+                then:
+                - find_click: {template: 10_time_purchase, timeout: 3}
+                - set: {batch: 10}
+
+                else:
+                - find_click: {template: 1_time_purchase, timeout: 3}
+                - set: {batch: 1}
+
+            - wait: {min: 0.7, max: 1.35}
+
+            # Confirm the spend, and tally it only inside the `then` --
+            # a failed step does not abort the rest of the list, so an
+            # `add` sitting after a missed confirm would still count a
+            # purchase that never happened.
+            - if_found:
+                template: ok_button
+                timeout: 4
+                then:
+                - find_click: {template: ok_button, timeout: 3}
+                - wait: {min: 0.6, max: 1.0}
+                - add: {bought: "${batch}"}
+
+                else:
+                # No confirm dialog means the screen is not what the flow
+                # thinks it is. Fail the iteration deliberately so
+                # stop_on_failure ends this box instead of clicking on.
+                - find: {template: ok_button, timeout: 0}
+
+            - wait: {min: 0.8, max: 1.35}
+
+            - find_click:
+                template: tap_open
+                timeout: 5
+
+            - find_click:
+                template: announcement_close_button
+                timeout: 30
+
+            - wait: {min: 0.3, max: 0.68}
+
+            - find_click: # final pick-up capsule reward
+                template: announcement_close_button
+                timeout: 3
+
+          # A box that cannot be bought is a warning, not a failed run --
+          # the outer loop still moves on to the next one.
+          optional: true
+
+    - log: "purchase_box: bought ${bought} box(es) across ${expected} tab(s)"
+
+    - find_click:
+        template: back_button
+        timeout: 3
+
+    - wait: {min: 0.4, max: 0.85}
+
+    - find_click:
+        template: back_button
+        timeout: 3
+
+    

@@ -55,7 +55,7 @@ MODES: Tuple[Mode, ...] = (
     ),
     Mode(
         key="play",
-        label="Play",
+        label="Play (beta)",
         flow="play",
         # play.yaml is a single round, so the repetition has to come from here.
         loops=0,

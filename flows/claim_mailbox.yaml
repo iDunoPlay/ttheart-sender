@@ -26,7 +26,7 @@ steps:
                 template: toggle_hearts_button
                 timeout: 3
 
-            - wait: {min: 0.2, max: 0.45}
+            - wait: {min: 0.1, max: 0.3}
 
             - find_click:
                 template: toggle_medals_button
@@ -35,7 +35,7 @@ steps:
             - wait: {min: 0.4, max: 0.7}
 
             - find_click:
-                template: claim_all_ok_button
+                template: ok_button
                 timeout: 3
 
             # Which of these two shows depends on whether there was anything to claim,
@@ -78,11 +78,11 @@ steps:
             # position, and clicking that would land on whatever has since
             # moved into it.
             - if_found:
-                template: claim_all_ok_button
+                template: ok_button
                 timeout: 4
                 then:
                 - find_click:
-                    template: claim_all_ok_button
+                    template: ok_button
                     timeout: 3
                     save_as: ok_pos
 

@@ -34,7 +34,7 @@ def make_context(**overrides) -> RunContext:
     config = Config()
     config.runner.step_delay = 0.0
     config.runner.stop_key = None
-    return RunContext(
+    kwargs = dict(
         config=config,
         capture=_NoScreen(),
         matcher=_NoScreen(),
@@ -42,8 +42,11 @@ def make_context(**overrides) -> RunContext:
         mouse=NullMouse(),
         keyboard=NullKeyboard(),
         stop=StopKeyWatcher(None),
-        **overrides,
     )
+    # Overrides replace the stubs rather than colliding with them, so a test
+    # can hand in just the one seam it cares about.
+    kwargs.update(overrides)
+    return RunContext(**kwargs)
 
 
 def run(text: str, **kwargs):
@@ -117,6 +120,256 @@ def test_set_and_variable_interpolation_across_steps(caplog):
     assert report.success
     assert ctx.variables["name"] == "world"
     assert "hi world" in caplog.text
+
+
+def test_add_counts_flags_and_starts_from_zero():
+    report, ctx = run(
+        """
+        name: t
+        vars: {a: true, b: false, c: true}
+        steps:
+          - add: {enabled: "${a}"}
+          - add: {enabled: "${b}"}
+          - add: {enabled: "${c}"}
+          - add: {enabled: 1}
+        """
+    )
+    assert report.success
+    # No initialiser needed, booleans count as 1/0, and 3 stays an int.
+    assert ctx.variables["enabled"] == 3
+    assert isinstance(ctx.variables["enabled"], int)
+
+
+def test_add_accepts_string_flags_from_the_command_line():
+    report, ctx = run(
+        """
+        name: t
+        vars: {a: true}
+        steps:
+          - add: {enabled: "${a}"}
+        """,
+        variables={"a": "false"},
+    )
+    assert report.success
+    assert ctx.variables["enabled"] == 0
+
+
+def test_add_subtracts_and_keeps_fractions():
+    report, ctx = run(
+        """
+        name: t
+        steps:
+          - set: {n: 10}
+          - add: {n: -2.5}
+        """
+    )
+    assert report.success
+    assert ctx.variables["n"] == 7.5
+
+
+def test_repeat_times_from_a_counted_variable():
+    report, ctx = run(
+        """
+        name: t
+        vars: {a: true, b: false, c: true}
+        steps:
+          - add: {expected: "${a}"}
+          - add: {expected: "${b}"}
+          - add: {expected: "${c}"}
+          - repeat:
+              times: ${expected}
+              counter: pass
+              steps:
+                - add: {ran: 1}
+                - set: {last: "${pass_1based}"}
+        """
+    )
+    assert report.success
+    assert ctx.variables["ran"] == 2
+    assert ctx.variables["last"] == 2
+
+
+class _FrameCapture:
+    """Capture stub that plays back a scripted list of frames."""
+
+    def __init__(self, frames):
+        self.frames = list(frames)
+        self.grabs = 0
+
+    def virtual_screen_rect(self):
+        from ttheart_sender.geometry import Rect
+
+        return Rect(0, 0, 4, 4)
+
+    def grab(self, rect):
+        frame = self.frames[min(self.grabs, len(self.frames) - 1)]
+        self.grabs += 1
+        return frame
+
+
+def _frame(value):
+    import numpy as np
+
+    return np.full((4, 4, 3), value, dtype=np.uint8)
+
+
+def run_with_capture(text: str, capture, **kwargs):
+    """Run a flow against scripted frames, with matching stubbed out.
+
+    Only ``find`` is replaced: these tests are about when the loop decides to
+    stop, not about template matching, and the real find would drag the whole
+    matcher/template stack in behind it.
+    """
+    import yaml
+
+    from ttheart_sender.automation.flow import parse_flow
+
+    flow = parse_flow(yaml.safe_load(text), source="test.yaml")
+    ctx = make_context(capture=capture)
+    ctx.find = lambda name, **kw: object() if name == "always_there" else None
+    runner = FlowRunner(ctx)
+    return runner.run(flow, **kwargs), ctx
+
+
+SCROLL_LOOP = """
+name: t
+steps:
+  - repeat:
+      until_found: never_appears
+      max_iterations: 20
+      stop_when_still: true
+      steps:
+        - add: {scrolls: 1}
+"""
+
+
+def test_repeat_stops_once_the_screen_stops_changing():
+    # The first scroll moves the list, the second does nothing (clamped).
+    # Two scrolls is the floor: a scroll can only be known to be useless
+    # after it has been made. Without the check this would burn all 20.
+    capture = _FrameCapture([_frame(1), _frame(2), _frame(2), _frame(2)])
+    _, ctx = run_with_capture(SCROLL_LOOP, capture)
+    assert ctx.variables["scrolls"] == 2
+
+
+def test_repeat_keeps_going_while_the_screen_moves():
+    capture = _FrameCapture([_frame(i) for i in range(1, 21)])
+    _, ctx = run_with_capture(SCROLL_LOOP, capture)
+    assert ctx.variables["scrolls"] == 20, "only the exhausted budget should end it"
+
+
+def test_still_tolerance_absorbs_small_differences():
+    text = SCROLL_LOOP.replace(
+        "stop_when_still: true",
+        "stop_when_still: true\n      still_tolerance: 3",
+    )
+    capture = _FrameCapture([_frame(10), _frame(12), _frame(13)])
+    _, ctx = run_with_capture(text, capture)
+    # 12 -> 10 is a mean difference of 2, inside the tolerance: treated as
+    # the same picture rather than as movement.
+    assert ctx.variables["scrolls"] == 1
+
+
+def test_stillness_does_not_override_a_met_condition():
+    """A frozen screen showing the target is a success, not a giving-up."""
+    text = SCROLL_LOOP.replace("never_appears", "always_there")
+    capture = _FrameCapture([_frame(7)])
+    report, ctx = run_with_capture(text, capture)
+    assert report.success
+    assert "scrolls" not in ctx.variables
+
+
+def test_stillness_can_drive_the_loop_on_its_own():
+    """No times/until_found: "scroll until the screen stops moving"."""
+    text = """
+    name: t
+    steps:
+      - repeat:
+          stop_when_still: true
+          max_iterations: 10
+          steps:
+            - add: {scrolls: 1}
+    """
+    capture = _FrameCapture([_frame(1), _frame(2), _frame(3), _frame(3)])
+    report, ctx = run_with_capture(text, capture)
+    assert report.success
+    assert ctx.variables["scrolls"] == 3
+
+
+def test_repeat_zero_times_is_not_a_failure():
+    report, ctx = run(
+        """
+        name: t
+        vars: {a: false}
+        steps:
+          - add: {expected: "${a}"}
+          - repeat:
+              times: ${expected}
+              steps:
+                - add: {ran: 1}
+        """
+    )
+    assert report.success
+    assert "ran" not in ctx.variables
+
+
+def test_if_branches_on_a_variable():
+    report, ctx = run(
+        """
+        name: t
+        vars: {flag: true, other: false}
+        steps:
+          - if:
+              value: ${flag}
+              then:
+                - set: {first: then}
+              else:
+                - set: {first: else}
+          - if:
+              value: ${other}
+              then:
+                - set: {second: then}
+              else:
+                - set: {second: else}
+        """
+    )
+    assert report.success
+    assert ctx.variables["first"] == "then"
+    assert ctx.variables["second"] == "else"
+
+
+def test_if_accepts_a_var_overridden_from_the_command_line():
+    # --var only ever produces strings, so 'false' has to read as false.
+    report, ctx = run(
+        """
+        name: t
+        vars: {flag: true}
+        steps:
+          - if:
+              value: ${flag}
+              then:
+                - set: {branch: then}
+              else:
+                - set: {branch: else}
+        """,
+        variables={"flag": "false"},
+    )
+    assert report.success
+    assert ctx.variables["branch"] == "else"
+
+
+def test_if_on_an_undefined_variable_is_an_error():
+    report, _ = run(
+        """
+        name: t
+        steps:
+          - if:
+              value: ${nope}
+              then:
+                - set: {branch: then}
+        """
+    )
+    assert not report.success
 
 
 def test_chance_takes_the_then_branch_when_the_roll_lands():

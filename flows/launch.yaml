@@ -30,15 +30,11 @@ steps:
       timeout: 8
     optional: true
 
-  - wait: {min: 4.5, max: 6}
-
-  # Second tap at the exact same spot as the first -- not a re-scan, since the
-  # icon may already be mid-launch (highlighted/animating) and no longer match
-  # the template.
-  # Skip app animation
-  - click:
-      at: ${tsumtsum_pos}
-      space: screen
+  - wait_for:
+      template: animation
+      timeout: 30
+    
+  - click: [267, 567]
 
   # Click tap to start
   - find_click:

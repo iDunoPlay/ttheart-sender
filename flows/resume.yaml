@@ -39,4 +39,4 @@ steps:
             then:
             - run_flow: play
 
-        - wait: {min: 75, max: 110}
+        - wait: {min: 30, max: 90}

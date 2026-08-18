@@ -11,6 +11,7 @@ description: Annotated tour of the flow language
 vars:
   taps: 5
   gap: 0.6
+  verbose: true
 
 # Fallback parameter values applied to every step in this file.
 defaults:
@@ -31,6 +32,15 @@ steps:
         - log: "Dismissing popup"
         - find_click: {template: popup_close}
         - wait: 0.4
+
+  # Branch on a variable rather than on the screen. `value` is anything
+  # truthy/falsey -- a flag from `vars:`, `--var dry=true`, `set:` or a
+  # previous step's `save_as`. An undefined variable is an error, not a
+  # silent `else`. Both branches are optional.
+  - if:
+      value: ${verbose}
+      then:
+        - log: "Variables: taps=${taps} gap=${gap}"
 
   # Dice roll: run the `then` branch this often, the `else` branch otherwise.
   # `percent: 20` and `p: 0.2` are the same thing; `save_as` keeps the outcome
@@ -70,6 +80,12 @@ steps:
           optional: true
 
   # --- other things you can do -----------------------------------------
+  # Count things up, then drive a loop with the total. `add` treats a
+  # boolean as 1/0 and an unset variable as 0, so this tallies the flags
+  # that are on -- and `times: ${enabled}` runs the loop once per flag.
+  # - add: {enabled: "${verbose}"}
+  # - repeat: {times: "${enabled}", steps: [...]}
+
   # Fixed coordinates, relative to the emulator content area by default.
   # - click: [540, 960]
   # - click: {at: [100, 200], space: screen, button: right}

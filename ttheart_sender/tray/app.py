@@ -1,7 +1,13 @@
-"""Wires the tray icon to the automation service.
+"""Wires the tray icon and the control panel to the automation service.
 
-This module owns the menu layout and nothing else: the icon knows how to draw a
-menu, the service knows how to run a flow, and this decides what the menu says.
+The tray icon is now only a launcher and a status light: left-clicking it opens
+the panel, which owns every control the old right-click menu used to. That is
+why Exit and Open logs live on the panel -- with no context menu, they are the
+only way out of the app.
+
+The panel holds no state. It reads from :meth:`TrayApp._panel_state` and writes
+back through the callbacks below, so the saved settings, the service and the
+controls cannot drift apart.
 """
 
 from __future__ import annotations
@@ -9,25 +15,30 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, Optional
 
 import win32api
 import win32event
 import winerror
 
 from ..version import __version__
-from .icon import MenuItem, TrayIcon, separator
+from .icon import TrayIcon
 from .modes import DEFAULT_MODE, MODES
+from .panel import ControlPanel
 from .service import AutomationService, RunState
+from .settings import PanelSettings, settings_path
 
 log = logging.getLogger(__name__)
 
 APP_TITLE = "ttheart-sender"
-#: Shown in the menu and the tooltip, so a screenshot of the tray is enough to
-#: tell which build someone is running.
+#: Shown on the panel and in the tooltip, so a screenshot is enough to tell
+#: which build someone is running.
 APP_VERSION = f"{APP_TITLE} v{__version__}"
 #: One tray per session -- two of them would fight over the same emulator.
 MUTEX_NAME = "ttheart-sender-tray-singleton"
+#: The flow behind the panel's "Buy tsum" button.
+PURCHASE_FLOW = "purchase_box"
+PURCHASE_LABEL = "Buy tsum"
 
 _ASSETS = Path(__file__).resolve().parent / "assets"
 ICON_IDLE = _ASSETS / "tray-idle.ico"
@@ -35,31 +46,52 @@ ICON_RUNNING = _ASSETS / "tray-running.ico"
 
 
 class TrayApp:
-    """The tray front-end: a mode picker, Start/Stop, and a way out."""
+    """Tray icon + control panel + the service that runs the flows."""
 
     def __init__(
         self,
         app,
         *,
-        mode: str = DEFAULT_MODE,
-        play: bool = False,
+        mode: Optional[str] = None,
+        play: Optional[bool] = None,
         autostart: bool = False,
     ) -> None:
         self._app = app
         self._autostart = autostart
+        self._settings_path = settings_path(app.config)
+        self._settings = PanelSettings.load(self._settings_path)
+        # Command-line flags win over the saved file for this session only.
+        if mode is not None and mode != DEFAULT_MODE:
+            self._settings.mode = mode
+        if play is not None and play:
+            self._settings.auto_play = True
+
         self._service = AutomationService(
             app,
-            mode=mode,
-            play=play,
+            mode=self._settings.mode,
+            play=self._settings.auto_play,
             on_change=self._on_change,
             on_notify=self._on_notify,
         )
+        self._panel = ControlPanel(
+            title=APP_TITLE,
+            version_text=APP_VERSION,
+            modes=MODES,
+            get_state=self._panel_state,
+            on_mode=self._set_mode,
+            on_toggle=self._set_toggle,
+            on_purchase=self._set_purchase,
+            on_run=self._service.toggle,
+            on_buy=self._buy_tsum,
+            on_logs=self._open_logs,
+            on_exit=self._exit,
+        )
         self._icon = TrayIcon(
             title=APP_TITLE,
-            menu=self._build_menu,
             tooltip=self._tooltip,
             icon_path=self._icon_path,
-            on_double_click=self._service.toggle,
+            # No menu factory: right-clicking the icon does nothing, by design.
+            on_left_click=self._panel.toggle,
         )
 
     # -- lifecycle -------------------------------------------------------
@@ -70,7 +102,7 @@ class TrayApp:
             return 1
         try:
             log.info(
-                "%s started -- right-click the icon to pick a mode. Stop key: %s",
+                "%s started -- left-click the tray icon for the panel. Stop key: %s",
                 APP_VERSION,
                 str(self._app.config.runner.stop_key).upper(),
             )
@@ -79,56 +111,62 @@ class TrayApp:
             return self._icon.run()
         finally:
             self._service.shutdown()
+            self._panel.destroy()
             win32api.CloseHandle(handle)
 
-    # -- menu ------------------------------------------------------------
-    def _build_menu(self) -> List[MenuItem]:
+    # -- panel state -----------------------------------------------------
+    def _panel_state(self) -> Dict[str, Any]:
         state = self._service.state
-        idle = state is RunState.IDLE
-        current = self._service.mode
+        return {
+            "mode": self._service.mode.key,
+            "always_on_top": self._settings.always_on_top,
+            "auto_play": self._service.play,
+            "purchase": dict(self._settings.purchase),
+            "running": state is RunState.RUNNING,
+            "stopping": state is RunState.STOPPING,
+            "status": self._service.status_text(),
+        }
 
-        modes = [
-            MenuItem(
-                label=mode.label,
-                action=lambda key=mode.key: self._service.set_mode(key),
-                radio=True,
-                checked=mode is current,
-            )
-            for mode in MODES
-        ]
+    def _save(self) -> None:
+        self._settings.save(self._settings_path)
 
-        stop_key = str(self._app.config.runner.stop_key or "").upper()
-        stop_label = f"Stop ({stop_key})" if stop_key else "Stop"
+    # -- panel callbacks -------------------------------------------------
+    def _set_mode(self, key: str) -> None:
+        self._service.set_mode(key)
+        self._settings.mode = self._service.mode.key
+        self._save()
 
-        return [
-            MenuItem(label=APP_VERSION, enabled=False),
-            MenuItem(label=self._service.status_text(), enabled=False),
-            separator(),
-            MenuItem(label="Mode", items=modes),
-            # A tick, not a mode: the send-hearts cycle either rolls the dice on
-            # playing a round or it never does. Takes effect on the next Start.
-            MenuItem(
-                label="Play rounds",
-                action=self._service.toggle_play,
-                checked=self._service.play,
-            ),
-            separator(),
-            MenuItem(
-                label=f"Start {current.label}",
-                action=self._service.start,
-                enabled=idle,
-                default=True,
-            ),
-            MenuItem(
-                label=stop_label,
-                action=self._service.stop,
-                enabled=state is RunState.RUNNING,
-            ),
-            separator(),
-            MenuItem(label="Open logs folder", action=self._open_logs),
-            separator(),
-            MenuItem(label="Exit", action=self._exit),
-        ]
+    def _set_toggle(self, name: str, value: bool) -> None:
+        if name == "auto_play":
+            self._service.set_play(value)
+            self._settings.auto_play = self._service.play
+        elif name == "always_on_top":
+            self._settings.always_on_top = bool(value)
+        else:
+            log.debug("Unknown panel toggle %r", name)
+            return
+        self._save()
+
+    def _set_purchase(self, key: str, value: bool) -> None:
+        if key not in self._settings.purchase:
+            log.debug("Unknown purchase toggle %r", key)
+            return
+        self._settings.purchase[key] = bool(value)
+        self._save()
+
+    def _buy_tsum(self) -> None:
+        """Run purchase_box with the panel's tick boxes as flow variables.
+
+        In-process rather than shelling out to ``python main.py run
+        purchase_box``: the .exe has no interpreter beside it, and a second
+        process would drive the same emulator as the tray without either
+        knowing about the other.
+        """
+        self._service.start_job(
+            PURCHASE_LABEL,
+            PURCHASE_FLOW,
+            variables=dict(self._settings.purchase),
+        )
 
     # -- presentation ----------------------------------------------------
     def _tooltip(self) -> str:
@@ -147,11 +185,16 @@ class TrayApp:
         # Ask the run to stop, then let the message loop unwind; run() joins the
         # worker afterwards so this handler never blocks the GUI thread.
         self._service.stop()
+        self._panel.hide()
         self._icon.quit()
 
     # -- service callbacks (worker thread) -------------------------------
     def _on_change(self) -> None:
-        self._icon.post(self._icon.refresh)
+        self._icon.post(self._refresh)
+
+    def _refresh(self) -> None:
+        self._icon.refresh()
+        self._panel.refresh()
 
     def _on_notify(self, title: str, message: str, is_error: bool) -> None:
         self._icon.post(lambda: self._icon.notify(title, message, error=is_error))

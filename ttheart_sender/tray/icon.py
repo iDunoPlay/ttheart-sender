@@ -84,16 +84,19 @@ class TrayIcon:
         self,
         *,
         title: str,
-        menu: Callable[[], Sequence[MenuItem]],
         tooltip: Callable[[], str],
+        menu: Optional[Callable[[], Sequence[MenuItem]]] = None,
         icon_path: Optional[Callable[[], Optional[Path]]] = None,
+        on_left_click: Optional[Callable[[], None]] = None,
         on_double_click: Optional[Callable[[], None]] = None,
         window_class: str = "TTHeartSenderTray",
     ) -> None:
         self._title = title
+        #: No factory means no context menu -- right-clicking does nothing.
         self._menu_factory = menu
         self._tooltip_factory = tooltip
         self._icon_path_factory = icon_path or (lambda: None)
+        self._on_left_click = on_left_click
         self._on_double_click = on_double_click
         self._window_class = window_class
 
@@ -212,7 +215,10 @@ class TrayIcon:
 
     def _on_tray_message(self, event: int) -> None:
         if event in (win32con.WM_RBUTTONUP, win32con.WM_CONTEXTMENU):
-            self._safely(self._show_menu)
+            if self._menu_factory is not None:
+                self._safely(self._show_menu)
+        elif event == win32con.WM_LBUTTONUP and self._on_left_click:
+            self._safely(self._on_left_click)
         elif event == win32con.WM_LBUTTONDBLCLK and self._on_double_click:
             self._safely(self._on_double_click)
         else:
@@ -321,6 +327,8 @@ class TrayIcon:
 
     # -- menu ------------------------------------------------------------
     def _show_menu(self) -> None:
+        if self._menu_factory is None:
+            return
         # TrackPopupMenu runs a nested message loop, so a WM_CLOSE can be
         # dispatched (and the window destroyed) while a menu is still up. Check
         # the handle on the way in, and again before touching it on the way out.

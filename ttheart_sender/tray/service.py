@@ -53,6 +53,9 @@ class AutomationService:
         self._mode: Mode = get_mode(mode) or MODES[0]
         self._play = bool(play)
         self._state = RunState.IDLE
+        #: What the live run is called -- the mode's label, or "Buy tsum" for
+        #: a one-off job, so the panel can say what it is waiting on.
+        self._job_label: Optional[str] = None
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.RLock()
         self._on_change = on_change or (lambda: None)
@@ -79,14 +82,19 @@ class AutomationService:
     def busy(self) -> bool:
         return self.state is not RunState.IDLE
 
+    @property
+    def job_label(self) -> Optional[str]:
+        with self._lock:
+            return self._job_label
+
     def status_text(self) -> str:
         state = self.state
-        mode = self.mode
+        label = self.job_label or self.mode.label
         if state is RunState.RUNNING:
-            return f"Running: {mode.label}"
+            return f"Running: {label}"
         if state is RunState.STOPPING:
-            return f"Stopping: {mode.label}"
-        return f"Idle ({mode.label})"
+            return f"Stopping: {label}"
+        return f"Idle ({self.mode.label})"
 
     def _set_state(self, state: RunState) -> None:
         with self._lock:
@@ -137,18 +145,45 @@ class AutomationService:
 
     def start(self) -> bool:
         """Run the selected mode. Does nothing if a run is already going."""
+        mode = self.mode
+        # Snapshot the overrides here so a mid-run toggle cannot change what
+        # this run was started with.
+        return self.start_job(
+            mode.label,
+            mode.flow,
+            variables=self._variables(),
+            loops=mode.loops,
+            loop_delay=mode.loop_delay,
+            name=mode.key,
+        )
+
+    def start_job(
+        self,
+        label: str,
+        flow: str,
+        *,
+        variables: Optional[Dict[str, Any]] = None,
+        loops: int = 1,
+        loop_delay: float = 0.0,
+        name: Optional[str] = None,
+    ) -> bool:
+        """Run any flow through the same one-at-a-time worker as the modes.
+
+        The panel's "Buy tsum" is a flow like any other -- it just is not a
+        mode, because picking it must not change what the Run button will do
+        next. Routing it through here keeps the invariant that matters: one
+        run at a time, on a worker thread, stoppable by the same switch.
+        """
         with self._lock:
             if self._state is not RunState.IDLE:
-                log.info("Ignoring Start: a run is already %s", self._state.value)
+                log.info("Ignoring %s: a run is already %s", label, self._state.value)
                 return False
-            mode = self._mode
             self._state = RunState.RUNNING
+            self._job_label = label
             self._thread = threading.Thread(
                 target=self._run,
-                # Snapshot the overrides here so a mid-run toggle cannot change
-                # what this run was started with.
-                args=(mode, self._variables()),
-                name=f"ttheart-{mode.key}",
+                args=(label, flow, variables, loops, loop_delay),
+                name=f"ttheart-{name or flow}",
                 daemon=True,
             )
             self._thread.start()
@@ -183,8 +218,15 @@ class AutomationService:
                 log.warning("Automation thread did not stop within %.0fs", timeout)
 
     # -- worker ----------------------------------------------------------
-    def _run(self, mode: Mode, variables: Optional[Dict[str, Any]] = None) -> None:
-        log.info("=== tray: %s (%s) ===", mode.label, mode.command)
+    def _run(
+        self,
+        label: str,
+        flow: str,
+        variables: Optional[Dict[str, Any]],
+        loops: int,
+        loop_delay: float,
+    ) -> None:
+        log.info("=== tray: %s (run %s) ===", label, flow)
         try:
             self._app.stop.reset()
             # Re-detect and re-park every run: LDPlayer may have been closed,
@@ -192,33 +234,34 @@ class AutomationService:
             # cached window handle pointing at nothing.
             self._app.startup(require_window=True, prepare=True)
             report = self._app.run_flow(
-                mode.flow,
+                flow,
                 variables=variables,
-                loops=mode.loops,
-                loop_delay=mode.loop_delay,
+                loops=loops,
+                loop_delay=loop_delay,
             )
         except TTHeartError as exc:
-            log.error("%s failed: %s", mode.label, exc)
-            self._notify(f"{mode.label} failed", str(exc), True)
+            log.error("%s failed: %s", label, exc)
+            self._notify(f"{label} failed", str(exc), True)
         except Exception as exc:  # noqa: BLE001 - a crash must not kill the tray
-            log.exception("Unexpected error while running %s", mode.label)
-            self._notify(f"{mode.label} crashed", f"{type(exc).__name__}: {exc}", True)
+            log.exception("Unexpected error while running %s", label)
+            self._notify(f"{label} crashed", f"{type(exc).__name__}: {exc}", True)
         else:
-            self._report(mode, report)
+            self._report(label, report)
         finally:
             with self._lock:
                 self._state = RunState.IDLE
+                self._job_label = None
                 self._thread = None
             self._on_change()
 
-    def _report(self, mode: Mode, report) -> None:
+    def _report(self, label: str, report) -> None:
         if report.stopped_early:
-            log.info("%s stopped: %s", mode.label, report.summary())
-            self._notify(f"{mode.label} stopped", report.summary(), False)
+            log.info("%s stopped: %s", label, report.summary())
+            self._notify(f"{label} stopped", report.summary(), False)
         elif report.success:
-            self._notify(f"{mode.label} finished", report.summary(), False)
+            self._notify(f"{label} finished", report.summary(), False)
         else:
-            self._notify(f"{mode.label} failed", report.summary(), True)
+            self._notify(f"{label} failed", report.summary(), True)
 
     def _notify(self, title: str, message: str, is_error: bool) -> None:
         try:

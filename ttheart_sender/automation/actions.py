@@ -19,6 +19,9 @@ from __future__ import annotations
 import logging
 import random
 import time
+from typing import Any, Dict, Optional
+
+import numpy as np
 
 from ..exceptions import ActionError, FlowAborted
 from ..geometry import Point
@@ -69,6 +72,48 @@ def act_set(ctx: RunContext, params: Params) -> ActionResult:
         ctx.set_var(key, value)
     log.debug("%sset %s", ctx.indent, values)
     return ActionResult.ok(values)
+
+
+def _as_number(value: Any, where: str, key: str) -> float:
+    # --var only ever yields strings, and a flag counted as 1/0 is the whole
+    # point of `add`, so 'true'/'false' have to read as numbers too.
+    if isinstance(value, bool):
+        return 1.0 if value else 0.0
+    if isinstance(value, str):
+        lowered = value.strip().casefold()
+        if lowered in {"true", "yes", "on"}:
+            return 1.0
+        if lowered in {"false", "no", "off"}:
+            return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise ActionError(f"{where}: {key!r} is not a number: {value!r}") from exc
+
+
+@action("add", aliases=("incr",), summary="Add to numeric flow variables")
+def act_add(ctx: RunContext, params: Params) -> ActionResult:
+    # Same shape as `set:` -- `- add: {bought: 1}` -- but the amount is added
+    # to what is already there. An unset variable counts as 0, so a counter
+    # needs no initialiser, and a negative amount subtracts. Booleans count as
+    # 1/0, which is what makes `- add: {enabled_boxes: ${happiness_box}}` a
+    # tally of the flags that are switched on.
+    amounts = dict(params.mapping("values"))
+    for key in list(params.step.params):
+        if key != "values":
+            amounts[key] = params.raw(key)
+
+    where = params.step.location
+    totals: Dict[str, Any] = {}
+    for key, amount in amounts.items():
+        total = _as_number(ctx.variables.get(key, 0), where, key) + _as_number(amount, where, key)
+        # Keep whole numbers whole: `times: ${n}` and logs both read better
+        # as 3 than as 3.0.
+        totals[key] = int(total) if float(total).is_integer() else total
+        ctx.set_var(key, totals[key])
+
+    log.debug("%sadd %s -> %s", ctx.indent, amounts, totals)
+    return ActionResult.ok(totals)
 
 
 @action("stop", primary="message", summary="End the flow early")
@@ -340,6 +385,27 @@ def act_if_found(ctx: RunContext, params: Params) -> ActionResult:
     return ActionResult(bool(ctx.execute(steps)), match)
 
 
+@action("if", aliases=("when",), primary="value", child_keys=("then", "else"),
+        summary="Branch on a flow variable's value")
+def act_if(ctx: RunContext, params: Params) -> ActionResult:
+    # `if: ${flag}`, or `if: {value: "${flag}", then: [...], else: [...]}`.
+    # Nothing is read from the screen -- this is the plain boolean branch for
+    # flags coming from `vars:`, `set:`, `save_as:` or `--var flag=true`.
+    # An undefined variable interpolates to itself and fails the parameter
+    # check, rather than quietly taking the else branch.
+    if not params.has("value"):
+        raise ActionError(f"{params.step.location}: 'value' is required")
+    hit = params.boolean("value")
+    then_steps = params.steps("then")
+    else_steps = params.steps("else")
+
+    log.info("%sif %s -> %s", ctx.indent, hit, "then" if hit else "else")
+    steps = then_steps if hit else else_steps
+    if not steps:
+        return ActionResult.ok(hit)
+    return ActionResult(bool(ctx.execute(steps)), hit)
+
+
 @action("chance", aliases=("maybe",), primary="p", child_keys=("then", "else"),
         summary="Roll the dice and branch on the outcome")
 def act_chance(ctx: RunContext, params: Params) -> ActionResult:
@@ -369,6 +435,21 @@ def act_chance(ctx: RunContext, params: Params) -> ActionResult:
     return ActionResult(bool(ctx.execute(steps)), hit)
 
 
+def _frames_match(first, second, tolerance: float) -> bool:
+    """Whether two captures of the same region are the same picture.
+
+    ``tolerance`` is the mean absolute difference per channel allowed before
+    the frames count as changed -- 0 means pixel-identical, which is what a
+    screen capture of a static list actually gives.
+    """
+    if first.shape != second.shape:
+        return False
+    if tolerance <= 0:
+        return bool(np.array_equal(first, second))
+    difference = np.abs(first.astype(np.int16) - second.astype(np.int16))
+    return float(difference.mean()) <= tolerance
+
+
 @action("repeat", child_keys=("steps",), summary="Repeat nested steps")
 def act_repeat(ctx: RunContext, params: Params) -> ActionResult:
     steps = params.steps("steps")
@@ -387,6 +468,14 @@ def act_repeat(ctx: RunContext, params: Params) -> ActionResult:
     # exhausting the budget without the condition ever triggering usually
     # means the flow is now looking at a screen it doesn't recognize.
     require_found = params.boolean("require_found", False)
+    # Scrolling loops run out of screen long before they run out of
+    # iterations: a list clamped at its top or bottom returns the identical
+    # picture for every remaining pass, so the condition can never start
+    # matching and the only thing left to spend is time. Comparing the region
+    # between iterations turns "wait for max_iterations" into "stop the moment
+    # the screen stops moving".
+    stop_when_still = params.boolean("stop_when_still", False)
+    still_tolerance = params.number("still_tolerance", 0.0)
     search = _search_kwargs(params)
     # Touch 'delay' now so it's marked consumed even if the loop below never
     # runs (e.g. until_found/while_found's condition resolves on the very
@@ -409,7 +498,12 @@ def act_repeat(ctx: RunContext, params: Params) -> ActionResult:
             f"while_found / until_found / duration"
         )
     if not any(modes):
-        times = 1.0
+        # stop_when_still is a stopping condition in its own right: "scroll
+        # until the screen stops moving" needs no other mode, and defaulting
+        # to a single pass would make it meaningless. max_iterations is the
+        # budget in that case.
+        if not stop_when_still:
+            times = 1.0
 
     limit = int(times) if times is not None else max_iterations
     limit = min(limit, max_iterations)
@@ -417,6 +511,7 @@ def act_repeat(ctx: RunContext, params: Params) -> ActionResult:
 
     completed = 0
     condition_met = False
+    previous_frame: Optional[np.ndarray] = None
     for index in range(limit):
         ctx.stop.check()
 
@@ -431,6 +526,20 @@ def act_repeat(ctx: RunContext, params: Params) -> ActionResult:
             log.info("%srepeat: %r appeared, stopping", ctx.indent, until_found)
             condition_met = True
             break
+
+        # Checked after the conditions above so a loop that has both a match
+        # and a frozen screen still reports the match. Leaving early here is
+        # not "condition met": require_found still reports the failure, just
+        # seconds in rather than a full budget later.
+        if stop_when_still:
+            frame, _ = ctx.grab(search.get("region"))
+            if previous_frame is not None and _frames_match(frame, previous_frame, still_tolerance):
+                log.info(
+                    "%srepeat: screen stopped changing after %d iteration(s), stopping",
+                    ctx.indent, completed,
+                )
+                break
+            previous_frame = frame
 
         ctx.set_var(counter_var, index)
         ctx.set_var(f"{counter_var}_1based", index + 1)
