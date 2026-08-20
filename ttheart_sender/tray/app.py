@@ -27,6 +27,7 @@ from .modes import DEFAULT_MODE, MODES
 from .panel import ControlPanel
 from .service import AutomationService, RunState
 from .settings import PanelSettings, settings_path
+from .updater import UpdateService
 
 log = logging.getLogger(__name__)
 
@@ -73,8 +74,19 @@ class TrayApp:
             play=self._settings.auto_play,
             return_heart=self._settings.return_heart,
             return_heart_minutes=self._settings.return_heart_minutes,
+            claim_pattern=self._settings.claim_pattern,
             on_change=self._on_change,
             on_notify=self._on_notify,
+        )
+        self._updater = UpdateService(
+            app.config.update,
+            auto=self._settings.auto_update,
+            on_change=self._on_change,
+            on_notify=self._on_notify,
+            # Restarting mid-flow would abandon the run half way through, so
+            # an automatic install waits for the service to go idle.
+            can_apply=lambda: not self._service.busy,
+            on_restart=self._restart_for_update,
         )
         self._panel = ControlPanel(
             # The caption carries the version, so a screenshot identifies the
@@ -85,9 +97,11 @@ class TrayApp:
             on_mode=self._set_mode,
             on_toggle=self._set_toggle,
             on_return_minute=self._set_return_minute,
+            on_claim=self._set_claim_pattern,
             on_purchase=self._set_purchase,
             on_run=self._service.toggle,
             on_buy=self._buy_tsum,
+            on_update=self._updater.activate,
             on_logs=self._open_logs,
             on_exit=self._exit,
         )
@@ -111,6 +125,7 @@ class TrayApp:
                 APP_VERSION,
                 str(self._app.config.runner.stop_key).upper(),
             )
+            self._updater.start()
             if self._autostart:
                 self._service.start()
             # Open the panel as soon as the message loop is up: a first-time
@@ -120,6 +135,7 @@ class TrayApp:
             self._icon.post(self._panel.show)
             return self._icon.run()
         finally:
+            self._updater.shutdown()
             self._service.shutdown()
             self._panel.destroy()
             win32api.CloseHandle(handle)
@@ -149,7 +165,12 @@ class TrayApp:
             "auto_play": self._service.play,
             "return_heart": self._service.return_heart,
             "return_heart_minutes": self._service.return_heart_minutes,
+            "claim_pattern": self._service.claim_pattern,
             "purchase": dict(self._settings.purchase),
+            "auto_update": self._settings.auto_update,
+            "update_status": self._updater.status_text(),
+            "update_button": self._updater.button_label(),
+            "update_ready": not self._updater.busy,
             "running": state is RunState.RUNNING,
             "stopping": state is RunState.STOPPING,
             "status": self._service.status_text(),
@@ -171,6 +192,9 @@ class TrayApp:
         elif name == "return_heart":
             self._service.set_return_heart(value)
             self._settings.return_heart = self._service.return_heart
+        elif name == "auto_update":
+            self._updater.set_auto(value)
+            self._settings.auto_update = self._updater.auto
         elif name == "always_on_top":
             self._settings.always_on_top = bool(value)
         elif name == "collect_data":
@@ -204,6 +228,13 @@ class TrayApp:
         self._settings.return_heart_minutes = self._service.return_heart_minutes
         self._save()
 
+    def _set_claim_pattern(self, key: str) -> None:
+        """Store which way the mailbox is emptied. The next run picks it up."""
+        if not self._service.set_claim_pattern(key):
+            return
+        self._settings.claim_pattern = self._service.claim_pattern
+        self._save()
+
     def _set_purchase(self, key: str, value: bool) -> None:
         if key not in self._settings.purchase:
             log.debug("Unknown purchase toggle %r", key)
@@ -224,6 +255,16 @@ class TrayApp:
             PURCHASE_FLOW,
             variables=dict(self._settings.purchase),
         )
+
+    def _restart_for_update(self) -> None:
+        """Close down so the new build, already in place, can take over.
+
+        Called from the update worker: the swap has happened and a helper
+        script is waiting for this process to let go of the old image. Exiting
+        has to happen on the GUI thread, so it goes through the icon's queue
+        like every other cross-thread call.
+        """
+        self._icon.post(self._exit)
 
     # -- presentation ----------------------------------------------------
     def _menu(self):

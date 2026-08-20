@@ -7,18 +7,24 @@ vars:
   # has no middle ground any more, it either plays every cycle or none. A
   # console run keeps the finer grain: the value here, or `--var
   # play_chance_percent=N`.
-  play_chance_percent: 8
+  play_chance_percent: 100
 
   # "Return Heart" on the panel: send hearts on the clock instead of every
   # cycle. Off here so a console run behaves the way it always has; the tray
   # ticks it on and supplies the two marks from its spinners.
-  return_heart_timed: false
+  return_heart_timed: true
   # Minutes of the hour to send on, e.g. [15, 50] = :15 and :50 past every
   # hour. `--var return_heart_minutes=15,50` works too.
   return_heart_minutes: [15, 50]
   # Raised by the time_gate below when a mark goes by, lowered again as soon
   # as the hearts have gone out.
   send_heart_check: false
+
+  # "Claim pattern" on the panel: false = tap Check on one mailbox item at a
+  # time (the default), true = one pass through the game's own Claim All
+  # dialog. Handed straight to claim_mailbox.yaml, which is where the two
+  # patterns live.
+  claim_all: false
 
 steps:
   
@@ -37,8 +43,13 @@ steps:
         # which drops the branch without any error.
         - click: [453, 224]
 
-        # Shared with launch.yaml -- edit flows/claim_mailbox.yaml.
-        - run_flow: claim_mailbox
+        # Shared with launch.yaml -- edit flows/claim_mailbox.yaml. The var
+        # is passed explicitly because run_flow re-applies the called flow's
+        # own defaults on entry, which would undo the panel's choice.
+        - run_flow:
+            flow: claim_mailbox
+            vars:
+              claim_all: "${claim_all}"
 
         - run_flow: dismiss_unattended_popup
 
@@ -76,10 +87,15 @@ steps:
             # mailbox open, so the next cycle's blind tap at [453, 224] lands
             # on whatever the mailbox has put there. Optional because the nav
             # rail is on screen either way -- a miss costs a scan, not a run.
-            - find_click:
-                template: home_button
-                timeout: 3
-              optional: true
+            - if_found:
+                template: home
+                timeout: 5
+                then:
+                    # do nothing
+                else:
+                    - find_click:
+                        template: home_button
+                        timeout: 3
 
         # Play a round instead of idling between cycles. The tray sets
         # play_chance_percent to 0 while Auto Play is unticked, so the roll

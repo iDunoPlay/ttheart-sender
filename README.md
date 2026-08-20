@@ -127,6 +127,9 @@ Mode
      Every hour at        [ 15 |v| ] min
      and at               [ 50 |v| ] min
 ────────────────────────
+Claim pattern                             <- how the mailbox is emptied
+ (o) Single claim   ( ) Claim all
+────────────────────────
 Purchase box          [   Buy tsum   ]  <- runs purchase_box with the ticks
 [ ] Premium Box+
 [x] Premium Box
@@ -135,6 +138,9 @@ Purchase box          [   Buy tsum   ]  <- runs purchase_box with the ticks
 ────────────────────────
 [ Stop - Running: ... ]  <- Run when idle, Stop while a run is going
 [ Open logs ] [ Exit  ]
+────────────────────────
+[x] Auto Update       [    Update    ]  <- what the check found, and the
+     v1.7.0 available                      button that acts on it
 ```
 
 The panel opens by itself at launch, so there is nothing to discover on a first
@@ -176,6 +182,20 @@ it, once. Set both spinners to the same minute for one send an hour. From a
 console it is `run resume --var return_heart_timed=true --var
 return_heart_minutes=15,50`.
 
+**Claim pattern** decides how a cycle empties the mailbox, and the two ways are
+mutually exclusive — whichever is selected, the other never runs.
+
+* **Single claim** (the default) taps **Check** on one item at a time and keeps
+  going until the mailbox has none left. Slower, and the pattern that returns a
+  heart per request.
+* **Claim all** makes one pass through the game's own **Claim All** dialog with
+  hearts and medals toggled on, then dismisses whatever it reports. Faster, and
+  it takes the mailbox in one go, so nothing is checked item by item.
+
+Both live in [`flows/claim_mailbox.yaml`](flows/claim_mailbox.yaml) as the two
+branches of one switch, so `launch` and `resume` claim the same way. From a
+console it is `run resume --var claim_all=true`.
+
 Picking a mode or toggling a tick only *selects* it; **Run** is what launches
 it, and a run keeps whatever it started with. **Buy tsum** greys out while
 anything is running, since one emulator cannot serve two flows. **Stop** does
@@ -214,6 +234,52 @@ from there — `main.py --version`, the top row of the tray menu, the icon
 tooltip, the first line of every tray log, and `pyproject.toml` (via
 `[tool.setuptools.dynamic]`). Releasing is a one-line edit; nothing else needs
 touching.
+
+## Updates
+
+New builds are published as a single `.exe` on the repository's
+[Releases](https://github.com/iDunoPlay/ttheart-sender/releases) page, and the
+panel watches for them: 20 seconds after launch and every six hours after that,
+it asks GitHub for the newest release and puts the answer on the line under
+**Auto Update** — `v1.6.0 - up to date`, `v1.7.0 available`, or why it could not
+ask. The button beside the box acts on whatever it found: **Check** now,
+**Update** to install, **Retry** after a failure.
+
+**Auto Update** — ticked on a fresh install — decides whether finding a build is
+enough to install it. The check itself runs either way, so unticking the box
+does not blind the panel; it only stops it acting by itself. Either way an
+update **never interrupts a run**: while a flow is going the install waits, and
+the panel keeps saying the version is available until you press **Stop**.
+
+Installing swaps the running program out from under itself, which on Windows
+means renaming rather than overwriting:
+
+1. the new `.exe` is downloaded beside the old one as `ttheart-sender.exe.new`,
+   and thrown away unless it arrives at the exact size the release advertises;
+2. the running build is renamed to `ttheart-sender.exe.old` — allowed even
+   while it is executing — and the download takes its name;
+3. a small `ttheart-sender-update.cmd` is launched, the tray exits, and the
+   script deletes the old build (which only succeeds once the process is
+   really gone), starts the new one and deletes itself.
+
+`config.yaml`, `flows/` and `templates/` beside the `.exe` are untouched, as is
+`ttheart-settings.json` — the panel comes back the way you left it. Anything
+left behind by an interrupted swap is cleaned up at the next launch.
+
+Two installs cannot update themselves this way and say so on the status line: a
+**source checkout** (`git pull` instead) and the **folder build**, whose `.exe`
+needs the matching `_internal\` beside it. For those the button becomes
+**Open** and takes you to the release page.
+
+Turn the whole thing off — or point it at a fork — in `config.yaml`:
+
+```yaml
+update:
+  enabled: false             # never ask GitHub anything
+  repo: someone/their-fork   # empty = this project's own repo
+  check_interval_hours: 6
+  include_prereleases: false
+```
 
 ## Building the .exe
 

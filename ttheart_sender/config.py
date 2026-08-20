@@ -220,6 +220,29 @@ class DatasetConfig:
 
 
 @dataclass
+class UpdateConfig:
+    """Where new builds come from -- see :mod:`..update`.
+
+    Only the checking is configured here. Whether a newer build is *installed*
+    by itself is the panel's "Auto Update" tick box, which lives with the other
+    per-user switches in ``ttheart-settings.json``.
+    """
+
+    #: Look for new releases at all. Off means the panel never asks GitHub.
+    enabled: bool = True
+    #: ``owner/name`` on GitHub. Empty falls back to the project's own repo,
+    #: so a fork only has to set this line.
+    repo: str = ""
+    #: Hours between checks. Clamped by the updater, so a typo here cannot
+    #: turn the panel into a polling loop.
+    check_interval_hours: float = 6.0
+    #: Offer betas and release candidates as well as finished releases.
+    include_prereleases: bool = False
+    #: Seconds to wait on the API call. The download is given more.
+    timeout: float = 10.0
+
+
+@dataclass
 class Config:
     app: AppConfig = field(default_factory=AppConfig)
     window: WindowConfig = field(default_factory=WindowConfig)
@@ -227,6 +250,7 @@ class Config:
     input: InputConfig = field(default_factory=InputConfig)
     runner: RunnerConfig = field(default_factory=RunnerConfig)
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
+    update: UpdateConfig = field(default_factory=UpdateConfig)
 
     #: Directory the config was loaded from; all relative paths resolve here.
     root: Path = field(default_factory=Path.cwd)

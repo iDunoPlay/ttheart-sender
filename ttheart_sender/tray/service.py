@@ -15,7 +15,13 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from ..exceptions import TTHeartError
 from .modes import DEFAULT_MODE, MODES, Mode, get_mode
-from .settings import RETURN_HEART_MINUTES_DEFAULT, clamp_minutes
+from .settings import (
+    CLAIM_PATTERN_DEFAULT,
+    RETURN_HEART_MINUTES_DEFAULT,
+    claim_all_flag,
+    clamp_minutes,
+    normalize_claim_pattern,
+)
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +45,11 @@ PLAY_CHANCE_ON = 100
 RETURN_HEART_VAR = "return_heart_timed"
 RETURN_HEART_MINUTES_VAR = "return_heart_minutes"
 
+#: Flow variable behind the panel's "Claim pattern" radio. The panel picks a
+#: pattern by name; claim_mailbox.yaml only wants to know which of its two
+#: branches to take, so the name is boiled down to this flag on the way out.
+CLAIM_ALL_VAR = "claim_all"
+
 
 class RunState(Enum):
     IDLE = "idle"
@@ -57,6 +68,7 @@ class AutomationService:
         play: bool = False,
         return_heart: bool = False,
         return_heart_minutes: Optional[Sequence[int]] = None,
+        claim_pattern: str = CLAIM_PATTERN_DEFAULT,
         on_change: Optional[Callable[[], None]] = None,
         on_notify: Optional[Callable[[str, str, bool], None]] = None,
     ) -> None:
@@ -67,6 +79,7 @@ class AutomationService:
         self._return_heart_minutes = clamp_minutes(
             RETURN_HEART_MINUTES_DEFAULT if return_heart_minutes is None else return_heart_minutes
         )
+        self._claim_pattern = normalize_claim_pattern(claim_pattern)
         self._state = RunState.IDLE
         #: What the live run is called -- the mode's label, or "Buy tsum" for
         #: a one-off job, so the panel can say what it is waiting on.
@@ -99,6 +112,12 @@ class AutomationService:
         """The minutes of the hour hearts go out on, while that is on."""
         with self._lock:
             return list(self._return_heart_minutes)
+
+    @property
+    def claim_pattern(self) -> str:
+        """Which pattern the mailbox pass uses -- see ``CLAIM_PATTERNS``."""
+        with self._lock:
+            return self._claim_pattern
 
     @property
     def state(self) -> RunState:
@@ -189,6 +208,23 @@ class AutomationService:
         self._on_change()
         return True
 
+    def set_claim_pattern(self, pattern: str) -> bool:
+        """Pick the mailbox claim pattern the next Start will hand the flow.
+
+        Like :meth:`set_mode`, a live run keeps what it started with: the flow
+        reads ``claim_all`` once per mailbox pass, and swapping it underneath
+        a pass in progress would leave half the mailbox claimed each way.
+        """
+        chosen = normalize_claim_pattern(pattern, self.claim_pattern)
+        with self._lock:
+            if self._claim_pattern == chosen:
+                return False
+            self._claim_pattern = chosen
+        log.info("Claim pattern set to %s (%s=%s)",
+                 chosen, CLAIM_ALL_VAR, claim_all_flag(chosen))
+        self._on_change()
+        return True
+
     def _describe_play(self) -> str:
         return f"{PLAY_CHANCE_VAR}={self._chance()}"
 
@@ -207,6 +243,7 @@ class AutomationService:
             PLAY_CHANCE_VAR: self._chance(),
             RETURN_HEART_VAR: self.return_heart,
             RETURN_HEART_MINUTES_VAR: self.return_heart_minutes,
+            CLAIM_ALL_VAR: claim_all_flag(self.claim_pattern),
         }
 
     def start(self) -> bool:

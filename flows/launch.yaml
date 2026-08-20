@@ -2,7 +2,7 @@ name: click_tsumtsum
 description: Detect LDPlayer, launch TsumTsum, and clear the root-detection prompt
 
 vars:
-  # All three are forwarded to resume.yaml at the bottom of this file -- see
+  # All four are forwarded to resume.yaml at the bottom of this file -- see
   # the note there for why that has to be spelled out.
   #
   # The tray's "Auto Play" tick drives this: 100 when ticked, 0 when not. A
@@ -14,6 +14,10 @@ vars:
   # every cycle, the way it always has; on means only at the minutes below.
   return_heart_timed: false
   return_heart_minutes: [15, 50]
+
+  # The tray's "Claim pattern" radio. false = tap Check on one mailbox item at
+  # a time, true = one pass through the game's own Claim All dialog.
+  claim_all: false
 
 steps:
   # `python main.py run` already detects + parks LDPlayer before this flow
@@ -80,5 +84,6 @@ steps:
         play_chance_percent: "${play_chance_percent}"
         return_heart_timed: "${return_heart_timed}"
         return_heart_minutes: "${return_heart_minutes}"
+        claim_all: "${claim_all}"
 
 

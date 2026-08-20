@@ -20,7 +20,10 @@ import win32api
 import win32con
 import win32gui
 
+from ..version import __version__
 from .settings import (
+    CLAIM_PATTERN_DEFAULT,
+    CLAIM_PATTERNS,
     MINUTE_MAX,
     MINUTE_MIN,
     PURCHASE_BOXES,
@@ -42,8 +45,15 @@ ID_EXIT = 2005
 ID_LOGS = 2006
 ID_COLLECT_DATA = 2009
 ID_RETURN_HEART = 2010
+ID_AUTO_UPDATE = 2011
+ID_UPDATE = 2012
+#: A label rather than a control, but it is rewritten on every refresh, so it
+#: needs an id to be found again.
+ID_UPDATE_STATUS = 2013
 ID_MODE_BASE = 2100
 ID_PURCHASE_BASE = 2200
+#: One radio per claim pattern, in :data:`CLAIM_PATTERNS` order.
+ID_CLAIM_BASE = 2500
 #: One edit box per Return Heart mark, each with an up-down glued to it. The
 #: two ranges run in parallel, so the spinner belonging to an edit is always at
 #: the same offset -- see :func:`_spin_for`.
@@ -73,6 +83,11 @@ INDENT = 16
 #: "Buy tsum" sits on the "Purchase box" header line, right-aligned.
 BUY_WIDTH = 86
 HEADER_HEIGHT = 26
+#: The update button shares its line with the Auto Update tick box, the same
+#: way "Buy tsum" shares one with the Purchase box heading.
+UPDATE_WIDTH = 86
+#: The line under it that says what the updater is doing.
+STATUS_HEIGHT = 18
 
 BS_AUTOCHECKBOX = 0x00000003
 BS_AUTORADIOBUTTON = 0x00000009
@@ -148,9 +163,11 @@ class ControlPanel:
         on_mode: Callable[[str], None],
         on_toggle: Callable[[str, bool], None],
         on_return_minute: Callable[[int, int], None],
+        on_claim: Callable[[str], None],
         on_purchase: Callable[[str, bool], None],
         on_run: Callable[[], None],
         on_buy: Callable[[], None],
+        on_update: Callable[[], None],
         on_logs: Callable[[], None],
         on_exit: Callable[[], None],
     ) -> None:
@@ -162,9 +179,11 @@ class ControlPanel:
         self._on_mode = on_mode
         self._on_toggle = on_toggle
         self._on_return_minute = on_return_minute
+        self._on_claim = on_claim
         self._on_purchase = on_purchase
         self._on_run = on_run
         self._on_buy = on_buy
+        self._on_update = on_update
         self._on_logs = on_logs
         self._on_exit = on_exit
 
@@ -301,6 +320,11 @@ class ControlPanel:
         y = self._add_line(y)
         y += SECTION_GAP
 
+        y = self._add_claim_pattern(y)
+        y += SECTION_GAP
+        y = self._add_line(y)
+        y += SECTION_GAP
+
         y = self._add_purchase_header(y)
         y += GAP
         for index, (key, label, _default) in enumerate(PURCHASE_BOXES):
@@ -331,9 +355,37 @@ class ControlPanel:
                           MARGIN, y, half, ROW + 4)
         self._add_control(ID_EXIT, "BUTTON", "Exit", BS_PUSHBUTTON,
                           MARGIN + half + GAP, y, half, ROW + 4)
-        y += ROW + 4 + MARGIN
+        y += ROW + 4 + SECTION_GAP
+
+        # Housekeeping, so it sits under the buttons rather than between the
+        # switches that decide what a run does.
+        y = self._add_line(y)
+        y += SECTION_GAP
+        y = self._add_update(y)
+        y += MARGIN
 
         self._resize(y)
+
+    def _add_update(self, y: int) -> int:
+        """The "Auto Update" tick box, its button, and the status line."""
+        button_x = PANEL_WIDTH - MARGIN - UPDATE_WIDTH
+        check = self._add_control(
+            ID_AUTO_UPDATE, "BUTTON", "Auto Update", BS_AUTOCHECKBOX,
+            MARGIN, y, button_x - MARGIN - GAP, HEADER_HEIGHT,
+        )
+        # Bold for the same reason "Return Heart" is: it heads a section
+        # rather than continuing the list of run options above it.
+        win32gui.SendMessage(check, win32con.WM_SETFONT, self._fonts[1], 1)
+        self._add_control(ID_UPDATE, "BUTTON", "Check", BS_PUSHBUTTON,
+                          button_x, y, UPDATE_WIDTH, HEADER_HEIGHT)
+        y += HEADER_HEIGHT
+        # Indented under the tick box, like the Return Heart marks are: it
+        # reports on that switch rather than standing on its own.
+        return self._add_static(
+            f"v{__version__}", y, ident=ID_UPDATE_STATUS,
+            x=MARGIN + INDENT, width=PANEL_WIDTH - MARGIN - (MARGIN + INDENT),
+            height=STATUS_HEIGHT, centred=True,
+        )
 
     #: What each Return Heart row is called. Read together they spell the
     #: schedule out: "every hour at 15 min, and at 50 min".
@@ -350,6 +402,24 @@ class ControlPanel:
                 y,
             )
         return y
+
+    def _add_claim_pattern(self, y: int) -> int:
+        """The "Claim pattern" heading and the two ways to empty a mailbox."""
+        y = self._add_static("Claim pattern", y, bold=True)
+        # WS_GROUP on the first one for the same reason the Mode radios carry
+        # it: an auto-radio clears its siblings up to the next WS_GROUP, so
+        # without it picking a pattern would put out the selected mode.
+        # Indented under the heading, like the Return Heart marks are.
+        left = MARGIN + INDENT
+        width = (PANEL_WIDTH - MARGIN - left) // len(CLAIM_PATTERNS)
+        for index, (_key, label, _flag) in enumerate(CLAIM_PATTERNS):
+            extra = win32con.WS_GROUP if index == 0 else 0
+            self._add_control(
+                ID_CLAIM_BASE + index, "BUTTON", label,
+                BS_AUTORADIOBUTTON | extra,
+                left + index * width, y, width, ROW,
+            )
+        return y + ROW
 
     def _add_minute_row(self, ident: int, label: str, value: int, y: int) -> int:
         """One indented "<label> [15] min" row, aligned with its fellows."""
@@ -411,7 +481,9 @@ class ControlPanel:
 
     def _add_static(self, text: str, y: int, *, bold: bool = False,
                     x: Optional[int] = None, width: Optional[int] = None,
-                    height: Optional[int] = None, centred: bool = False) -> int:
+                    height: Optional[int] = None, centred: bool = False,
+                    ident: int = 0) -> int:
+        """A text label. Pass ``ident`` for one whose text is rewritten later."""
         x = MARGIN if x is None else x
         width = (PANEL_WIDTH - 2 * MARGIN) if width is None else width
         height = ROW if height is None else height
@@ -423,9 +495,11 @@ class ControlPanel:
         hwnd = win32gui.CreateWindowEx(
             0, "STATIC", text, style,
             self._px(x), self._px(y), self._px(width), self._px(height),
-            self._hwnd, 0, win32api.GetModuleHandle(None), None,
+            self._hwnd, ident, win32api.GetModuleHandle(None), None,
         )
         win32gui.SendMessage(hwnd, win32con.WM_SETFONT, self._fonts[1 if bold else 0], 1)
+        if ident:
+            self._controls[ident] = hwnd
         return y + height
 
     def _add_check(self, ident: int, label: str, y: int, *, bold: bool = False) -> int:
@@ -520,6 +594,9 @@ class ControlPanel:
 
         for index, mode in enumerate(self._modes):
             self._set_check(ID_MODE_BASE + index, mode.key == state.get("mode"))
+        pattern = state.get("claim_pattern", CLAIM_PATTERN_DEFAULT)
+        for index, (key, _label, _flag) in enumerate(CLAIM_PATTERNS):
+            self._set_check(ID_CLAIM_BASE + index, key == pattern)
         self._set_check(ID_COLLECT_DATA, state.get("collect_data", False))
         purchase = state.get("purchase", {})
         for index, (key, _label, default) in enumerate(PURCHASE_BOXES):
@@ -533,6 +610,14 @@ class ControlPanel:
         # nothing, and Run must not restart it before the worker has finished.
         self._enable(ID_RUN, not stopping)
         self._enable(ID_BUY, not (running or stopping))
+
+        self._set_check(ID_AUTO_UPDATE, bool(state.get("auto_update", False)))
+        self._set_text(ID_UPDATE_STATUS, str(state.get("update_status", "")))
+        self._set_text(ID_UPDATE, str(state.get("update_button", "Check")))
+        # The button is dead while a check or download is in flight; the
+        # status line under it is what says so.
+        self._enable(ID_UPDATE, bool(state.get("update_ready", True)))
+
         self._apply_topmost(state.get("always_on_top", True))
 
     def _apply_topmost(self, enabled: bool) -> None:
@@ -633,6 +718,10 @@ class ControlPanel:
                 self._on_toggle("collect_data", self._get_check(ident))
             elif ident == ID_RETURN_HEART:
                 self._on_toggle("return_heart", self._get_check(ident))
+            elif ident == ID_AUTO_UPDATE:
+                self._on_toggle("auto_update", self._get_check(ident))
+            elif ident == ID_UPDATE:
+                self._on_update()
             elif ident == ID_BUY:
                 self._on_buy()
             elif ident == ID_RUN:
@@ -643,6 +732,8 @@ class ControlPanel:
                 self._on_exit()
             elif ID_MODE_BASE <= ident < ID_MODE_BASE + len(self._modes):
                 self._on_mode(self._modes[ident - ID_MODE_BASE].key)
+            elif ID_CLAIM_BASE <= ident < ID_CLAIM_BASE + len(CLAIM_PATTERNS):
+                self._on_claim(CLAIM_PATTERNS[ident - ID_CLAIM_BASE][0])
             elif ID_PURCHASE_BASE <= ident < ID_PURCHASE_BASE + len(PURCHASE_BOXES):
                 key = PURCHASE_BOXES[ident - ID_PURCHASE_BASE][0]
                 self._on_purchase(key, self._get_check(ident))

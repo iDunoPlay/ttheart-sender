@@ -47,7 +47,7 @@ steps:
 
   - wait_for:
       template: go
-      timeout: 5
+      timeout: 4
 
   # The round itself. It ends when the results screen appears; `duration` is
   # only the backstop for a round where that template never matches, so keep it
@@ -77,7 +77,7 @@ steps:
 
   - find_click:
       template: cancel_button
-      timeout: 5
+      timeout: 6.5
     optional: true
 
   # `until_found` is only tested between drags, so a banner that is up for a

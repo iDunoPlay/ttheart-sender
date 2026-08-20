@@ -76,6 +76,18 @@ runner:
   cursor_exit_margin: 16     # px of slack around the window before it trips
   max_iterations: 100000
 
+# New builds are published as a single .exe on GitHub Releases. The panel
+# checks for one in the background and says what it found on its status line;
+# the "Auto Update" tick box beside it decides whether finding one is enough to
+# install it. An automatic install never interrupts a run -- it waits for the
+# bot to go idle, swaps the .exe and restarts into the new build.
+update:
+  enabled: true              # false = never ask GitHub anything
+  repo: ""                   # owner/name; empty = this project's own repo
+  check_interval_hours: 6
+  include_prereleases: false # true = offer betas and release candidates too
+  timeout: 10.0              # seconds to wait on the API call
+
 # Training samples for improving tsum detection. Off by default. When on, a
 # few drags per round save the board twice -- once as detection saw it, once
 # while the game highlights the tsums it counts as linkable -- into

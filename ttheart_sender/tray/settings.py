@@ -28,6 +28,40 @@ PURCHASE_BOXES = (
     ("happiness_box", "Happiness Box", True),
 )
 
+#: Panel radio -> what the mailbox pass does, as a `claim_all` flow flag.
+#: "single" taps Check on one item at a time until the mailbox is empty;
+#: "all" makes one pass through the game's own Claim All dialog instead.
+#: Exactly one of the two runs -- see flows/claim_mailbox.yaml.
+CLAIM_PATTERNS = (
+    ("single", "Single claim", False),
+    ("all", "Claim all", True),
+)
+#: The pattern a fresh install uses: item by item, because that is the one
+#: that returns a heart per request.
+CLAIM_PATTERN_DEFAULT = CLAIM_PATTERNS[0][0]
+
+
+def claim_all_flag(pattern: Any) -> bool:
+    """The `claim_all` flow variable behind a pattern key."""
+    for key, _label, flag in CLAIM_PATTERNS:
+        if key == pattern:
+            return flag
+    return False
+
+
+def normalize_claim_pattern(value: Any, default: str = CLAIM_PATTERN_DEFAULT) -> str:
+    """A stored or user-supplied pattern forced back onto a real radio.
+
+    Runs on hand-edited JSON, so anything unrecognised falls back rather than
+    leaving the panel with no button lit.
+    """
+    text = str(value).strip().casefold() if value is not None else ""
+    for key, _label, _flag in CLAIM_PATTERNS:
+        if key == text:
+            return key
+    return default
+
+
 #: Bounds for the Return Heart spinners. They are minutes of the hour, so the
 #: clock itself sets the range.
 MINUTE_MIN = 0
@@ -90,6 +124,15 @@ class PanelSettings:
     #: Minutes of the hour to send on while ``return_heart`` is set --
     #: :data:`RETURN_HEART_MARKS` of them, one per spinner.
     return_heart_minutes: List[int] = field(default_factory=_default_minutes)
+    #: Which of :data:`CLAIM_PATTERNS` the mailbox pass uses. "single" by
+    #: default, which is what the flow did before the radio existed.
+    claim_pattern: str = CLAIM_PATTERN_DEFAULT
+    #: Install a newer release by itself once one is found. The *check* runs
+    #: either way -- this only decides whether the panel acts on the answer.
+    #: On by default: a bot left running unattended is exactly the thing that
+    #: should not be several versions behind, and an install is held back
+    #: until the run it would interrupt has finished.
+    auto_update: bool = True
     #: Save training samples while playing. Seeded from config.yaml's
     #: `dataset.enabled` the first time the panel runs, and the panel's own
     #: switch after that -- see :meth:`..tray.app.TrayApp._seed_collection`.
@@ -126,6 +169,9 @@ class PanelSettings:
         # clamp_minutes copes with a missing, short or nonsense list on its
         # own, so there is nothing to check first.
         settings.return_heart_minutes = clamp_minutes(raw.get("return_heart_minutes"))
+        # The loop above already copied it across as a plain string; this is
+        # what keeps a typo in the file from lighting neither radio.
+        settings.claim_pattern = normalize_claim_pattern(settings.claim_pattern)
         return settings
 
     def to_dict(self) -> Dict[str, Any]:

@@ -3,13 +3,18 @@ description: Send heart through ranking list
 
 steps:
     # Begin send heart
-    - find_click:
-        template: rankings_button
-        timeout: 4
-
-    - wait_for:
+    - if_found:
         template: weekly_ranking
         timeout: 4
+        then:
+        else:
+        - find_click:
+            template: rankings_button
+            timeout: 4
+
+        - wait_for:
+            template: weekly_ranking
+            timeout: 4
 
     # Scroll the list back to the top, then stop as soon as it stops moving.
     #

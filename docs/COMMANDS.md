@@ -38,7 +38,8 @@ its `class=` into `window.target.class_names` in `config.yaml`.
 
 Two entry points. `flows/launch.yaml` launches the game and clears the startup
 prompts, then hands off to `flows/resume.yaml` — the forever loop that claims
-the mailbox, sends hearts (every cycle, or on the clock when
+the mailbox (item by item, or in one pass through the game's Claim All dialog
+when `claim_all` is set), sends hearts (every cycle, or on the clock when
 `return_heart_timed` is set), and (if `play_chance_percent` says so) plays a
 round instead of pausing between cycles. `resume` on its own skips the launch
 and assumes the game is already up.

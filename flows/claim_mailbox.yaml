@@ -7,90 +7,116 @@ description: Claim everything in an already-open mailbox
 #
 # Use it from any other flow with:
 #
-#   - run_flow: claim_mailbox     # or the shorter alias: - call: claim_mailbox
+#   - run_flow: {flow: claim_mailbox, vars: {claim_all: "${claim_all}"}}
+#
+# The `vars:` are spelled out because run_flow re-applies the called flow's own
+# defaults on entry -- the bare `- run_flow: claim_mailbox` would claim the
+# mailbox single-file however the panel is set.
 #
 # Improve the steps here once and every caller picks the change up.
 
+vars:
+  # The panel's "Claim pattern" radio, as a flag:
+  #
+  #   false -- Single claim. Tap Check on one item at a time until the mailbox
+  #            has none left. Slower, but it is the pattern that returns a
+  #            requested heart per item, and it is what the panel picks by
+  #            default.
+  #   true  -- Claim all. One pass through the game's own "Claim All" dialog
+  #            with hearts and medals toggled on. Faster, and it takes the
+  #            whole mailbox in one go, so nothing is checked item by item.
+  #
+  # Exactly one of the two runs; a console run says which with
+  # `--var claim_all=true`.
+  claim_all: false
+
 steps:
-    - if_found:
-        template: get_coin
-        timeout: 4
+    - if:
+        value: ${claim_all}
+
+        # -- Claim all ----------------------------------------------------
         then:
-            - find_click:
-                template: claim_all_button
-                timeout: 5
+        - if_found:
+            template: get_coin
+            timeout: 4
+            then:
+                - find_click:
+                    template: claim_all_button
+                    timeout: 5
 
-            - wait: {min: 0.4, max: 0.7}
+                - wait: {min: 0.4, max: 0.7}
 
-            - find_click:
-                template: toggle_hearts_button
-                timeout: 3
+                - find_click:
+                    template: toggle_hearts_button
+                    timeout: 3
 
-            - wait: {min: 0.1, max: 0.3}
+                - wait: {min: 0.1, max: 0.3}
 
-            - find_click:
-                template: toggle_medals_button
-                timeout: 3
+                - find_click:
+                    template: toggle_medals_button
+                    timeout: 3
 
-            - wait: {min: 0.4, max: 0.7}
+                - wait: {min: 0.4, max: 0.7}
 
-            - find_click:
-                template: ok_button
-                timeout: 3
-
-            # Which of these two shows depends on whether there was anything to claim,
-            # and both fade on their own -- never worth failing the flow over.
-            - if_found:
-                template: gift_received
-                timeout: 4
-                then:
-                - find_click: gift_received
-
-            - if_found:
-                template: no_gift_can_claim_all
-                timeout: 4
-                then:
-                - find_click: no_gift_can_claim_all
-
-            - wait: {min: 0.4, max: 0.7}
-
-    # Return requested heart
-
-    # while_found is checked before every iteration and ends the loop the first
-    # time check_button is not on screen -- an empty mailbox costs one scan
-    # instead of ten. `times:` cannot say that: it always runs its full count,
-    # and an if_found that takes the else branch still counts as a successful
-    # iteration. max_iterations caps a screen that never stops offering hearts.
-    - repeat:
-        while_found: check_button
-        max_iterations: 10
-        stop_on_failure: true
-        delay: {min: 0.4, max: 0.7}
-        steps:
-            - find_click:
-                template: check_button
-                timeout: 3
-
-            # The OK button is tapped twice at the same spot: the second tap
-            # is blind (the button may be mid-animation and stop matching).
-            # Both taps live under this if_found so a missing dialog skips
-            # them together -- `at: ${ok_pos}` keeps the previous iteration's
-            # position, and clicking that would land on whatever has since
-            # moved into it.
-            - if_found:
-                template: ok_button
-                timeout: 4
-                then:
                 - find_click:
                     template: ok_button
                     timeout: 3
-                    save_as: ok_pos
 
-                - wait: 0.5
+                # Which of these two shows depends on whether there was anything to claim,
+                # and both fade on their own -- never worth failing the flow over.
+                - if_found:
+                    template: gift_received
+                    timeout: 4
+                    then:
+                    - find_click: gift_received
 
-                - click:
-                    at: ${ok_pos}
-                    space: screen
+                - if_found:
+                    template: no_gift_can_claim_all
+                    timeout: 4
+                    then:
+                    - find_click: no_gift_can_claim_all
 
-            - wait: {min: 0.4, max: 0.7}
-      optional: true
+                - wait: {min: 0.4, max: 0.7}
+
+        # -- Single claim, one item at a time (returns the requested heart) --
+        else:
+        # while_found is checked before every iteration and ends the loop the first
+        # time check_button is not on screen -- an empty mailbox costs one scan
+        # instead of ten. `times:` cannot say that: it always runs its full count,
+        # and an if_found that takes the else branch still counts as a successful
+        # iteration. max_iterations caps a screen that never stops offering hearts.
+        - if_found:
+            template: get_coin
+            timeout: 4
+            then:
+            - repeat:
+                while_found: check_button
+                max_iterations: 200
+                stop_on_failure: true
+                delay: {min: 0.2, max: 0.45}
+                steps:
+                    - find_click:
+                        template: check_button
+                        timeout: 3
+
+                    # The OK button is tapped twice at the same spot: the second tap
+                    # is blind (the button may be mid-animation and stop matching).
+                    # Both taps live under this if_found so a missing dialog skips
+                    # them together -- `at: ${ok_pos}` keeps the previous iteration's
+                    # position, and clicking that would land on whatever has since
+                    # moved into it.
+                    - if_found:
+                        template: ok_button
+                        timeout: 4
+                        then:
+                        - find_click:
+                            template: ok_button
+                            timeout: 3
+                            save_as: ok_pos
+
+                        - wait: {min: 0.15, max: 0.25}
+
+                        - click:
+                            at: ${ok_pos}
+                            space: screen
+

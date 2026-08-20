@@ -20,6 +20,7 @@ from ttheart_sender.control.hotkey import StopKeyWatcher
 from ttheart_sender.exceptions import WindowNotFoundError
 from ttheart_sender.tray.modes import MODES, get_mode
 from ttheart_sender.tray.service import (
+    CLAIM_ALL_VAR,
     PLAY_CHANCE_OFF,
     PLAY_CHANCE_ON,
     PLAY_CHANCE_VAR,
@@ -29,20 +30,25 @@ from ttheart_sender.tray.service import (
     RunState,
 )
 from ttheart_sender.tray.settings import (
+    CLAIM_PATTERN_DEFAULT,
+    CLAIM_PATTERNS,
     RETURN_HEART_MINUTES_DEFAULT,
+    claim_all_flag,
     clamp_minute,
     clamp_minutes,
+    normalize_claim_pattern,
 )
 
 DEFAULT_MARKS = list(RETURN_HEART_MINUTES_DEFAULT)
 
 
-def overrides(chance=PLAY_CHANCE_OFF, timed=False, marks=None):
+def overrides(chance=PLAY_CHANCE_OFF, timed=False, marks=None, claim_all=False):
     """What a run started from the panel should be handed."""
     return {
         PLAY_CHANCE_VAR: chance,
         RETURN_HEART_VAR: timed,
         RETURN_HEART_MINUTES_VAR: DEFAULT_MARKS if marks is None else list(marks),
+        CLAIM_ALL_VAR: claim_all,
     }
 
 
@@ -329,6 +335,70 @@ def test_resume_sends_hearts_on_the_clock_only_when_asked_to():
     assert {flag: False} in [s.params for s in find_steps(branch.children["then"], "set")]
 
 
+def test_claim_pattern_defaults_to_single_and_reaches_the_flow():
+    """Unchanged panel = the item-by-item pass, the way it always ran."""
+    service = AutomationService(FakeApp())
+
+    assert service.claim_pattern == CLAIM_PATTERN_DEFAULT == "single"
+    assert service._variables()[CLAIM_ALL_VAR] is False
+
+    assert service.set_claim_pattern("all") is True
+    assert service._variables()[CLAIM_ALL_VAR] is True
+    # Setting the same one twice is not a change, so nothing is announced.
+    assert service.set_claim_pattern("all") is False
+
+
+def test_an_unknown_claim_pattern_leaves_the_chosen_one_alone():
+    service = AutomationService(FakeApp())
+    service.set_claim_pattern("all")
+
+    assert service.set_claim_pattern("sideways") is False
+    assert service.claim_pattern == "all"
+    assert normalize_claim_pattern(None) == CLAIM_PATTERN_DEFAULT
+    assert normalize_claim_pattern(" ALL ") == "all"
+    assert [claim_all_flag(key) for key, _label, _flag in CLAIM_PATTERNS] == [False, True]
+
+
+def test_the_two_claim_patterns_are_the_two_branches_of_one_switch():
+    """Exactly one runs: claim-all and item-by-item must never both fire."""
+    flow = load_flow_by_name(Config().flows_dir, "claim_mailbox")
+
+    assert CLAIM_ALL_VAR in flow.vars, "claim_mailbox.yaml must ship a default"
+    assert flow.vars[CLAIM_ALL_VAR] is False
+
+    switch = next(
+        step for step in find_steps(flow.steps, "if")
+        if step.params.get("value") == f"${{{CLAIM_ALL_VAR}}}"
+    )
+    # Claim all: the game's own dialog, behind the badge that says there is
+    # something to claim.
+    claim_all = list(find_steps(switch.children["then"], "find_click"))
+    assert "claim_all_button" in [s.params.get("template") for s in claim_all]
+    # Single claim: one Check per item, until the mailbox stops offering them.
+    loops = list(find_steps(switch.children["else"], "repeat"))
+    assert [s.params.get("while_found") for s in loops] == ["check_button"]
+
+    # ...and neither pattern may leak into the other branch.
+    assert not list(find_steps(switch.children["then"], "repeat"))
+    assert "claim_all_button" not in [
+        s.params.get("template") for s in find_steps(switch.children["else"], "find_click")
+    ]
+
+
+def test_the_claim_pattern_is_handed_down_the_whole_chain():
+    """launch -> resume -> claim_mailbox: every hop re-applies its own vars."""
+    config = Config()
+    for name, called in (("launch", "resume"), ("resume", "claim_mailbox")):
+        flow = load_flow_by_name(config.flows_dir, name)
+        assert CLAIM_ALL_VAR in flow.vars, f"{name}.yaml needs a standalone default"
+        calls = [s for s in find_steps(flow.steps, "run_flow") if s.params.get("flow") == called]
+        assert calls, f"{name}.yaml no longer calls {called}"
+        for call in calls:
+            assert call.params.get("vars", {}).get(CLAIM_ALL_VAR) == f"${{{CLAIM_ALL_VAR}}}", (
+                f"without this, {called}.yaml's own default overwrites the panel's choice"
+            )
+
+
 # --------------------------------------------------------------------------
 # Run lifecycle
 # --------------------------------------------------------------------------
@@ -487,6 +557,53 @@ def test_panel_toggles_reach_the_service_and_the_saved_file(tray):
     assert reloaded.return_heart_minutes == [DEFAULT_MARKS[0], 35]
     assert reloaded.always_on_top is False
     assert reloaded.mode == "play"
+
+
+def test_the_claim_radio_reaches_the_service_and_the_saved_file(tray):
+    from ttheart_sender.tray.settings import PanelSettings
+
+    assert tray._panel_state()["claim_pattern"] == "single"
+
+    tray._set_claim_pattern("all")
+    assert tray._service.claim_pattern == "all"
+    assert tray._panel_state()["claim_pattern"] == "all"
+    assert PanelSettings.load(tray._settings_path).claim_pattern == "all"
+
+    # A hand-mangled file lights the default radio rather than none of them.
+    assert PanelSettings.from_dict({"claim_pattern": "everything"}).claim_pattern == "single"
+
+
+def test_auto_update_is_on_by_default_and_survives_being_unticked(tray):
+    """The check always runs; the tick box only decides whether it acts."""
+    from ttheart_sender.tray.settings import PanelSettings
+
+    state = tray._panel_state()
+    assert state["auto_update"] is True
+    assert state["update_button"] == "Check"
+    assert state["update_ready"] is True
+
+    tray._set_toggle("auto_update", False)
+    assert tray._updater.auto is False
+    assert tray._panel_state()["auto_update"] is False
+    assert PanelSettings.load(tray._settings_path).auto_update is False
+
+
+def test_the_update_button_is_wired_to_the_updater(tray):
+    assert tray._panel._on_update == tray._updater.activate
+    # Nothing found yet, so pressing it asks GitHub rather than installing.
+    tray._panel._on_update()
+    assert tray._updater._command == "check"
+
+
+def test_an_update_never_restarts_a_running_flow(tray):
+    tray._app._block = True
+    tray._service.start()
+    tray._app.entered.wait(5)
+    assert tray._updater._apply_allowed() is False
+
+    tray._app.release.set()
+    wait_for(lambda: tray._service.state is RunState.IDLE)
+    assert tray._updater._apply_allowed() is True
 
 
 def test_an_unknown_mark_is_ignored_rather_than_stored(tray):
