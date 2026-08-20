@@ -262,6 +262,14 @@ means renaming rather than overwriting:
    script deletes the old build (which only succeeds once the process is
    really gone), starts the new one and deletes itself.
 
+That script is started with PyInstaller's `_PYI_*` handoff variables stripped
+from the environment, and clears them again itself. A one-file build runs as a
+child of its own bootloader, which uses those variables to say "the archive is
+already unpacked, it is in this temp folder". Inherited by the replacement
+`.exe` they make it skip unpacking and load `python311.dll` out of the *dying*
+process's `_MEIxxxxxx` directory, moments before it is deleted — the update
+lands correctly and then the restart dies with *Failed to load Python DLL*.
+
 `config.yaml`, `flows/` and `templates/` beside the `.exe` are untouched, as is
 `ttheart-settings.json` — the panel comes back the way you left it. Anything
 left behind by an interrupted swap is cleaned up at the next launch.

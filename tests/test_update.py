@@ -224,6 +224,31 @@ def test_the_restart_script_waits_deletes_and_relaunches(install_dir):
     assert b"\r\r\n" not in script.read_bytes()
 
 
+def test_the_new_build_is_started_without_the_bootloader_handoff(install_dir, monkeypatch):
+    """A one-file child inherits _PYI_* vars naming the temp dir it unpacked to.
+
+    Handed on to the replacement .exe they make it skip unpacking and load its
+    Python DLL out of a directory the dying process is about to delete, which
+    is the "Failed to load Python DLL" dialog.
+    """
+    exe = install_dir
+    for name in update.PYI_HANDOFF_VARS:
+        monkeypatch.setenv(name, r"C:\Users\x\AppData\Local\Temp\_MEI234402")
+    monkeypatch.setenv("TTHEART_KEEP_ME", "kept")
+
+    with mock.patch.object(update.subprocess, "Popen") as popen:
+        update.install(update.staged_path(exe), exe)
+
+    passed = popen.call_args.kwargs["env"]
+    assert [name for name in update.PYI_HANDOFF_VARS if name in passed] == []
+    assert passed["TTHEART_KEEP_ME"] == "kept"  # everything else survives
+
+    # ...and the script clears them again, for the hand-run case.
+    body = exe.with_name(f"{exe.stem}-update.cmd").read_text(encoding="ascii")
+    for name in update.PYI_HANDOFF_VARS:
+        assert f'set "{name}="' in body
+
+
 def test_a_failed_swap_puts_the_working_build_back(install_dir):
     exe = install_dir
     with mock.patch.object(Path, "replace", side_effect=OSError("in use")):

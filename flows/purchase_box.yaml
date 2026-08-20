@@ -105,6 +105,11 @@ steps:
         - click: {at: "${box_at}"}
         - wait: {min: 0.6, max: 1.0}
 
+        # Cleared per box, not per run: each tab has its own stock, so a box
+        # that has fallen below ten says nothing about the next one. Set here
+        # rather than in `vars:` so the inner loop's `if` always has it.
+        - set: {ten_time_sold_out: false}
+
         # ---- inner loop: buy this box until it is sold out ---------------
         # until_found is tested *before* every iteration, so a box that is
         # already sold out costs one scan and no clicks, and the purchase
@@ -118,25 +123,64 @@ steps:
             until_found: 1_time_purchase_sold_out
             max_iterations: ${max_per_box}
             stop_on_failure: true
-            delay: {min: 0.5, max: 0.9}
+            delay: {min: 0.35, max: 0.6}
             steps:
-            # 10-Time when the panel offers it, 1-Time otherwise. The
-            # sold-out button is a different image, so a match here means
-            # the button is really buyable. With under ten left, 10-Time
-            # drops out and the else branch keeps buying singles until the
-            # sold-out marker ends the loop.
-            - if_found:
-                template: 10_time_purchase
-                timeout: 2
+            # 10-Time while this box still takes it, 1-Time otherwise.
+            # Once the notice below has fired there is no point clicking the
+            # 10-Time button again, so the latch skips straight to singles.
+            #
+            # The sold-out button is a different image, so a match here means
+            # the button is really buyable (measured: the live template
+            # scores 0.37 against the sold-out one, well under the 0.85
+            # threshold, and the two sold-out markers do not cross-match
+            # either).
+            - if:
+                value: ${ten_time_sold_out}
                 then:
-                - find_click: {template: 10_time_purchase, timeout: 3}
-                - set: {batch: 10}
-
-                else:
                 - find_click: {template: 1_time_purchase, timeout: 3}
                 - set: {batch: 1}
 
+                else:
+                - if_found:
+                    template: 10_time_purchase
+                    timeout: 2
+                    then:
+                    - find_click: {template: 10_time_purchase, timeout: 3}
+                    - set: {batch: 10}
+
+                    else:
+                    - find_click: {template: 1_time_purchase, timeout: 3}
+                    - set: {batch: 1}
+
             - wait: {min: 0.7, max: 1.35}
+
+            # The other way 10-Time goes away: with fewer than ten left the
+            # button stays on the panel, and the click is answered with "You
+            # can't use 10-Time Purchases" instead of the confirm dialog.
+            # Nothing was spent, so this is not a failure -- latch it, let
+            # the notice clear itself, and buy a single in the same pass.
+            # Singles then carry the box the rest of the way down to the
+            # 1-Time sold-out marker.
+            #
+            # No timeout: the wait above already gave the notice its chance
+            # to appear, so this costs one screen grab on the passes (nearly
+            # all of them) where there is nothing to find.
+            - if_found:
+                template: 10_time_purchase_sold_out_notice
+                then:
+                - set: {ten_time_sold_out: true}
+                - log: "10-Time refused on ${box_name}: buying singles from here"
+                - wait: 0.3
+
+                # It dismisses itself. Optional because a notice that lingers
+                # is not worth abandoning the box over -- the 1-Time click
+                # below polls for its button and is the real gate.
+                - click: [269, 514]
+                - wait: 0.5
+
+                - find_click: {template: 1_time_purchase, timeout: 3}
+                - set: {batch: 1}
+                - wait: {min: 0.7, max: 1.35}
 
             # Confirm the spend, and tally it only inside the `then` --
             # a failed step does not abort the rest of the list, so an
@@ -156,21 +200,45 @@ steps:
                 # stop_on_failure ends this box instead of clicking on.
                 - find: {template: ok_button, timeout: 0}
 
-            - wait: {min: 0.8, max: 1.35}
+            - wait: {min: 0.3, max: 0.65}
 
+            # From here down the spend has already happened -- this is just
+            # opening the reward and clearing the popups behind it. All of it
+            # is `optional` so a missed animation tap cannot abandon a box
+            # that still has stock. If the screen really is stuck, the next
+            # iteration's purchase click is what fails and ends the loop.
             - find_click:
                 template: tap_open
                 timeout: 5
+              optional: true
+
+            - if_found:
+                template: tap_to_next
+                timeout: 7
+                then:
+                - repeat:
+                    until_found: 10_time_puchase_result
+                    max_iterations: 50
+                    stop_on_failure: false
+                    delay: {min: 0.05, max: 0.25}
+                    steps:
+                    - click: [408, 760]
 
             - find_click:
                 template: announcement_close_button
                 timeout: 30
+              optional: true
 
-            - wait: {min: 0.3, max: 0.68}
+            - wait: {min: 0.15, max: 0.3}
 
+            # The pick-up capsule's own reward puts up a second announcement,
+            # but only sometimes -- hence a plain optional click. Do not
+            # reach for `wait_for` with a `then:` here: it has no such branch,
+            # so the step dies on an unknown parameter every iteration.
             - find_click: # final pick-up capsule reward
                 template: announcement_close_button
                 timeout: 3
+              optional: true
 
           # A box that cannot be bought is a warning, not a failed run --
           # the outer loop still moves on to the next one.

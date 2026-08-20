@@ -56,6 +56,23 @@ OLD_SUFFIX = ".old"
 #: progress callbacks, small enough to notice a cancel promptly.
 CHUNK_BYTES = 256 * 1024
 
+#: How a one-file bootloader tells the process it spawns "the archive is
+#: already unpacked, it is over there". Our code *is* that spawned process, so
+#: these sit in our environment -- and anything we launch inherits them.
+#:
+#: The replacement .exe would then skip unpacking itself and load its Python
+#: DLL out of the dying process's temp directory, which is deleted moments
+#: later: "Failed to load Python DLL ...\\_MEIxxxxxx\\python311.dll". So the
+#: restart is handed a copy of the environment with these taken out.
+#: ``_MEIPASS2`` is the name PyInstaller 5 and earlier used for the first one.
+PYI_HANDOFF_VARS = (
+    "_PYI_APPLICATION_HOME_DIR",
+    "_PYI_ARCHIVE_FILE",
+    "_PYI_PARENT_PROCESS_LEVEL",
+    "_PYI_SPLASH_IPC",
+    "_MEIPASS2",
+)
+
 
 # --------------------------------------------------------------------------
 # Versions
@@ -431,6 +448,15 @@ def install(staged: Path, exe: Optional[Path] = None) -> None:
     _launch_restart_script(exe, retired)
 
 
+def clean_environment() -> Dict[str, str]:
+    """A copy of this process's environment fit for starting a new build in."""
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if name not in PYI_HANDOFF_VARS
+    }
+
+
 def _launch_restart_script(exe: Path, retired: Path) -> None:
     """Start the detached .cmd that waits for us to exit, then relaunches."""
     script = exe.with_name(f"{exe.stem}-update.cmd")
@@ -444,6 +470,9 @@ def _launch_restart_script(exe: Path, retired: Path) -> None:
             cwd=str(exe.parent),
             creationflags=creation,
             close_fds=True,
+            # The new build has to start as a fresh one-file app, not as the
+            # continuation of the one it is replacing -- see PYI_HANDOFF_VARS.
+            env=clean_environment(),
         )
     except OSError as exc:
         # The new build is already in place, so this is only a failure to
@@ -463,9 +492,17 @@ def _restart_script(exe: Path, retired: Path) -> str:
     # Plain newlines: write_text turns them into CRLF on the way out, and
     # spelling the carriage return out here too would hand cmd.exe a doubled
     # one on every line.
+    #
+    # The `set "VAR="` block clears the bootloader handoff again inside the
+    # script. :func:`clean_environment` has already done it for the process
+    # this script runs in, but the script is a file on disk that someone may
+    # run by hand after a half-finished update, and starting the new build
+    # with those still set is the one thing that breaks it.
+    unset = "".join(f'set "{name}="\n' for name in PYI_HANDOFF_VARS)
     return (
         "@echo off\n"
         "setlocal\n"
+        + unset +
         "set TRIES=0\n"
         ":wait\n"
         'del "{retired}" >nul 2>&1\n'
