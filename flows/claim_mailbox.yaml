@@ -93,30 +93,56 @@ steps:
                 while_found: check_button
                 max_iterations: 200
                 stop_on_failure: true
-                delay: {min: 0.2, max: 0.45}
+                delay: {min: 0.75, max: 1.2}
+                # The nested loops below keep their own count under the default
+                # name, so this one is spelled out to stay readable in a log.
+                counter: item
                 steps:
-                    - find_click:
-                        template: check_button
-                        timeout: 3
-
-                    # The OK button is tapped twice at the same spot: the second tap
-                    # is blind (the button may be mid-animation and stop matching).
-                    # Both taps live under this if_found so a missing dialog skips
-                    # them together -- `at: ${ok_pos}` keeps the previous iteration's
-                    # position, and clicking that would land on whatever has since
-                    # moved into it.
-                    - if_found:
+                    # A dialog that is on its way out keeps swallowing taps for
+                    # a second or so after its OK button stops matching, and the
+                    # mailbox list behind it never stops being visible: Check
+                    # sits well above the dialog and goes on matching at 0.98
+                    # throughout. Tapping it during that window sends the tap
+                    # into the dialog's overlay, not the item -- the log shows it
+                    # as an iteration that clicks Check at conf~0.98 and then
+                    # finds no ok_button at all, claiming nothing. Waiting the
+                    # old dialog out is what makes the next tap land.
+                    - wait_until_gone:
                         template: ok_button
-                        timeout: 4
-                        then:
-                        - find_click:
-                            template: ok_button
-                            timeout: 3
-                            save_as: ok_pos
+                        timeout: 3
+                      optional: true
 
-                        - wait: {min: 0.15, max: 0.25}
+                    - wait: {min: 0.4, max: 0.6}
 
-                        - click:
-                            at: ${ok_pos}
-                            space: screen
+                    # Then tap Check until the dialog it opens actually shows,
+                    # the way a person taps again when nothing happened. The
+                    # condition is tested before every pass, so a tap that lands
+                    # first time costs one extra scan and no extra tap, while a
+                    # tap the game ate is simply repeated instead of writing the
+                    # item off for this iteration. Re-tapping is safe: while a
+                    # dialog is up it is modal, which is exactly why the stray
+                    # taps were being eaten.
+                    - repeat:
+                        until_found: ok_button
+                        max_iterations: 4
+                        stop_on_failure: true
+                        delay: {min: 0.5, max: 0.8}
+                        steps:
+                            - find_click:
+                                template: check_button
+                                timeout: 2
+                      optional: true
 
+                    # Tap OK until it is gone, rather than tapping twice at the
+                    # same spot and hoping the second one was needed. An item
+                    # that claimed itself without a dialog ends this loop on its
+                    # first scan, so it costs nothing when there is no dialog.
+                    - repeat:
+                        while_found: ok_button
+                        max_iterations: 4
+                        delay: {min: 0.4, max: 0.7}
+                        steps:
+                            - find_click:
+                                template: ok_button
+                                timeout: 1
+                      optional: true

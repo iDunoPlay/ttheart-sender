@@ -74,6 +74,7 @@ steps:
             template: announcement_close_button
             timeout: 3
     optional: true
+             
 
   # Resume flow. Every override is passed explicitly: run_flow applies the
   # called flow's own `vars:` on entry, so resume.yaml's defaults would

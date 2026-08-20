@@ -375,8 +375,14 @@ def test_the_two_claim_patterns_are_the_two_branches_of_one_switch():
     claim_all = list(find_steps(switch.children["then"], "find_click"))
     assert "claim_all_button" in [s.params.get("template") for s in claim_all]
     # Single claim: one Check per item, until the mailbox stops offering them.
+    # find_steps walks outermost-first, so the pass itself is loops[0]; the
+    # loops nested in it re-tap a swallowed Check and see the dialog off, and
+    # both of those wait on the dialog rather than on Check.
     loops = list(find_steps(switch.children["else"], "repeat"))
-    assert [s.params.get("while_found") for s in loops] == ["check_button"]
+    assert loops[0].params.get("while_found") == "check_button"
+    assert [
+        s.params.get("until_found") or s.params.get("while_found") for s in loops[1:]
+    ] == ["ok_button", "ok_button"]
 
     # ...and neither pattern may leak into the other branch.
     assert not list(find_steps(switch.children["then"], "repeat"))

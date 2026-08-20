@@ -413,24 +413,40 @@ rect comes from the frame size, via the layouts measured in `LAYOUTS`.
 **The live layout (994x578) carries two rects, and FEVER decides which.**
 
 ```python
-"board":       (10, 314, 525, 456),   # tight on the pile -- the default
-"fever_board": (22, 291, 502, 451),   # FEVER's own rect -- used for its ~10s
+"board":       (22, 395, 507, 370),   # normal play -- the default
+"fever_board": (24, 324, 497, 439),   # FEVER's own rect -- used for its ~10s
 ```
 
-The tight rect plays better, and that is the measure that counts. Offline
-proxies disagree — over 151 captured in-play frames the wide rect holds a
-median radius of 22.9 against 16.2, and collapses below 12px on 13.9% of
-frames against 26.5% — because a rect that slices tsums at its edge makes them
-read *smaller* than they are (the distance transform measures the visible
-inscribed radius) and drags the radius estimate down. Those proxies say
-nothing about whether the chains found are worth dragging, which is why they
-lose the argument to a played round.
+**Both were re-measured on 2026-08-20 and are not yet A/B'd.** They replace
+`(10, 314, 525, 456)` and `(22, 291, 502, 451)`, and on the saved frames they
+read worse — same frames, only the crop changed:
 
-FEVER gets its own rect and hands it back afterwards. It was re-measured with
-`region` on 2026-08-19: it sits higher than the normal rect (the pile rides up
-under FEVER) and is inset at the sides. The 40%-vs-none FEVER radius-collapse
-figure quoted before belonged to the older, wider FEVER rect it replaces
-(`8,265,522,535`), so it no longer describes this one.
+| | old | new |
+|---|---|---|
+| normal, 13 saved boards | 60 tsums, r 21.8px, 8% off-gate | 82 tsums, r 14.8px, 17% off-gate |
+| FEVER, 24 saved frames | 44 tsums, r 17.7px, 8% off-gate | 40 tsums, r 17.8px, **38% off-gate** |
+
+("off-gate" = frames `play` discards for holding under 20 or over 110 tsums.)
+The direction is the known mechanism: a rect that slices tsums at its edge
+makes them read *smaller* than they are (the distance transform measures the
+visible inscribed radius), the radius estimate drops, and detection
+over-splits.
+
+Two reasons that is not a verdict. **This proxy has lost before** — the old
+`board` was the tighter of two candidates, scored worse on exactly these
+measures (median radius 22.9 against 16.2 over 151 in-play frames, radius
+collapse under 12px on 13.9% of frames against 26.5%) and still played better.
+How a chain plays is the measure that counts. And **the saved frames may be
+stale**: they date from the older rects, so if the emulator geometry has moved
+since, these figures describe nothing. `main.py shot` settles that — a frame
+that is no longer 994x578 does not use this layout entry at all.
+
+So A/B them before trusting them, with `--verify-clears`, on `cleared` and the
+count of drags that did not register.
+
+FEVER gets its own rect and hands it back afterwards; the pile rides up during
+it, which is why the two differ. The 40%-vs-none FEVER radius-collapse figure
+quoted in older notes belonged to `8,265,522,535`, two rects ago.
 
 An explicit `--board` is never swapped out — someone who passed a rect asked
 for that rect.

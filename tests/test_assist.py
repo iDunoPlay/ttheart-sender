@@ -25,6 +25,17 @@ from ttheart_sender.game.tsum import (
 
 BOARDS = Path(__file__).resolve().parent.parent / "scratchpad"
 
+#: The crop the numbers in this file were measured on -- the play-area rect
+#: that `LAYOUTS[(994, 578)]` carried up to 2026-08-20.
+#:
+#: Pinned deliberately rather than read back from `LAYOUTS`. The measurements
+#: below ("a single frame reports 11 false marks, three report none") describe
+#: this crop of these boards. Re-measuring the live play area is a routine
+#: thing to do; having it silently change what a measured test asserts is not
+#: -- when the rect moved, these tests started failing on a reading that had
+#: nothing to do with the code they cover.
+MEASURED_BOARD = (10, 314, 525, 456)
+
 
 def line(*coords):
     """Tsums at the given (x, y) points, all one radius apart in a row."""
@@ -90,11 +101,11 @@ def test_marks_are_read_off_a_real_board():
     """Same test, but the discs are sampled at real detected tsum positions."""
     import cv2
 
-    from ttheart_sender.game.tsum import _board_rect, detect
+    from ttheart_sender.game.tsum import detect
 
     img = cv2.imdecode(np.fromfile(str(BOARDS / "board1.png"), np.uint8),
                        cv2.IMREAD_COLOR)
-    bx, by, bw, bh = _board_rect(img.shape, None)
+    bx, by, bw, bh = MEASURED_BOARD
     crop = img[by:by + bh, bx:bx + bw]
     tsums, radius, _ = detect(crop, k=12)
     assert len(tsums) > 10, "detection is broken, not the marks reader"
@@ -165,12 +176,12 @@ def test_moving_sparkles_are_rejected_but_real_marks_survive():
     """
     import cv2
 
-    from ttheart_sender.game.tsum import _board_rect, detect
+    from ttheart_sender.game.tsum import detect
 
     rng = np.random.default_rng(7)
     img = cv2.imdecode(np.fromfile(str(BOARDS / "board1.png"), np.uint8),
                        cv2.IMREAD_COLOR)
-    bx, by, bw, bh = _board_rect(img.shape, None)
+    bx, by, bw, bh = MEASURED_BOARD
     crop = img[by:by + bh, bx:bx + bw]
     tsums, radius, _ = detect(crop, k=12)
     pressed = 0
@@ -223,11 +234,11 @@ def test_a_board_that_moved_lights_up_almost_everything():
     """
     import cv2
 
-    from ttheart_sender.game.tsum import _board_rect, detect
+    from ttheart_sender.game.tsum import detect
 
     img = cv2.imdecode(np.fromfile(str(BOARDS / "board1.png"), np.uint8),
                        cv2.IMREAD_COLOR)
-    bx, by, bw, bh = _board_rect(img.shape, None)
+    bx, by, bw, bh = MEASURED_BOARD
     crop = img[by:by + bh, bx:bx + bw]
     tsums, radius, _ = detect(crop, k=12)
 
