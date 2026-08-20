@@ -103,7 +103,6 @@ steps:
         - chance:
             percent: ${play_chance_percent}
             then:
-            - wait: {min: 5, max: 30}
             - run_flow: {flow: play, isolate: false}
             - if:
                 value: ${level_cap_found}

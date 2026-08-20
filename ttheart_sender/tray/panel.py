@@ -24,6 +24,8 @@ from ..version import __version__
 from .settings import (
     CLAIM_PATTERN_DEFAULT,
     CLAIM_PATTERNS,
+    TSUM_MODE_DEFAULT,
+    TSUM_MODES,
     MINUTE_MAX,
     MINUTE_MIN,
     PURCHASE_BOXES,
@@ -50,7 +52,14 @@ ID_UPDATE = 2012
 #: A label rather than a control, but it is rewritten on every refresh, so it
 #: needs an id to be found again.
 ID_UPDATE_STATUS = 2013
+ID_BOWL_REJECT = 2014
+ID_CURSOR_STOP = 2016
+#: The big RUNNING/PAUSED word. A label, but recoloured and rewritten on every
+#: refresh, so it needs an id.
+ID_RUN_STATE = 2015
 ID_MODE_BASE = 2100
+#: One radio per entry in :data:`TSUM_MODES`.
+ID_TSUM_MODE_BASE = 2600
 ID_PURCHASE_BASE = 2200
 #: One radio per claim pattern, in :data:`CLAIM_PATTERNS` order.
 ID_CLAIM_BASE = 2500
@@ -88,12 +97,23 @@ HEADER_HEIGHT = 26
 UPDATE_WIDTH = 86
 #: The line under it that says what the updater is doing.
 STATUS_HEIGHT = 18
+#: The RUNNING / PAUSED word above the Run button. Tall enough that the state
+#: is readable from across the desk, which is the point of it.
+STATE_HEIGHT = 30
+STATE_FONT = 20
+#: Colours for that word. Green while a run is going, red while it is not,
+#: amber while it is unwinding -- a state that is neither and lasts long
+#: enough to be worth naming.
+COLOUR_RUNNING = 0x0000A000   # COLORREF is 0x00BBGGRR, not RGB
+COLOUR_PAUSED = 0x000000C0
+COLOUR_STOPPING = 0x000080C0
 
 BS_AUTOCHECKBOX = 0x00000003
 BS_AUTORADIOBUTTON = 0x00000009
 BS_PUSHBUTTON = 0x00000000
 SS_ETCHEDHORZ = 0x00000010
 SS_CENTERIMAGE = 0x00000200  # vertically centres a single line of text
+SS_CENTER = 0x00000001       # ...and this centres it horizontally
 BM_GETCHECK = 0x00F0
 BM_SETCHECK = 0x00F1
 SW_HIDE = 0
@@ -164,6 +184,7 @@ class ControlPanel:
         on_toggle: Callable[[str, bool], None],
         on_return_minute: Callable[[int, int], None],
         on_claim: Callable[[str], None],
+        on_tsum_mode: Callable[[str], None],
         on_purchase: Callable[[str, bool], None],
         on_run: Callable[[], None],
         on_buy: Callable[[], None],
@@ -180,6 +201,7 @@ class ControlPanel:
         self._on_toggle = on_toggle
         self._on_return_minute = on_return_minute
         self._on_claim = on_claim
+        self._on_tsum_mode = on_tsum_mode
         self._on_purchase = on_purchase
         self._on_run = on_run
         self._on_buy = on_buy
@@ -196,6 +218,10 @@ class ControlPanel:
         #: True while :meth:`refresh` is writing into a spinner. Its EN_CHANGE
         #: would otherwise be read back as if the user had typed it.
         self._writing_number = False
+        #: Colour of the RUNNING/PAUSED word. Set by :meth:`refresh` and read
+        #: back in WM_CTLCOLORSTATIC, which is the only place Win32 lets a
+        #: static label's text colour be chosen.
+        self._state_colour = COLOUR_PAUSED
 
     # -- lifecycle -------------------------------------------------------
     def _px(self, value: int) -> int:
@@ -282,7 +308,8 @@ class ControlPanel:
 
         dpi = _dpi_for_window(self._hwnd)
         self._scale = dpi / 96.0
-        self._fonts = [_scaled_font(self._px(12)), _scaled_font(self._px(12), bold=True)]
+        self._fonts = [_scaled_font(self._px(12)), _scaled_font(self._px(12), bold=True),
+                       _scaled_font(self._px(STATE_FONT), bold=True)]
         # Creating a number box and giving its spinner a range both fire
         # EN_CHANGE. Read back as user input they would report the layout's
         # placeholder as a choice and overwrite the saved value with it.
@@ -334,6 +361,11 @@ class ControlPanel:
         y = self._add_line(y)
         y += SECTION_GAP
 
+        y = self._add_play_settings(y)
+        y += SECTION_GAP
+        y = self._add_line(y)
+        y += SECTION_GAP
+
         # One row, its own section: this writes files to disk, which is worth
         # separating from the toggles that only change how a round is played.
         y = self._add_check(ID_COLLECT_DATA, "Data collection", y, bold=True)
@@ -341,6 +373,22 @@ class ControlPanel:
         y += SECTION_GAP
         y = self._add_line(y)
         y += SECTION_GAP
+
+        # Sits with the Run button rather than with the play options: it is
+        # about the run, and it is the stop the user actually reaches for.
+        y = self._add_check(ID_CURSOR_STOP, "Stop when the mouse leaves", y)
+        y += GAP
+
+        # The state word sits above the button rather than on it: the button
+        # is disabled while a run is going, and a disabled control greys its
+        # own text, which is exactly the moment the state most needs to be
+        # readable.
+        state = self._add_static("PAUSED", y, ident=ID_RUN_STATE,
+                                 height=STATE_HEIGHT, centred=True,
+                                 align_centre=True)
+        win32gui.SendMessage(self._controls[ID_RUN_STATE], win32con.WM_SETFONT,
+                             self._fonts[2], 1)
+        y = state + GAP
 
         self._add_control(
             ID_RUN, "BUTTON", "Run", BS_PUSHBUTTON,
@@ -402,6 +450,42 @@ class ControlPanel:
                 y,
             )
         return y
+
+    def _add_play_settings(self, y: int) -> int:
+        """"Play Settings": how a played round reads the board.
+
+        Both rows only matter while Auto Play is on -- they are options of the
+        round, not of the cycle around it -- but they are not greyed out with
+        it. Unlike the Return Heart marks, whose values are meaningless when
+        the switch above them is off, these are the settings the next round
+        will use whenever a round next happens.
+        """
+        y = self._add_static("Play Settings", y, bold=True)
+        left = MARGIN + INDENT
+
+        y = self._add_static("Tsum Mode", y, x=left,
+                             width=PANEL_WIDTH - MARGIN - left)
+        # WS_GROUP on the first, for the same reason the Mode and Claim radios
+        # carry it: an auto-radio clears its siblings up to the next WS_GROUP,
+        # so without it picking a reading would put out the selected mode.
+        width = (PANEL_WIDTH - MARGIN - left) // len(TSUM_MODES)
+        for index, (_key, label) in enumerate(TSUM_MODES):
+            extra = win32con.WS_GROUP if index == 0 else 0
+            self._add_control(
+                ID_TSUM_MODE_BASE + index, "BUTTON", label,
+                BS_AUTORADIOBUTTON | extra,
+                left + index * width, y, width, ROW,
+            )
+        y += ROW
+
+        # WS_GROUP again on the tick box after them, or clicking it would be
+        # taken as part of the radio group above and clear the chosen reading.
+        hwnd = self._add_control(
+            ID_BOWL_REJECT, "BUTTON", "Ignore empty spots", BS_AUTOCHECKBOX | win32con.WS_GROUP,
+            left, y, PANEL_WIDTH - MARGIN - left, ROW,
+        )
+        del hwnd
+        return y + ROW
 
     def _add_claim_pattern(self, y: int) -> int:
         """The "Claim pattern" heading and the two ways to empty a mailbox."""
@@ -482,7 +566,7 @@ class ControlPanel:
     def _add_static(self, text: str, y: int, *, bold: bool = False,
                     x: Optional[int] = None, width: Optional[int] = None,
                     height: Optional[int] = None, centred: bool = False,
-                    ident: int = 0) -> int:
+                    align_centre: bool = False, ident: int = 0) -> int:
         """A text label. Pass ``ident`` for one whose text is rewritten later."""
         x = MARGIN if x is None else x
         width = (PANEL_WIDTH - 2 * MARGIN) if width is None else width
@@ -492,6 +576,8 @@ class ControlPanel:
             # Labels sharing a line with a taller control have to be centred on
             # it, or they sit against the top of their own box.
             style |= SS_CENTERIMAGE
+        if align_centre:
+            style |= SS_CENTER
         hwnd = win32gui.CreateWindowEx(
             0, "STATIC", text, style,
             self._px(x), self._px(y), self._px(width), self._px(height),
@@ -597,7 +683,12 @@ class ControlPanel:
         pattern = state.get("claim_pattern", CLAIM_PATTERN_DEFAULT)
         for index, (key, _label, _flag) in enumerate(CLAIM_PATTERNS):
             self._set_check(ID_CLAIM_BASE + index, key == pattern)
+        mode = state.get("tsum_mode", TSUM_MODE_DEFAULT)
+        for index, (key, _label) in enumerate(TSUM_MODES):
+            self._set_check(ID_TSUM_MODE_BASE + index, key == mode)
+        self._set_check(ID_BOWL_REJECT, bool(state.get("bowl_reject", True)))
         self._set_check(ID_COLLECT_DATA, state.get("collect_data", False))
+        self._set_check(ID_CURSOR_STOP, bool(state.get("stop_on_cursor_exit", True)))
         purchase = state.get("purchase", {})
         for index, (key, _label, default) in enumerate(PURCHASE_BOXES):
             self._set_check(ID_PURCHASE_BASE + index, purchase.get(key, default))
@@ -605,10 +696,31 @@ class ControlPanel:
         running = bool(state.get("running"))
         stopping = bool(state.get("stopping"))
         status = state.get("status", "")
-        self._set_text(ID_RUN, ("Stop" if running else "Run") + (f"  -  {status}" if status else ""))
-        # Stopping already asked the run to unwind; a second click would do
-        # nothing, and Run must not restart it before the worker has finished.
-        self._enable(ID_RUN, not stopping)
+
+        # The word, not the button, is what says which state the bot is in --
+        # big enough to read at a glance and coloured for it.
+        if stopping:
+            self._state_colour = COLOUR_STOPPING
+            word = "STOPPING"
+        elif running:
+            self._state_colour = COLOUR_RUNNING
+            word = "RUNNING"
+        else:
+            self._state_colour = COLOUR_PAUSED
+            word = "PAUSED"
+        self._set_text(ID_RUN_STATE, word + (f"  -  {status}" if status else ""))
+        # Repaint it: the colour is decided in WM_CTLCOLORSTATIC, which only
+        # runs when the label is asked to draw.
+        hwnd = self._controls.get(ID_RUN_STATE)
+        if hwnd:
+            win32gui.InvalidateRect(hwnd, None, True)
+
+        self._set_text(ID_RUN, "Run")
+        # Only clickable when there is nothing to clash with: a second Run
+        # during a run would do nothing, and neither would one while the last
+        # one is still unwinding. Use the stop key (F12 by default) to end a
+        # run -- the panel deliberately has no button for it.
+        self._enable(ID_RUN, not (running or stopping))
         self._enable(ID_BUY, not (running or stopping))
 
         self._set_check(ID_AUTO_UPDATE, bool(state.get("auto_update", False)))
@@ -694,6 +806,8 @@ class ControlPanel:
             # Static/checkbox text paints on white otherwise, which looks like
             # a rendering bug against the dialog-grey background.
             ctypes.windll.gdi32.SetBkMode(wparam, 1)  # TRANSPARENT
+            if lparam and lparam == self._controls.get(ID_RUN_STATE):
+                ctypes.windll.gdi32.SetTextColor(wparam, self._state_colour)
             return self._background
         if msg == win32con.WM_CLOSE:
             # The tray icon is the app's life-cycle owner: closing the panel
@@ -732,6 +846,12 @@ class ControlPanel:
                 self._on_exit()
             elif ID_MODE_BASE <= ident < ID_MODE_BASE + len(self._modes):
                 self._on_mode(self._modes[ident - ID_MODE_BASE].key)
+            elif ident == ID_CURSOR_STOP:
+                self._on_toggle("stop_on_cursor_exit", self._get_check(ident))
+            elif ident == ID_BOWL_REJECT:
+                self._on_toggle("bowl_reject", self._get_check(ident))
+            elif ID_TSUM_MODE_BASE <= ident < ID_TSUM_MODE_BASE + len(TSUM_MODES):
+                self._on_tsum_mode(TSUM_MODES[ident - ID_TSUM_MODE_BASE][0])
             elif ID_CLAIM_BASE <= ident < ID_CLAIM_BASE + len(CLAIM_PATTERNS):
                 self._on_claim(CLAIM_PATTERNS[ident - ID_CLAIM_BASE][0])
             elif ID_PURCHASE_BASE <= ident < ID_PURCHASE_BASE + len(PURCHASE_BOXES):

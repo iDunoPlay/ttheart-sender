@@ -10,6 +10,65 @@ description: Start a round from the main screen, play the board, clear the resul
 vars:
   level_cap_found: false
 
+  # -- Play Settings -----------------------------------------------------
+  # Both are forwarded into the `play_tsum` step's `options:` below, and both
+  # are overridden by the tray panel's "Play Settings" section when the bot is
+  # started from there. Editing them here is what a console run uses, and what
+  # the tray falls back to.
+
+  # IGNORING TSUMS THAT ARE NOT THERE. The bot finds tsums by colour,
+  # and it sometimes "sees" one in a gap where there is only the blue
+  # bowl showing between real tsums. Those fakes are the main thing that
+  # wastes a drag: the cursor walks to an empty spot, the game adds
+  # nothing to the stroke, and a 5-chain clears as a 2 -- or as nothing.
+  #
+  # This throws away any find whose colour is too close to the bowl's
+  # own colour. The number is how close is "too close": bigger is more
+  # suspicious, 0 turns it off entirely.
+  #
+  # Measured over the labelled boards:
+  #      0  -- 31% of finds are fakes. Half of all chains have fewer
+  #            than 3 real tsums in them, so half the drags clear
+  #            nothing. 118 real tsums cleared.
+  #     60  -- 23% fakes, and almost none of the losses are real tsums.
+  #            62% of chains still work. 134 real tsums cleared. BEST.
+  #    120  -- only 11% fakes and the chains are very clean, but it now
+  #            throws away real tsums too: it finds 172 fewer of them,
+  #            so there is much less to play. 109 real tsums cleared.
+  #
+  # It applies to both readings below -- it runs before either of them.
+  bowl_reject: 60
+
+  # HOW IT DECIDES TWO TSUMS ARE THE SAME CHARACTER. The game only
+  # clears a chain if every tsum in it is the same character, so this is
+  # the judgement the whole round rests on.
+  #
+  #   normal -- group tsums by whatever shades the board happens to
+  #             split into. It does not know how many characters there
+  #             are, so one character can end up split in two, and two
+  #             lookalikes can end up treated as one.
+  #
+  #   color  -- use the fact that a board always deals exactly 5
+  #             characters (4 once an item removes one) and sort every
+  #             tsum into one of those 5.
+  #
+  # Measured against boards where a human marked which tsums are the
+  # same character: `normal` proposes chains that are really one
+  # character 61% of the time, `color` 95%, and `color` finds more
+  # chains as well.
+  #
+  # The catch is that `color` has to put every find somewhere, including
+  # the fakes, so more of them end up inside chains -- that is what
+  # `bowl_reject` above is there to clean up. Neither setting has been
+  # A/B'd on a live round yet. Swap this one word to switch arms.
+  #
+  # Do NOT also add a `kinds:` line here. `kinds` overrides this one
+  # instead of agreeing with it, so `tsum_mode: normal` with a leftover
+  # `kinds: 5` quietly keeps the colour reading switched on. `kinds` is
+  # only for the case this line cannot say: `kinds: 4`, for a board an
+  # item has taken a character off.
+  tsum_mode: color
+
 steps:
   # Clear anything left over from a previous round (the score tally, the High
   # Score popup, a login bonus) before looking for Play. Without this the flow
@@ -87,58 +146,12 @@ steps:
         # being in the way. 1.25 stopped those crossings.
         block: 1.25
 
-        # IGNORING TSUMS THAT ARE NOT THERE. The bot finds tsums by colour,
-        # and it sometimes "sees" one in a gap where there is only the blue
-        # bowl showing between real tsums. Those fakes are the main thing that
-        # wastes a drag: the cursor walks to an empty spot, the game adds
-        # nothing to the stroke, and a 5-chain clears as a 2 -- or as nothing.
-        #
-        # This throws away any find whose colour is too close to the bowl's
-        # own colour. The number is how close is "too close": bigger is more
-        # suspicious, 0 turns it off entirely.
-        #
-        # Measured over the labelled boards:
-        #      0  -- 31% of finds are fakes. Half of all chains have fewer
-        #            than 3 real tsums in them, so half the drags clear
-        #            nothing. 118 real tsums cleared.
-        #     60  -- 23% fakes, and almost none of the losses are real tsums.
-        #            62% of chains still work. 134 real tsums cleared. BEST.
-        #    120  -- only 11% fakes and the chains are very clean, but it now
-        #            throws away real tsums too: it finds 172 fewer of them,
-        #            so there is much less to play. 109 real tsums cleared.
-        #
-        # It applies to both readings below -- it runs before either of them.
-        bowl_reject: 60
-
-        # HOW IT DECIDES TWO TSUMS ARE THE SAME CHARACTER. The game only
-        # clears a chain if every tsum in it is the same character, so this is
-        # the judgement the whole round rests on.
-        #
-        #   normal -- group tsums by whatever shades the board happens to
-        #             split into. It does not know how many characters there
-        #             are, so one character can end up split in two, and two
-        #             lookalikes can end up treated as one.
-        #
-        #   color  -- use the fact that a board always deals exactly 5
-        #             characters (4 once an item removes one) and sort every
-        #             tsum into one of those 5.
-        #
-        # Measured against boards where a human marked which tsums are the
-        # same character: `normal` proposes chains that are really one
-        # character 61% of the time, `color` 95%, and `color` finds more
-        # chains as well.
-        #
-        # The catch is that `color` has to put every find somewhere, including
-        # the fakes, so more of them end up inside chains -- that is what
-        # `bowl_reject` above is there to clean up. Neither setting has been
-        # A/B'd on a live round yet. Swap this one word to switch arms.
-        #
-        # Do NOT also add a `kinds:` line here. `kinds` overrides this one
-        # instead of agreeing with it, so `tsum_mode: normal` with a leftover
-        # `kinds: 5` quietly keeps the colour reading switched on. `kinds` is
-        # only for the case this line cannot say: `kinds: 4`, for a board an
-        # item has taken a character off.
-        tsum_mode: color
+        # Both of these are declared in `vars:` at the top of this file, so
+        # the tray's Play Settings can override them per run. The explanation
+        # of what they do -- and the numbers behind them -- lives up there,
+        # beside the values you would actually edit.
+        bowl_reject: "${bowl_reject}"
+        tsum_mode: "${tsum_mode}"
 
   - find_click:
       template: cancel_button

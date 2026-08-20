@@ -49,11 +49,17 @@ class Application:
             scales=config.matching.scales,
         )
         self.stop = StopKeyWatcher(config.runner.stop_key)
-        if config.runner.stop_on_cursor_exit:
-            self.stop.add_guard(
-                "cursor",
-                CursorGuard(self._emulator_rect, margin=config.runner.cursor_exit_margin),
-            )
+        # Registered whatever the setting says, and asked each time it polls:
+        # the tray can flip `stop_on_cursor_exit` mid-run, and a guard added
+        # conditionally here would have frozen that answer at startup.
+        self.stop.add_guard(
+            "cursor",
+            CursorGuard(
+                self._emulator_rect,
+                margin=config.runner.cursor_exit_margin,
+                enabled=lambda: self.config.runner.stop_on_cursor_exit,
+            ),
+        )
 
         if dry_run:
             self.mouse: Any = NullMouse()

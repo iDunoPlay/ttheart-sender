@@ -56,11 +56,17 @@ class CursorGuard:
         margin: int = 0,
         position: Callable[[], Optional[Point]] = cursor_position,
         rect_ttl: float = 0.25,
+        enabled: Optional[Callable[[], bool]] = None,
     ) -> None:
         self.rect_provider = rect_provider
         self.margin = max(0, int(margin))
         self.position = position
         self.rect_ttl = rect_ttl
+        #: Asked on every poll rather than read once, so the panel can turn
+        #: the guard off part way through a run. Registering the guard
+        #: conditionally instead would freeze the answer at startup, and this
+        #: is the one stop the user reaches for by accident.
+        self.enabled = enabled or (lambda: True)
         self._armed = False
         self._rect: Optional[Rect] = None
         self._rect_read_at = 0.0
@@ -91,6 +97,12 @@ class CursorGuard:
 
     def __call__(self) -> Optional[str]:
         """Return a stop reason, or None to let the run continue."""
+        if not self.enabled():
+            # Disarm as well as stand down: coming back on should re-arm on
+            # the next cursor sighting inside the window rather than trip
+            # immediately on a pointer that wandered off while it was off.
+            self._armed = False
+            return None
         rect = self.zone()
         if rect is None:
             return None

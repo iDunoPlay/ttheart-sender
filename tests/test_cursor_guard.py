@@ -99,3 +99,56 @@ def test_reset_disarms_the_guard_for_the_next_run():
     # Disarmed: the cursor is still outside, but the next run gets to start.
     assert not guard.armed
     watcher.check()
+
+
+# -- the panel's switch ---------------------------------------------------
+def test_the_guard_stands_down_while_it_is_switched_off():
+    """The panel flips this mid-run, so it is asked on every poll.
+
+    Registering the guard conditionally at startup -- what the code used to do
+    -- froze the answer for the life of the Application, which is no use to a
+    tick box.
+    """
+    on = {"value": True}
+    guard = CursorGuard(lambda: Rect(0, 0, 100, 100),
+                        position=lambda: Point(50, 50),
+                        enabled=lambda: on["value"])
+
+    assert guard() is None            # inside: arms it
+    assert guard.armed
+
+    guard.position = lambda: Point(500, 500)
+    assert guard() is not None, "outside and armed should stop the run"
+
+    on["value"] = False
+    assert guard() is None, "switched off, it must not stop anything"
+
+
+def test_switching_it_off_disarms_so_it_does_not_trip_on_the_way_back():
+    """Otherwise re-ticking the box stops the run instantly.
+
+    The pointer is wherever the user left it while the guard was off -- most
+    likely outside -- and an armed guard would trip on the next poll before
+    the cursor ever came home.
+    """
+    on = {"value": True}
+    at = {"point": Point(50, 50)}
+    guard = CursorGuard(lambda: Rect(0, 0, 100, 100),
+                        position=lambda: at["point"],
+                        enabled=lambda: on["value"])
+    guard()
+    assert guard.armed
+
+    on["value"] = False
+    at["point"] = Point(900, 900)
+    assert guard() is None
+    assert not guard.armed, "should have disarmed while off"
+
+    on["value"] = True
+    assert guard() is None, "still outside, but no longer armed -- must not trip"
+
+    at["point"] = Point(50, 50)
+    guard()
+    assert guard.armed, "coming home re-arms it"
+    at["point"] = Point(900, 900)
+    assert guard() is not None

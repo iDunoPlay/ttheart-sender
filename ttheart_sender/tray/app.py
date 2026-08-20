@@ -75,6 +75,8 @@ class TrayApp:
             return_heart=self._settings.return_heart,
             return_heart_minutes=self._settings.return_heart_minutes,
             claim_pattern=self._settings.claim_pattern,
+            tsum_mode=self._settings.tsum_mode,
+            bowl_reject=self._settings.bowl_reject,
             on_change=self._on_change,
             on_notify=self._on_notify,
         )
@@ -98,6 +100,7 @@ class TrayApp:
             on_toggle=self._set_toggle,
             on_return_minute=self._set_return_minute,
             on_claim=self._set_claim_pattern,
+            on_tsum_mode=self._set_tsum_mode,
             on_purchase=self._set_purchase,
             on_run=self._service.toggle,
             on_buy=self._buy_tsum,
@@ -156,6 +159,17 @@ class TrayApp:
         else:
             self._settings.collect_data = bool(self._app.config.dataset.enabled)
 
+        # `runner.stop_on_cursor_exit` is the same arrangement: config.yaml
+        # names it and so does the panel. Same rule -- the file seeds a fresh
+        # install, the saved box wins ever after. Without this an install that
+        # unticked it would have it back at the next launch, which is exactly
+        # the annoyance the box exists to end.
+        if has_saved_settings:
+            self._app.config.runner.stop_on_cursor_exit = self._settings.stop_on_cursor_exit
+        else:
+            self._settings.stop_on_cursor_exit = bool(
+                self._app.config.runner.stop_on_cursor_exit)
+
     def _panel_state(self) -> Dict[str, Any]:
         state = self._service.state
         return {
@@ -166,6 +180,9 @@ class TrayApp:
             "return_heart": self._service.return_heart,
             "return_heart_minutes": self._service.return_heart_minutes,
             "claim_pattern": self._service.claim_pattern,
+            "stop_on_cursor_exit": self._app.config.runner.stop_on_cursor_exit,
+            "tsum_mode": self._service.tsum_mode,
+            "bowl_reject": self._service.bowl_reject,
             "purchase": dict(self._settings.purchase),
             "auto_update": self._settings.auto_update,
             "update_status": self._updater.status_text(),
@@ -195,6 +212,18 @@ class TrayApp:
         elif name == "auto_update":
             self._updater.set_auto(value)
             self._settings.auto_update = self._updater.auto
+        elif name == "stop_on_cursor_exit":
+            # Straight onto the live config, like `collect_data`: the guard
+            # asks it on every poll, so this takes effect immediately --
+            # including part way through a run, which is the point of having
+            # it on the panel at all.
+            self._settings.stop_on_cursor_exit = bool(value)
+            self._app.config.runner.stop_on_cursor_exit = self._settings.stop_on_cursor_exit
+            log.info("Stop on cursor exit %s",
+                     "on" if self._settings.stop_on_cursor_exit else "off")
+        elif name == "bowl_reject":
+            self._service.set_bowl_reject(value)
+            self._settings.bowl_reject = self._service.bowl_reject
         elif name == "always_on_top":
             self._settings.always_on_top = bool(value)
         elif name == "collect_data":
@@ -226,6 +255,13 @@ class TrayApp:
         if not self._service.set_return_heart_minutes(minutes):
             return
         self._settings.return_heart_minutes = self._service.return_heart_minutes
+        self._save()
+
+    def _set_tsum_mode(self, key: str) -> None:
+        """Panel radio -> the reading the next played round uses."""
+        if not self._service.set_tsum_mode(key):
+            return
+        self._settings.tsum_mode = self._service.tsum_mode
         self._save()
 
     def _set_claim_pattern(self, key: str) -> None:
