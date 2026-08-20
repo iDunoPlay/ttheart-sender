@@ -6,8 +6,10 @@ stub that records what the service asked it to do.
 
 from __future__ import annotations
 
+import json
 import threading
 from typing import Optional
+from unittest import mock
 
 import pytest
 
@@ -19,10 +21,29 @@ from ttheart_sender.exceptions import WindowNotFoundError
 from ttheart_sender.tray.modes import MODES, get_mode
 from ttheart_sender.tray.service import (
     PLAY_CHANCE_OFF,
+    PLAY_CHANCE_ON,
     PLAY_CHANCE_VAR,
+    RETURN_HEART_MINUTES_VAR,
+    RETURN_HEART_VAR,
     AutomationService,
     RunState,
 )
+from ttheart_sender.tray.settings import (
+    RETURN_HEART_MINUTES_DEFAULT,
+    clamp_minute,
+    clamp_minutes,
+)
+
+DEFAULT_MARKS = list(RETURN_HEART_MINUTES_DEFAULT)
+
+
+def overrides(chance=PLAY_CHANCE_OFF, timed=False, marks=None):
+    """What a run started from the panel should be handed."""
+    return {
+        PLAY_CHANCE_VAR: chance,
+        RETURN_HEART_VAR: timed,
+        RETURN_HEART_MINUTES_VAR: DEFAULT_MARKS if marks is None else list(marks),
+    }
 
 
 class FakeApp:
@@ -110,10 +131,11 @@ def test_play_is_off_by_default_and_zeroes_the_chance_variable():
     assert service.play is False
     service.start()
     wait_for(lambda: service.state is RunState.IDLE)
-    assert app.variables == [{PLAY_CHANCE_VAR: PLAY_CHANCE_OFF}]
+    assert app.variables == [overrides(PLAY_CHANCE_OFF)]
 
 
-def test_play_on_leaves_the_flow_alone():
+def test_play_on_is_all_or_nothing():
+    """The panel offers a tick box, so the flow only ever sees 100 or 0."""
     app = FakeApp()
     changes = []
     service = AutomationService(app, on_change=lambda: changes.append(1))
@@ -125,7 +147,7 @@ def test_play_on_leaves_the_flow_alone():
 
     service.start()
     wait_for(lambda: service.state is RunState.IDLE)
-    assert app.variables == [None], "the flow's own play_chance_percent must win"
+    assert app.variables == [overrides(PLAY_CHANCE_ON)]
 
 
 def test_toggling_play_mid_run_does_not_change_the_live_run():
@@ -139,14 +161,87 @@ def test_toggling_play_mid_run_does_not_change_the_live_run():
 
     app.release.set()
     wait_for(lambda: service.state is RunState.IDLE)
-    assert app.variables == [{PLAY_CHANCE_VAR: PLAY_CHANCE_OFF}], (
+    assert app.variables == [overrides(PLAY_CHANCE_OFF)], (
         "the run keeps the variables it started with"
     )
 
     # ...but the next one picks the new setting up.
     service.start()
     wait_for(lambda: service.state is RunState.IDLE)
-    assert app.variables[-1] is None
+    assert app.variables[-1] == overrides(PLAY_CHANCE_ON)
+
+
+# --------------------------------------------------------------------------
+# Return Heart
+# --------------------------------------------------------------------------
+def test_return_heart_is_off_by_default_so_every_cycle_sends():
+    app = FakeApp()
+    service = AutomationService(app)
+
+    assert service.return_heart is False
+    assert service.return_heart_minutes == DEFAULT_MARKS
+
+    service.start()
+    wait_for(lambda: service.state is RunState.IDLE)
+    assert app.variables == [overrides(timed=False)]
+
+
+def test_the_marks_reach_the_flow_and_are_clamped():
+    app = FakeApp()
+    changes = []
+    service = AutomationService(app, on_change=lambda: changes.append(1))
+
+    assert service.set_return_heart(True) is True
+    assert service.set_return_heart(True) is False, "re-ticking should be a no-op"
+    assert service.set_return_heart_minutes([5, 35]) is True
+    assert service.set_return_heart_minutes([5, 35]) is False, "re-setting is a no-op"
+
+    service.start()
+    wait_for(lambda: service.state is RunState.IDLE)
+    assert app.variables == [overrides(timed=True, marks=[5, 35])]
+
+    # A minute of the hour is what it is; the spinner cannot ask for more.
+    service.set_return_heart_minutes([99, -4])
+    assert service.return_heart_minutes == [59, 0]
+
+
+def test_the_marks_survive_return_heart_being_unticked():
+    """Untick, retick: the schedule is still the one that was typed."""
+    service = AutomationService(FakeApp(), return_heart=True)
+    service.set_return_heart_minutes([5, 35])
+    service.set_return_heart(False)
+
+    assert service.return_heart_minutes == [5, 35]
+    service.set_return_heart(True)
+    assert service.return_heart_minutes == [5, 35]
+
+
+def test_the_marks_a_caller_hands_over_cannot_be_mutated_from_outside():
+    """The service owns its schedule -- a stray edit must not reach the flow."""
+    marks = [5, 35]
+    service = AutomationService(FakeApp(), return_heart_minutes=marks)
+
+    marks[0] = 42
+    assert service.return_heart_minutes == [5, 35]
+
+    service.return_heart_minutes.append(99)
+    assert service.return_heart_minutes == [5, 35]
+
+
+def test_unusable_marks_fall_back_instead_of_raising():
+    """The edit box and a hand-edited settings file both feed this."""
+    assert clamp_minute("12") == 12
+    assert clamp_minute("", 15) == 15
+    assert clamp_minute(None, 50) == 50
+    assert clamp_minute("nonsense", 15) == 15
+    assert clamp_minute(7.6) == 8
+    assert clamp_minute(99) == 59
+
+    # A stored list of the wrong length or shape still yields two usable marks.
+    assert clamp_minutes([5]) == [5, RETURN_HEART_MINUTES_DEFAULT[1]]
+    assert clamp_minutes([1, 2, 3]) == [1, 2]
+    assert clamp_minutes("nonsense") == DEFAULT_MARKS
+    assert clamp_minutes(None) == DEFAULT_MARKS
 
 
 def find_steps(steps, action):
@@ -167,18 +262,71 @@ def test_the_chance_step_reads_the_variable_the_tray_overrides():
     assert all(step.params["percent"] == f"${{{PLAY_CHANCE_VAR}}}" for step in rolls)
 
 
-def test_launch_forwards_the_override_to_resume():
-    """run_flow re-applies the called flow's vars, so it has to be passed on."""
+def test_a_played_round_replaces_the_idle_wait():
+    """A cycle either plays or waits -- never both, and never neither."""
+    flow = load_flow_by_name(Config().flows_dir, "resume")
+    rolls = [step for step in find_steps(flow.steps, "chance")]
+
+    for roll in rolls:
+        played = list(find_steps(roll.children.get("then", []), "run_flow"))
+        # Only the first call is pinned: the branch may go on to act on what
+        # the round reported (unlocking the level cap, say), and those are
+        # consequences of having played, not a second thing the cycle chose
+        # to do instead of waiting.
+        assert [s.params.get("flow") for s in played][:1] == ["play"]
+        # Without the else branch an unticked Auto Play would spin the cycle
+        # with no pause at all.
+        assert list(find_steps(roll.children.get("else", []), "wait")), (
+            "the wait has to survive as the branch taken when the roll misses"
+        )
+
+
+def test_launch_forwards_every_override_to_resume():
+    """run_flow re-applies the called flow's vars, so they have to be passed on."""
     flow = load_flow_by_name(Config().flows_dir, "launch")
     calls = [s for s in find_steps(flow.steps, "run_flow") if s.params.get("flow") == "resume"]
 
     assert calls, "launch.yaml no longer hands off to resume"
-    assert PLAY_CHANCE_VAR in flow.vars, "launch.yaml needs its own standalone default"
-    for call in calls:
-        forwarded = call.params.get("vars", {})
-        assert forwarded.get(PLAY_CHANCE_VAR) == f"${{{PLAY_CHANCE_VAR}}}", (
-            "without this, resume.yaml's own default overwrites the tray's choice"
-        )
+    for name in (PLAY_CHANCE_VAR, RETURN_HEART_VAR, RETURN_HEART_MINUTES_VAR):
+        assert name in flow.vars, "launch.yaml needs its own standalone default"
+        for call in calls:
+            forwarded = call.params.get("vars", {})
+            assert forwarded.get(name) == f"${{{name}}}", (
+                "without this, resume.yaml's own default overwrites the tray's choice"
+            )
+
+
+def test_resume_sends_hearts_on_the_clock_only_when_asked_to():
+    """Both halves of the gate: the schedule, and the flag it raises."""
+    flow = load_flow_by_name(Config().flows_dir, "resume")
+
+    for name in (RETURN_HEART_VAR, RETURN_HEART_MINUTES_VAR):
+        assert name in flow.vars, "resume.yaml must ship a standalone default"
+
+    gates = list(find_steps(flow.steps, "time_gate"))
+    assert len(gates) == 1, "one schedule, so one gate"
+    gate = gates[0]
+    assert gate.params["minutes"] == f"${{{RETURN_HEART_MINUTES_VAR}}}"
+    flag = gate.params["save_as"]
+
+    # The gate has to be the timed branch of a switch, or an unticked
+    # Return Heart would stop hearts going out altogether.
+    switch = next(
+        step for step in find_steps(flow.steps, "if")
+        if step.params.get("value") == f"${{{RETURN_HEART_VAR}}}"
+    )
+    assert gate in switch.children["then"]
+    assert [s.params for s in find_steps(switch.children["else"], "set")] == [{flag: True}]
+
+    # ...and the flag has to be what actually decides whether hearts go out,
+    # then be put back down so the next mark is the next send.
+    branch = next(
+        step for step in find_steps(flow.steps, "if")
+        if step.params.get("value") == f"${{{flag}}}"
+    )
+    sends = list(find_steps(branch.children["then"], "run_flow"))
+    assert [s.params.get("flow") for s in sends] == ["send_heart"]
+    assert {flag: False} in [s.params for s in find_steps(branch.children["then"], "set")]
 
 
 # --------------------------------------------------------------------------
@@ -298,26 +446,33 @@ def test_panel_offers_every_mode_including_the_beta_label(tray):
     assert [mode.label for mode in MODES] == ["Resume", "Launch", "Play (beta)"]
 
 
-def test_panel_shows_the_version(tray):
+def test_panel_title_carries_the_version(tray):
     """A screenshot of the panel should be enough to identify the build."""
     from ttheart_sender import __version__
 
-    assert tray._panel._version_text == f"ttheart-sender v{__version__}"
+    assert tray._panel._title == f"ttheart-sender v{__version__}"
 
 
-def test_right_click_menu_is_gone(tray):
-    """Left-click opens the panel; the context menu was retired with it."""
-    assert tray._icon._menu_factory is None
+def test_right_click_offers_a_way_out(tray):
+    """Left-click opens the panel; right-click is the escape hatch."""
     assert tray._icon._on_left_click is not None
     assert tray._icon._on_double_click is None
+    assert labels(tray._menu()) == ["Exit"]
 
 
 def test_panel_toggles_reach_the_service_and_the_saved_file(tray):
     assert tray._panel_state()["auto_play"] is False
+    assert tray._panel_state()["return_heart"] is False
+    assert tray._panel_state()["return_heart_minutes"] == DEFAULT_MARKS
 
     tray._set_toggle("auto_play", True)
     assert tray._service.play is True
     assert tray._panel_state()["auto_play"] is True
+
+    tray._set_toggle("return_heart", True)
+    # One box at a time, which is all the panel ever reports.
+    tray._set_return_minute(1, 35)
+    assert tray._panel_state()["return_heart_minutes"] == [DEFAULT_MARKS[0], 35]
 
     tray._set_toggle("always_on_top", False)
     tray._set_mode("play")
@@ -328,8 +483,16 @@ def test_panel_toggles_reach_the_service_and_the_saved_file(tray):
 
     reloaded = PanelSettings.load(tray._settings_path)
     assert reloaded.auto_play is True
+    assert reloaded.return_heart is True
+    assert reloaded.return_heart_minutes == [DEFAULT_MARKS[0], 35]
     assert reloaded.always_on_top is False
     assert reloaded.mode == "play"
+
+
+def test_an_unknown_mark_is_ignored_rather_than_stored(tray):
+    """The panel has a fixed number of boxes; a stray index must not add one."""
+    tray._set_return_minute(7, 42)
+    assert tray._panel_state()["return_heart_minutes"] == DEFAULT_MARKS
 
 
 def test_purchase_ticks_are_saved_and_passed_to_the_flow(tray):
@@ -453,3 +616,65 @@ def test_tooltip_is_clipped_to_what_the_shell_accepts():
 
     assert _clip("  spaced   out  ", 99) == "spaced out"
     assert len(_clip("x" * 500, _TOOLTIP_LIMIT)) == _TOOLTIP_LIMIT
+
+
+# -- data collection -------------------------------------------------------
+def _tray(tmp_path, app=None, *, saved=None):
+    """A TrayApp with its settings file inside tmp_path, and no windows."""
+    from ttheart_sender.tray import app as tray_app
+
+    app = app or FakeApp()
+    app.config.output_root = tmp_path
+    if saved is not None:
+        (tmp_path / "ttheart-settings.json").write_text(json.dumps(saved), encoding="utf-8")
+    # The panel and the icon both create real windows; neither is under test.
+    with mock.patch.object(tray_app, "ControlPanel"), mock.patch.object(tray_app, "TrayIcon"):
+        return tray_app.TrayApp(app)
+
+
+def test_the_panel_starts_from_config_when_nothing_is_saved(tmp_path):
+    """First run: config.yaml is the only opinion, so it wins."""
+    app = FakeApp()
+    app.config.dataset.enabled = True
+
+    tray = _tray(tmp_path, app)
+
+    assert tray._panel_state()["collect_data"] is True
+
+
+def test_an_unticked_box_survives_a_config_that_still_says_true(tmp_path):
+    """The box is the switch once it exists.
+
+    Otherwise unticking it would last until the next launch and then quietly
+    turn itself back on, which is the kind of thing you only notice when the
+    disk fills.
+    """
+    app = FakeApp()
+    app.config.dataset.enabled = True
+
+    tray = _tray(tmp_path, app, saved={"collect_data": False})
+
+    assert tray._panel_state()["collect_data"] is False
+    assert app.config.dataset.enabled is False, "the live config follows the box"
+
+
+def test_ticking_the_box_takes_effect_without_a_restart(tmp_path):
+    # The play action reads ctx.config.dataset, and the tray hands the same
+    # Config object to every run, so the next round picks this up.
+    app = FakeApp()
+    tray = _tray(tmp_path, app)
+
+    tray._set_toggle("collect_data", True)
+
+    assert app.config.dataset.enabled is True
+    saved = json.loads((tmp_path / "ttheart-settings.json").read_text())
+    assert saved["collect_data"] is True
+
+
+def test_ticking_the_box_creates_no_folder(tmp_path):
+    """Nothing is written until a round actually samples a drag."""
+    tray = _tray(tmp_path)
+
+    tray._set_toggle("collect_data", True)
+
+    assert not (tmp_path / "dataset").exists()

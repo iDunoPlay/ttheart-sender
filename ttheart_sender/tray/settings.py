@@ -13,7 +13,7 @@ import json
 import logging
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 log = logging.getLogger(__name__)
 
@@ -22,15 +22,56 @@ SETTINGS_FILENAME = "ttheart-settings.json"
 #: Panel checkbox -> the flow variable it overrides in purchase_box.yaml.
 #: The label is the user's wording; the key is what the flow actually reads.
 PURCHASE_BOXES = (
-    ("premium_box_plus", "Premium box plus", False),
-    ("premium_box", "Premium box", True),
-    ("pick_up_capsule", "Pick-up capsule", True),
-    ("happiness_box", "Happiness capsule", True),
+    ("premium_box_plus", "Premium Box+", False),
+    ("premium_box", "Premium Box", True),
+    ("pick_up_capsule", "Pick-up Capsule", True),
+    ("happiness_box", "Happiness Box", True),
 )
+
+#: Bounds for the Return Heart spinners. They are minutes of the hour, so the
+#: clock itself sets the range.
+MINUTE_MIN = 0
+MINUTE_MAX = 59
+#: The two marks a fresh install sends on: quarter past and ten to.
+RETURN_HEART_MINUTES_DEFAULT = (15, 50)
+#: How many marks the panel offers. Two spinners, so two per hour.
+RETURN_HEART_MARKS = len(RETURN_HEART_MINUTES_DEFAULT)
+
+
+def clamp_minute(value: Any, default: int = MINUTE_MIN) -> int:
+    """A spinner/settings value forced into a real minute of the hour.
+
+    Anything unparseable falls back to ``default`` rather than raising: this
+    runs on hand-edited JSON and on half-typed text straight out of the edit
+    box, neither of which should be able to break the panel.
+    """
+    try:
+        number = int(round(float(value)))
+    except (TypeError, ValueError):
+        return default
+    return max(MINUTE_MIN, min(MINUTE_MAX, number))
+
+
+def clamp_minutes(values: Any) -> List[int]:
+    """A whole set of marks, padded and trimmed to :data:`RETURN_HEART_MARKS`.
+
+    The panel has a fixed number of boxes, so the list handed around has to
+    have a fixed length however mangled the stored value is.
+    """
+    items = list(values) if isinstance(values, (list, tuple)) else []
+    marks = []
+    for index in range(RETURN_HEART_MARKS):
+        fallback = RETURN_HEART_MINUTES_DEFAULT[index]
+        marks.append(clamp_minute(items[index], fallback) if index < len(items) else fallback)
+    return marks
 
 
 def _default_purchase() -> Dict[str, bool]:
     return {key: default for key, _, default in PURCHASE_BOXES}
+
+
+def _default_minutes() -> List[int]:
+    return list(RETURN_HEART_MINUTES_DEFAULT)
 
 
 @dataclass
@@ -39,7 +80,20 @@ class PanelSettings:
 
     mode: str = "resume"
     always_on_top: bool = True
+    #: Whether a Resume/Launch cycle plays a round instead of waiting. All or
+    #: nothing: the panel used to offer odds, and now offers a switch.
     auto_play: bool = False
+    #: Send hearts on the clock instead of every cycle. Off by default so an
+    #: existing install keeps behaving the way it did before this section
+    #: existed.
+    return_heart: bool = False
+    #: Minutes of the hour to send on while ``return_heart`` is set --
+    #: :data:`RETURN_HEART_MARKS` of them, one per spinner.
+    return_heart_minutes: List[int] = field(default_factory=_default_minutes)
+    #: Save training samples while playing. Seeded from config.yaml's
+    #: `dataset.enabled` the first time the panel runs, and the panel's own
+    #: switch after that -- see :meth:`..tray.app.TrayApp._seed_collection`.
+    collect_data: bool = False
     purchase: Dict[str, bool] = field(default_factory=_default_purchase)
 
     # -- conversion ------------------------------------------------------
@@ -49,9 +103,12 @@ class PanelSettings:
         if not isinstance(raw, dict):
             return settings
 
+        # The two collection-valued fields are read separately below, because
+        # the loop decides what a value means from the default's type.
+        nested = {"purchase", "return_heart_minutes"}
         known = {f.name for f in fields(cls)}
         for key, value in raw.items():
-            if key not in known or key == "purchase":
+            if key not in known or key in nested:
                 continue
             current = getattr(settings, key)
             # Keep the default whenever the stored value is the wrong shape --
@@ -66,6 +123,9 @@ class PanelSettings:
             for key in settings.purchase:
                 if key in stored:
                     settings.purchase[key] = bool(stored[key])
+        # clamp_minutes copes with a missing, short or nonsense list on its
+        # own, so there is nothing to check first.
+        settings.return_heart_minutes = clamp_minutes(raw.get("return_heart_minutes"))
         return settings
 
     def to_dict(self) -> Dict[str, Any]:

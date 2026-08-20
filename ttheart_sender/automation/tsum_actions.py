@@ -9,7 +9,7 @@ module is the adapter between a YAML step and that loop.
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Optional, Sequence
 
 from ..exceptions import ActionError
 from ..game.tsum import Driver, play_defaults, play_loop
@@ -28,7 +28,7 @@ _TUNABLES = frozenset(vars(play_defaults()))
 _RESERVED = frozenset({"duration", "countdown", "dry_run", "no_prepare"})
 
 
-def _stop_checker(ctx: RunContext, until_found: Optional[str], until_gone: Optional[str],
+def _stop_checker(ctx: RunContext, until_found: Sequence[str], until_gone: Sequence[str],
                   confidence: Optional[float]):
     """Build the "is the round over?" test the play loop calls each frame.
 
@@ -36,18 +36,31 @@ def _stop_checker(ctx: RunContext, until_found: Optional[str], until_gone: Optio
     ``ctx.find``, which would take a second screenshot of the same pixels a few
     milliseconds later -- between chains that is pure latency, and the loop
     runs this every iteration.
+
+    Both conditions take a list as well as a single name, because the check
+    only runs between drags: a banner that is up for a second or two can come
+    and go entirely inside one drag, and naming several endings gives the loop
+    more than one chance to notice the round is over. ``until_found`` stops on
+    *any* of its templates; ``until_gone`` needs *all* of its templates to have
+    gone, so one flaky match on a still-live board cannot end the round early.
+
+    Each name costs one more match per iteration, so list the two or three
+    endings that actually occur rather than everything that might.
     """
     if not until_found and not until_gone:
         return None
 
-    found = ctx.templates.get(until_found) if until_found else None
-    gone = ctx.templates.get(until_gone) if until_gone else None
+    found = [(name, ctx.templates.get(name)) for name in until_found]
+    gone = [(name, ctx.templates.get(name)) for name in until_gone]
 
     def check(frame) -> str:
-        if found is not None and ctx.matcher.find(frame, found, confidence=confidence):
-            return f"{until_found} appeared -- round over"
-        if gone is not None and ctx.matcher.find(frame, gone, confidence=confidence) is None:
-            return f"{until_gone} is gone -- round over"
+        for name, template in found:
+            if ctx.matcher.find(frame, template, confidence=confidence):
+                return f"{name} appeared -- round over"
+        if gone and all(ctx.matcher.find(frame, template, confidence=confidence) is None
+                        for _, template in gone):
+            names = ", ".join(name for name, _ in gone)
+            return f"{names} is gone -- round over"
         return ""
 
     return check
@@ -61,10 +74,13 @@ def act_play_tsum(ctx: RunContext, params: Params) -> ActionResult:
     ``duration`` as the backstop for when that template never shows up. Unlike
     the CLI there is no countdown: a flow only reaches this step once it has
     already waited for the match to start.
+
+    ``until_found`` and ``until_gone`` each take one name or a list of them --
+    see :func:`_stop_checker` for what a list means.
     """
     duration = params.number("duration", 0.0)
-    until_found = params.optional_string("until_found", None)
-    until_gone = params.optional_string("until_gone", None)
+    until_found = params.string_list("until_found")
+    until_gone = params.string_list("until_gone")
     confidence = params.optional_number("confidence", None)
     require_played = params.integer("require_played", 0)
     overrides = params.mapping("options", {})
@@ -97,6 +113,25 @@ def act_play_tsum(ctx: RunContext, params: Params) -> ActionResult:
     opts = play_defaults()
     for key, value in overrides.items():
         setattr(opts, key, value)
+
+    # Sample collection is a config.yaml switch rather than a flow option, so
+    # turning it on does not mean editing every flow that plays a round. A
+    # flow that sets `dataset:` under `options:` still wins -- an explicit
+    # directory is someone asking for that directory.
+    collect = ctx.config.dataset
+    if collect.enabled and not opts.dataset:
+        opts.dataset = str(ctx.config.dataset_dir)
+        opts.dataset_limit = collect.per_round
+        opts.dataset_every = collect.every
+        opts.dataset_quality = collect.quality
+        opts.dataset_delay = collect.delay
+        opts.dataset_frames = collect.frames
+        opts.dataset_gap = collect.gap
+        opts.dataset_floor_mult = collect.floor_mult
+        opts.dataset_max_motion = collect.max_motion
+        opts.dataset_max_mb = collect.max_mb
+        opts.dataset_total = collect.max_total
+
     opts.duration = duration
     opts.countdown = 0.0
     opts.dry_run = False
@@ -105,7 +140,12 @@ def act_play_tsum(ctx: RunContext, params: Params) -> ActionResult:
     report = play_loop(drv, opts, stop_when=_stop_checker(ctx, until_found, until_gone, confidence))
 
     ctx.set_var("tsum_chains_played", report.played)
+    # Both, because they are different questions: `dragged` is what the stroke
+    # went through, `cleared` is what left the board and is only measured when
+    # `verify_clears` is on -- a flow reading it should check the flag too.
+    ctx.set_var("tsum_tsums_dragged", report.dragged)
     ctx.set_var("tsum_tsums_cleared", report.cleared)
+    ctx.set_var("tsum_clears_verified", report.checked)
     ctx.set_var("tsum_drags_stalled", report.stalled)
     ctx.set_var("tsum_stop_reason", report.reason)
     log.info("%splay_tsum -> %s, %s", ctx.indent, report.describe(),

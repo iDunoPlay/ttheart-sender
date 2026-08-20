@@ -20,7 +20,14 @@ import win32api
 import win32con
 import win32gui
 
-from .settings import PURCHASE_BOXES
+from .settings import (
+    MINUTE_MAX,
+    MINUTE_MIN,
+    PURCHASE_BOXES,
+    RETURN_HEART_MARKS,
+    RETURN_HEART_MINUTES_DEFAULT,
+    clamp_minute,
+)
 
 log = logging.getLogger(__name__)
 
@@ -33,8 +40,21 @@ ID_BUY = 2003
 ID_RUN = 2004
 ID_EXIT = 2005
 ID_LOGS = 2006
+ID_COLLECT_DATA = 2009
+ID_RETURN_HEART = 2010
 ID_MODE_BASE = 2100
 ID_PURCHASE_BASE = 2200
+#: One edit box per Return Heart mark, each with an up-down glued to it. The
+#: two ranges run in parallel, so the spinner belonging to an edit is always at
+#: the same offset -- see :func:`_spin_for`.
+ID_MINUTE_BASE = 2300
+ID_MINUTE_SPIN_BASE = 2400
+
+
+def _spin_for(ident: int) -> int:
+    """The up-down that belongs to a minute edit box."""
+    return ID_MINUTE_SPIN_BASE + (ident - ID_MINUTE_BASE)
+
 
 # -- layout, in logical pixels (scaled by the monitor's DPI) --------------
 PANEL_WIDTH = 300
@@ -44,16 +64,42 @@ GAP = 6
 SECTION_GAP = 10
 BUTTON_HEIGHT = 30
 LINE_HEIGHT = 2
+#: The "15" box plus the arrows glued to its right edge, and the "min" after it.
+SPINNER_WIDTH = 54
+UNIT_LABEL_WIDTH = 30
+#: How far the Return Heart spinners sit in from its tick box, so they read as
+#: belonging to it rather than as two more rows of the panel.
+INDENT = 16
+#: "Buy tsum" sits on the "Purchase box" header line, right-aligned.
+BUY_WIDTH = 86
+HEADER_HEIGHT = 26
 
 BS_AUTOCHECKBOX = 0x00000003
 BS_AUTORADIOBUTTON = 0x00000009
 BS_PUSHBUTTON = 0x00000000
 SS_ETCHEDHORZ = 0x00000010
+SS_CENTERIMAGE = 0x00000200  # vertically centres a single line of text
 BM_GETCHECK = 0x00F0
 BM_SETCHECK = 0x00F1
 SW_HIDE = 0
 SW_SHOW = 5
 MONITOR_DEFAULTTONEAREST = 2
+
+# -- edit box + up-down (spinner) ----------------------------------------
+ES_RIGHT = 0x00000002
+ES_AUTOHSCROLL = 0x00000080
+ES_NUMBER = 0x00002000  # digits only, so the text is always parseable
+EN_CHANGE = 0x0300
+EN_KILLFOCUS = 0x0200
+
+UPDOWN_CLASS = "msctls_updown32"
+UDS_SETBUDDYINT = 0x0002   # write the value into the buddy edit as a number
+UDS_ALIGNRIGHT = 0x0004    # glue the arrows to the buddy's right edge
+UDS_AUTOBUDDY = 0x0010     # adopt the control created just before this one
+UDS_ARROWKEYS = 0x0020     # up/down keys work while the edit has focus
+UDS_NOTHOUSANDS = 0x0080
+UDM_SETRANGE32 = 0x046F
+UDM_SETPOS32 = 0x0471
 
 
 def _scaled_font(height: int, *, bold: bool = False) -> int:
@@ -97,23 +143,25 @@ class ControlPanel:
         self,
         *,
         title: str,
-        version_text: str,
         modes,
         get_state: Callable[[], Dict],
         on_mode: Callable[[str], None],
         on_toggle: Callable[[str, bool], None],
+        on_return_minute: Callable[[int, int], None],
         on_purchase: Callable[[str, bool], None],
         on_run: Callable[[], None],
         on_buy: Callable[[], None],
         on_logs: Callable[[], None],
         on_exit: Callable[[], None],
     ) -> None:
+        #: The version lives in the caption bar, so a screenshot of the panel
+        #: is enough to tell which build produced it.
         self._title = title
-        self._version_text = version_text
         self._modes = list(modes)
         self._get_state = get_state
         self._on_mode = on_mode
         self._on_toggle = on_toggle
+        self._on_return_minute = on_return_minute
         self._on_purchase = on_purchase
         self._on_run = on_run
         self._on_buy = on_buy
@@ -126,6 +174,9 @@ class ControlPanel:
         self._fonts: List[int] = []
         self._background = win32gui.GetSysColorBrush(win32con.COLOR_BTNFACE)
         self._scale = 1.0
+        #: True while :meth:`refresh` is writing into a spinner. Its EN_CHANGE
+        #: would otherwise be read back as if the user had typed it.
+        self._writing_number = False
 
     # -- lifecycle -------------------------------------------------------
     def _px(self, value: int) -> int:
@@ -182,6 +233,14 @@ class ControlPanel:
 
     # -- construction ----------------------------------------------------
     def _create(self) -> None:
+        # The up-down (spinner) class lives in comctl32 and is only registered
+        # once the DLL has been initialised -- CreateWindowEx would otherwise
+        # fail with "cannot find window class".
+        try:
+            ctypes.windll.comctl32.InitCommonControls()
+        except Exception:  # noqa: BLE001 - the spinner degrades to a plain box
+            log.debug("InitCommonControls failed", exc_info=True)
+
         wc = win32gui.WNDCLASS()
         wc.lpszClassName = WINDOW_CLASS
         wc.hInstance = win32api.GetModuleHandle(None)
@@ -205,12 +264,17 @@ class ControlPanel:
         dpi = _dpi_for_window(self._hwnd)
         self._scale = dpi / 96.0
         self._fonts = [_scaled_font(self._px(12)), _scaled_font(self._px(12), bold=True)]
-        self._build_controls()
+        # Creating a number box and giving its spinner a range both fire
+        # EN_CHANGE. Read back as user input they would report the layout's
+        # placeholder as a choice and overwrite the saved value with it.
+        self._writing_number = True
+        try:
+            self._build_controls()
+        finally:
+            self._writing_number = False
 
     def _build_controls(self) -> None:
         y = MARGIN
-        y = self._add_static(self._version_text, y, bold=True)
-        y += GAP
         y = self._add_check(ID_ALWAYS_ON_TOP, "Always on top", y)
         y += GAP
 
@@ -232,7 +296,12 @@ class ControlPanel:
         y = self._add_line(y)
         y += SECTION_GAP
 
-        y = self._add_static("Purchase box", y, bold=True)
+        y = self._add_return_heart(y)
+        y += SECTION_GAP
+        y = self._add_line(y)
+        y += SECTION_GAP
+
+        y = self._add_purchase_header(y)
         y += GAP
         for index, (key, label, _default) in enumerate(PURCHASE_BOXES):
             y = self._add_check(ID_PURCHASE_BASE + index, label, y)
@@ -241,19 +310,22 @@ class ControlPanel:
         y = self._add_line(y)
         y += SECTION_GAP
 
-        self._add_control(
-            ID_BUY, "BUTTON", "Buy tsum", BS_PUSHBUTTON,
-            MARGIN, y, PANEL_WIDTH - 2 * MARGIN, BUTTON_HEIGHT,
-        )
-        y += BUTTON_HEIGHT + GAP
+        # One row, its own section: this writes files to disk, which is worth
+        # separating from the toggles that only change how a round is played.
+        y = self._add_check(ID_COLLECT_DATA, "Data collection", y, bold=True)
+
+        y += SECTION_GAP
+        y = self._add_line(y)
+        y += SECTION_GAP
+
         self._add_control(
             ID_RUN, "BUTTON", "Run", BS_PUSHBUTTON,
             MARGIN, y, PANEL_WIDTH - 2 * MARGIN, BUTTON_HEIGHT,
         )
         y += BUTTON_HEIGHT + GAP
 
-        # Right-clicking the tray icon no longer opens a menu, so the panel is
-        # the only way out of the app -- these two are not optional extras.
+        # The tray menu only offers Exit, so Open logs lives here -- and Exit
+        # is repeated here because this is where the eye already is.
         half = (PANEL_WIDTH - 2 * MARGIN - GAP) // 2
         self._add_control(ID_LOGS, "BUTTON", "Open logs", BS_PUSHBUTTON,
                           MARGIN, y, half, ROW + 4)
@@ -262,6 +334,68 @@ class ControlPanel:
         y += ROW + 4 + MARGIN
 
         self._resize(y)
+
+    #: What each Return Heart row is called. Read together they spell the
+    #: schedule out: "every hour at 15 min, and at 50 min".
+    MINUTE_LABELS = ("Every hour at", "and at")
+
+    def _add_return_heart(self, y: int) -> int:
+        """The "Return Heart" tick box and the two marks it sends on."""
+        y = self._add_check(ID_RETURN_HEART, "Return Heart", y, bold=True)
+        for index in range(RETURN_HEART_MARKS):
+            y = self._add_minute_row(
+                ID_MINUTE_BASE + index,
+                self.MINUTE_LABELS[index],
+                RETURN_HEART_MINUTES_DEFAULT[index],
+                y,
+            )
+        return y
+
+    def _add_minute_row(self, ident: int, label: str, value: int, y: int) -> int:
+        """One indented "<label> [15] min" row, aligned with its fellows."""
+        unit_x = PANEL_WIDTH - MARGIN - UNIT_LABEL_WIDTH
+        spinner_x = unit_x - SPINNER_WIDTH
+        label_x = MARGIN + INDENT
+        self._add_static(label, y, x=label_x, width=spinner_x - label_x - GAP, centred=True)
+        # The edit is created first on purpose: UDS_AUTOBUDDY adopts whichever
+        # control was created immediately before the up-down.
+        self._add_control(
+            ident, "EDIT", str(value),
+            win32con.WS_BORDER | win32con.WS_TABSTOP | ES_NUMBER | ES_RIGHT | ES_AUTOHSCROLL,
+            spinner_x, y, SPINNER_WIDTH, ROW,
+        )
+        self._add_spinner(_spin_for(ident), value)
+        self._add_static("min", y, x=unit_x + 4, width=UNIT_LABEL_WIDTH, centred=True)
+        return y + ROW
+
+    def _add_spinner(self, ident: int, value: int) -> None:
+        """Attach up-down arrows to the box just created, if comctl32 allows."""
+        try:
+            hwnd = win32gui.CreateWindowEx(
+                0, UPDOWN_CLASS, "",
+                win32con.WS_CHILD | win32con.WS_VISIBLE
+                | UDS_AUTOBUDDY | UDS_ALIGNRIGHT | UDS_SETBUDDYINT
+                | UDS_ARROWKEYS | UDS_NOTHOUSANDS,
+                0, 0, 0, 0,  # UDS_ALIGNRIGHT sizes and places it off the buddy
+                self._hwnd, ident, win32api.GetModuleHandle(None), None,
+            )
+        except win32gui.error:
+            # Without the arrows the box is still a perfectly usable number
+            # field, so this is a downgrade rather than a failure.
+            log.warning("Could not create the spinner for control %s", ident, exc_info=True)
+            return
+        self._controls[ident] = hwnd
+        win32gui.SendMessage(hwnd, UDM_SETRANGE32, MINUTE_MIN, MINUTE_MAX)
+        win32gui.SendMessage(hwnd, UDM_SETPOS32, 0, value)
+
+    def _add_purchase_header(self, y: int) -> int:
+        """The "Purchase box" heading, with "Buy tsum" on the same line."""
+        buy_x = PANEL_WIDTH - MARGIN - BUY_WIDTH
+        self._add_static("Purchase box", y, bold=True,
+                         width=buy_x - MARGIN - GAP, height=HEADER_HEIGHT, centred=True)
+        self._add_control(ID_BUY, "BUTTON", "Buy tsum", BS_PUSHBUTTON,
+                          buy_x, y, BUY_WIDTH, HEADER_HEIGHT)
+        return y + HEADER_HEIGHT
 
     def _add_control(self, ident: int, cls: str, text: str, style: int,
                      x: int, y: int, width: int, height: int) -> int:
@@ -275,18 +409,32 @@ class ControlPanel:
         self._controls[ident] = hwnd
         return hwnd
 
-    def _add_static(self, text: str, y: int, *, bold: bool = False) -> int:
+    def _add_static(self, text: str, y: int, *, bold: bool = False,
+                    x: Optional[int] = None, width: Optional[int] = None,
+                    height: Optional[int] = None, centred: bool = False) -> int:
+        x = MARGIN if x is None else x
+        width = (PANEL_WIDTH - 2 * MARGIN) if width is None else width
+        height = ROW if height is None else height
+        style = win32con.WS_CHILD | win32con.WS_VISIBLE
+        if centred:
+            # Labels sharing a line with a taller control have to be centred on
+            # it, or they sit against the top of their own box.
+            style |= SS_CENTERIMAGE
         hwnd = win32gui.CreateWindowEx(
-            0, "STATIC", text, win32con.WS_CHILD | win32con.WS_VISIBLE,
-            self._px(MARGIN), self._px(y), self._px(PANEL_WIDTH - 2 * MARGIN), self._px(ROW),
+            0, "STATIC", text, style,
+            self._px(x), self._px(y), self._px(width), self._px(height),
             self._hwnd, 0, win32api.GetModuleHandle(None), None,
         )
         win32gui.SendMessage(hwnd, win32con.WM_SETFONT, self._fonts[1 if bold else 0], 1)
-        return y + ROW
+        return y + height
 
-    def _add_check(self, ident: int, label: str, y: int) -> int:
-        self._add_control(ident, "BUTTON", label, BS_AUTOCHECKBOX,
-                          MARGIN, y, PANEL_WIDTH - 2 * MARGIN, ROW)
+    def _add_check(self, ident: int, label: str, y: int, *, bold: bool = False) -> int:
+        hwnd = self._add_control(ident, "BUTTON", label, BS_AUTOCHECKBOX,
+                                 MARGIN, y, PANEL_WIDTH - 2 * MARGIN, ROW)
+        if bold:
+            # A checkbox that is also a section heading, so it reads as one
+            # rather than as another item of the list above it.
+            win32gui.SendMessage(hwnd, win32con.WM_SETFONT, self._fonts[1], 1)
         return y + ROW
 
     def _add_line(self, y: int) -> int:
@@ -355,9 +503,24 @@ class ControlPanel:
         state = self._get_state()
 
         self._set_check(ID_ALWAYS_ON_TOP, state.get("always_on_top", True))
-        self._set_check(ID_AUTO_PLAY, state.get("auto_play", False))
+        self._set_check(ID_AUTO_PLAY, bool(state.get("auto_play", False)))
+
+        timed = bool(state.get("return_heart", False))
+        self._set_check(ID_RETURN_HEART, timed)
+        minutes = state.get("return_heart_minutes") or RETURN_HEART_MINUTES_DEFAULT
+        for index in range(RETURN_HEART_MARKS):
+            ident = ID_MINUTE_BASE + index
+            if index < len(minutes):
+                self._show_number(ident, minutes[index])
+            # The marks mean nothing while hearts go out every cycle anyway;
+            # greying them out says so without hiding the values the next tick
+            # will use.
+            self._enable(ident, timed)
+            self._enable(_spin_for(ident), timed)
+
         for index, mode in enumerate(self._modes):
             self._set_check(ID_MODE_BASE + index, mode.key == state.get("mode"))
+        self._set_check(ID_COLLECT_DATA, state.get("collect_data", False))
         purchase = state.get("purchase", {})
         for index, (key, _label, default) in enumerate(PURCHASE_BOXES):
             self._set_check(ID_PURCHASE_BASE + index, purchase.get(key, default))
@@ -379,6 +542,44 @@ class ControlPanel:
             0, 0, 0, 0,
             win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE,
         )
+
+    def _show_number(self, ident: int, value: int, *, force: bool = False) -> None:
+        """Put ``value`` in a spinner without fighting whoever is typing.
+
+        A refresh lands on every state change, including ones the edit box
+        itself caused, so rewriting the text unconditionally would drag the
+        caret back to the start mid-keystroke.
+        """
+        hwnd = self._controls.get(ident)
+        if not hwnd:
+            return
+        if not force and win32gui.GetFocus() == hwnd:
+            return
+        text = str(clamp_minute(value))
+        if text == win32gui.GetWindowText(hwnd):
+            return
+        self._writing_number = True
+        try:
+            win32gui.SetWindowText(hwnd, text)
+        finally:
+            self._writing_number = False
+        spin = self._controls.get(_spin_for(ident))
+        if spin:
+            win32gui.SendMessage(spin, UDM_SETPOS32, 0, int(text))
+
+    def _read_number(self, ident: int) -> Optional[int]:
+        """What an edit box currently holds, or ``None`` while it is empty.
+
+        Clearing the box to retype it must not be reported as 0 -- that would
+        silently move a mark to the top of the hour mid-keystroke.
+        """
+        hwnd = self._controls.get(ident)
+        if not hwnd:
+            return None
+        text = win32gui.GetWindowText(hwnd).strip()
+        if not text:
+            return None
+        return clamp_minute(text)
 
     def _set_check(self, ident: int, checked: bool) -> None:
         hwnd = self._controls.get(ident)
@@ -402,7 +603,7 @@ class ControlPanel:
     # -- messages --------------------------------------------------------
     def _wnd_proc(self, hwnd: int, msg: int, wparam: int, lparam: int) -> int:
         if msg == win32con.WM_COMMAND:
-            self._on_command(win32api.LOWORD(wparam))
+            self._on_command(win32api.LOWORD(wparam), win32api.HIWORD(wparam))
             return 0
         if msg in (win32con.WM_CTLCOLORSTATIC, win32con.WM_CTLCOLORBTN):
             # Static/checkbox text paints on white otherwise, which looks like
@@ -419,12 +620,19 @@ class ControlPanel:
             return 0
         return win32gui.DefWindowProc(hwnd, msg, wparam, lparam)
 
-    def _on_command(self, ident: int) -> None:
+    def _on_command(self, ident: int, code: int = 0) -> None:
+        if ID_MINUTE_BASE <= ident < ID_MINUTE_BASE + RETURN_HEART_MARKS:
+            self._on_minute_notification(ident, code)
+            return
         try:
             if ident == ID_ALWAYS_ON_TOP:
                 self._on_toggle("always_on_top", self._get_check(ident))
             elif ident == ID_AUTO_PLAY:
                 self._on_toggle("auto_play", self._get_check(ident))
+            elif ident == ID_COLLECT_DATA:
+                self._on_toggle("collect_data", self._get_check(ident))
+            elif ident == ID_RETURN_HEART:
+                self._on_toggle("return_heart", self._get_check(ident))
             elif ident == ID_BUY:
                 self._on_buy()
             elif ident == ID_RUN:
@@ -443,6 +651,37 @@ class ControlPanel:
         except Exception:  # noqa: BLE001 - a handler must not kill the loop
             log.exception("Panel command %s failed", ident)
         self.refresh()
+
+    def _on_minute_notification(self, ident: int, code: int) -> None:
+        """EN_CHANGE while the user (or the arrows) edits a Return Heart mark.
+
+        Handled apart from the buttons because a full :meth:`refresh` here
+        would rewrite the very text being typed; only losing focus gets the
+        box snapped back to the stored value.
+        """
+        index = ident - ID_MINUTE_BASE
+        if code == EN_KILLFOCUS:
+            self._show_number(ident, self._current_minute(index), force=True)
+            return
+        if code != EN_CHANGE or self._writing_number:
+            return
+        value = self._read_number(ident)
+        if value is None:
+            return
+        try:
+            self._on_return_minute(index, value)
+        except Exception:  # noqa: BLE001 - a handler must not kill the loop
+            log.exception("Panel Return Heart update failed")
+
+    def _current_minute(self, index: int) -> int:
+        """The stored value for one mark, for snapping a box back to."""
+        fallback = RETURN_HEART_MINUTES_DEFAULT[index]
+        try:
+            minutes = self._get_state().get("return_heart_minutes") or ()
+        except Exception:  # noqa: BLE001 - never let a callback break the box
+            log.debug("state callback failed", exc_info=True)
+            return fallback
+        return clamp_minute(minutes[index], fallback) if index < len(minutes) else fallback
 
 
 def _window_size(hwnd: int):

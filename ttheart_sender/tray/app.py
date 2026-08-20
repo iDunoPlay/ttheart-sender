@@ -1,9 +1,9 @@
 """Wires the tray icon and the control panel to the automation service.
 
-The tray icon is now only a launcher and a status light: left-clicking it opens
-the panel, which owns every control the old right-click menu used to. That is
-why Exit and Open logs live on the panel -- with no context menu, they are the
-only way out of the app.
+The tray icon is a launcher and a status light: left-clicking it opens the
+panel, which owns every control the old right-click menu used to. Right-clicking
+offers Exit and nothing else -- a way out that does not depend on finding the
+panel first.
 
 The panel holds no state. It reads from :meth:`TrayApp._panel_state` and writes
 back through the callbacks below, so the saved settings, the service and the
@@ -22,7 +22,7 @@ import win32event
 import winerror
 
 from ..version import __version__
-from .icon import TrayIcon
+from .icon import MenuItem, TrayIcon
 from .modes import DEFAULT_MODE, MODES
 from .panel import ControlPanel
 from .service import AutomationService, RunState
@@ -31,8 +31,8 @@ from .settings import PanelSettings, settings_path
 log = logging.getLogger(__name__)
 
 APP_TITLE = "ttheart-sender"
-#: Shown on the panel and in the tooltip, so a screenshot is enough to tell
-#: which build someone is running.
+#: The panel's caption and the tray tooltip, so a screenshot of either is
+#: enough to tell which build someone is running.
 APP_VERSION = f"{APP_TITLE} v{__version__}"
 #: One tray per session -- two of them would fight over the same emulator.
 MUTEX_NAME = "ttheart-sender-tray-singleton"
@@ -65,21 +65,26 @@ class TrayApp:
             self._settings.mode = mode
         if play is not None and play:
             self._settings.auto_play = True
+        self._seed_collection(self._settings_path.exists())
 
         self._service = AutomationService(
             app,
             mode=self._settings.mode,
             play=self._settings.auto_play,
+            return_heart=self._settings.return_heart,
+            return_heart_minutes=self._settings.return_heart_minutes,
             on_change=self._on_change,
             on_notify=self._on_notify,
         )
         self._panel = ControlPanel(
-            title=APP_TITLE,
-            version_text=APP_VERSION,
+            # The caption carries the version, so a screenshot identifies the
+            # build without spending a row of the panel on it.
+            title=APP_VERSION,
             modes=MODES,
             get_state=self._panel_state,
             on_mode=self._set_mode,
             on_toggle=self._set_toggle,
+            on_return_minute=self._set_return_minute,
             on_purchase=self._set_purchase,
             on_run=self._service.toggle,
             on_buy=self._buy_tsum,
@@ -90,7 +95,7 @@ class TrayApp:
             title=APP_TITLE,
             tooltip=self._tooltip,
             icon_path=self._icon_path,
-            # No menu factory: right-clicking the icon does nothing, by design.
+            menu=self._menu,
             on_left_click=self._panel.toggle,
         )
 
@@ -108,6 +113,11 @@ class TrayApp:
             )
             if self._autostart:
                 self._service.start()
+            # Open the panel as soon as the message loop is up: a first-time
+            # user has no reason to guess that the tray icon is clickable.
+            # Queued rather than shown here because the panel must be created
+            # on the thread that will pump it.
+            self._icon.post(self._panel.show)
             return self._icon.run()
         finally:
             self._service.shutdown()
@@ -115,12 +125,30 @@ class TrayApp:
             win32api.CloseHandle(handle)
 
     # -- panel state -----------------------------------------------------
+    def _seed_collection(self, has_saved_settings: bool) -> None:
+        """Agree on one answer for "is collection on" at startup.
+
+        Two switches name the same thing: `dataset.enabled` in config.yaml and
+        the panel's tick box. A first run has nothing saved, so config.yaml
+        decides and the box shows what the file already said. After that the
+        box is the switch -- someone who unticks it means it, and a config
+        file that still says `true` must not turn it back on at the next
+        launch.
+        """
+        if has_saved_settings:
+            self._app.config.dataset.enabled = self._settings.collect_data
+        else:
+            self._settings.collect_data = bool(self._app.config.dataset.enabled)
+
     def _panel_state(self) -> Dict[str, Any]:
         state = self._service.state
         return {
             "mode": self._service.mode.key,
             "always_on_top": self._settings.always_on_top,
+            "collect_data": self._settings.collect_data,
             "auto_play": self._service.play,
+            "return_heart": self._service.return_heart,
+            "return_heart_minutes": self._service.return_heart_minutes,
             "purchase": dict(self._settings.purchase),
             "running": state is RunState.RUNNING,
             "stopping": state is RunState.STOPPING,
@@ -140,11 +168,40 @@ class TrayApp:
         if name == "auto_play":
             self._service.set_play(value)
             self._settings.auto_play = self._service.play
+        elif name == "return_heart":
+            self._service.set_return_heart(value)
+            self._settings.return_heart = self._service.return_heart
         elif name == "always_on_top":
             self._settings.always_on_top = bool(value)
+        elif name == "collect_data":
+            # Applied to the live config rather than only saved: the flow
+            # action reads `ctx.config.dataset`, so this takes effect on the
+            # next round without a restart.
+            self._settings.collect_data = bool(value)
+            self._app.config.dataset.enabled = self._settings.collect_data
+            log.info("Data collection %s (%s)",
+                     "on" if self._settings.collect_data else "off",
+                     self._app.config.dataset_dir)
         else:
             log.debug("Unknown panel toggle %r", name)
             return
+        self._save()
+
+    def _set_return_minute(self, index: int, minute: int) -> None:
+        """Store one Return Heart mark. Only the next run picks it up.
+
+        The panel hands over one box at a time, so the other mark is read back
+        off the service rather than the box beside it -- that box may be
+        half-typed, and it is the stored value that the flow will be given.
+        """
+        minutes = list(self._service.return_heart_minutes)
+        if not 0 <= index < len(minutes):
+            log.debug("Unknown Return Heart mark %r", index)
+            return
+        minutes[index] = minute
+        if not self._service.set_return_heart_minutes(minutes):
+            return
+        self._settings.return_heart_minutes = self._service.return_heart_minutes
         self._save()
 
     def _set_purchase(self, key: str, value: bool) -> None:
@@ -169,6 +226,10 @@ class TrayApp:
         )
 
     # -- presentation ----------------------------------------------------
+    def _menu(self):
+        """The right-click menu: one way out, wherever the panel happens to be."""
+        return [MenuItem("Exit", self._exit)]
+
     def _tooltip(self) -> str:
         return f"{APP_VERSION} - {self._service.status_text()}"
 

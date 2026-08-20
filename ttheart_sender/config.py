@@ -177,12 +177,56 @@ class RunnerConfig:
 
 
 @dataclass
+class DatasetConfig:
+    """Training samples captured while playing -- see :mod:`..game.dataset`.
+
+    Off by default: it costs one extra capture on the drags it samples, and
+    nobody should be writing images to disk without having asked for it.
+    """
+
+    enabled: bool = False
+    #: Relative paths land next to the .exe, not inside a one-file bundle's
+    #: temp directory -- the same rule logs follow, and for the same reason.
+    dir: str = "dataset"
+    #: Cap per round. Boards inside one round are highly alike, so a handful
+    #: from each of many rounds beats hundreds from one.
+    per_round: int = 20
+    #: Sample every Nth drag rather than the first N.
+    every: int = 4
+    quality: int = 85
+    #: Seconds to wait after the press before photographing the marks. NOT
+    #: ``--hold-delay``: that one is paid on every drag and sits below the
+    #: 0.15s floor where the game has finished drawing the highlight, which is
+    #: why the first collection carried no label at all. Clamped up to the
+    #: floor by :class:`~..game.dataset.DatasetWriter`.
+    delay: float = 0.25
+    #: Frames to read the marks from -- only what changed in all of them
+    #: counts, which is what keeps a settling board out of the reading.
+    frames: int = 3
+    #: Seconds between those frames.
+    gap: float = 0.05
+    #: A mark has to beat the board's own noise floor by this much. Measured
+    #: with ``hold``, real marks sit 8x-25x above it; the fixed 8.0 threshold
+    #: sits inside that floor on a live board. 0 = use the fixed threshold.
+    floor_mult: float = 5.0
+    #: Refuse a sample whose board was already jiggling this hard at press
+    #: time; the reading would be motion rather than marks. 0 = keep all.
+    max_motion: float = 12.0
+    #: Budgets across the whole dataset directory, not one session. There is
+    #: no per-day limit anywhere else: unattended, the first collection wrote
+    #: 803MB in one night. 0 = no cap.
+    max_mb: float = 2048.0
+    max_total: int = 0
+
+
+@dataclass
 class Config:
     app: AppConfig = field(default_factory=AppConfig)
     window: WindowConfig = field(default_factory=WindowConfig)
     matching: MatchingConfig = field(default_factory=MatchingConfig)
     input: InputConfig = field(default_factory=InputConfig)
     runner: RunnerConfig = field(default_factory=RunnerConfig)
+    dataset: DatasetConfig = field(default_factory=DatasetConfig)
 
     #: Directory the config was loaded from; all relative paths resolve here.
     root: Path = field(default_factory=Path.cwd)
@@ -214,6 +258,10 @@ class Config:
     @property
     def debug_dir(self) -> Path:
         return self.resolve_output(self.matching.debug_dir)
+
+    @property
+    def dataset_dir(self) -> Path:
+        return self.resolve_output(self.dataset.dir)
 
 
 # --------------------------------------------------------------------------

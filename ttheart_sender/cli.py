@@ -7,13 +7,14 @@
     python main.py prepare              park LDPlayer at the top-left and focus it
     python main.py snip heart_button    capture a template image interactively
     python main.py point                hover + press a key to read its coordinates
+    python main.py region               mark two corners -> the --board x,y,w,h string
     python main.py shot                 save a screenshot of the emulator content area
     python main.py find heart_button    test-match a template and report the score
     python main.py flows                list available flows
     python main.py actions              list every action the flow language supports
     python main.py run send_heart       run a flow
     python main.py play                 play a round of Tsum Tsum (--loops 0 = keep going)
-    python main.py tray                 sit in the system tray; right-click to pick a mode
+    python main.py tray                 sit in the system tray; left-click for the panel
 
 Any command that touches the screen (prepare/shot/snip/point/find/run/play) detects
 LDPlayer and parks it at the top-left before doing anything else -- that's
@@ -104,6 +105,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_point.add_argument("--key", default="f8", help="Key that reads a point (default: f8)")
     p_point.set_defaults(func=cmd_point, needs_window=True)
 
+    p_region = sub.add_parser(
+        "region", help="Mark two corners and get the --board string for them"
+    )
+    p_region.add_argument("--key", default="f8", help="Key that marks a corner (default: f8)")
+    p_region.add_argument(
+        "-o", "--out", type=Path, help="Also save a crop of the region, to check it"
+    )
+    p_region.set_defaults(func=cmd_region, needs_window=True)
+
     p_find = sub.add_parser("find", help="Test-match a template against the screen right now")
     p_find.add_argument("template", help="Template name or path")
     p_find.add_argument("--confidence", type=float, help="Override the match threshold")
@@ -156,7 +166,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.set_defaults(func=cmd_run, needs_window=True)
 
     p_tray = sub.add_parser(
-        "tray", help="Run in the system tray; right-click the icon to pick a mode"
+        "tray", help="Run in the system tray; left-click the icon for the control panel"
     )
     p_tray.add_argument(
         "--mode",
@@ -297,6 +307,80 @@ def cmd_point(app: Application, args: argparse.Namespace) -> int:
             print(f"screen={point}   content=({rel.x}, {rel.y})   <- use this in flows, e.g. click: [{rel.x}, {rel.y}]")
         else:
             print(f"screen={point}   (outside the emulator content area {content})")
+
+
+def corners_to_region(a: Any, b: Any) -> tuple:
+    """Two marked corners -> ``(x, y, w, h)``.
+
+    Either order, either diagonal: the region is the box between them. Anyone
+    marking a rectangle by hand will sometimes start at the bottom-right, and
+    silently producing a negative width there is worse than useless -- it
+    yields a board rect that crops to nothing.
+    """
+    x, y = min(a.x, b.x), min(a.y, b.y)
+    return x, y, abs(b.x - a.x), abs(b.y - a.y)
+
+
+def cmd_region(app: Application, args: argparse.Namespace) -> int:
+    """Mark two corners; print them as the `--board x,y,w,h` string.
+
+    `point` already reports content coordinates, which is the space `--board`
+    is in -- but reading two of them and subtracting by hand is exactly the
+    step where a region ends up one corner's worth of pixels wrong, and a board
+    rect that is slightly off is not obviously off: detection still returns
+    tsums, just the wrong set. So this does the subtraction, and `--out` saves
+    the crop so the region can be looked at rather than trusted.
+    """
+    from .control.hotkey import resolve_vk
+    from .screen.capture import save_image
+    from .tools.snipper import wait_for_key
+
+    mark_vk = resolve_vk(args.key)
+    cancel_vk = resolve_vk("esc")
+    if mark_vk is None:
+        raise TTHeartError(f"Unknown key {args.key!r}")
+
+    ctx = app.build_context()
+    content = app.content_rect()
+    key_label = args.key.upper()
+    print(f"Content area: {content}")
+    print(f"Point at the TOP-LEFT corner of the region and press {key_label} "
+          f"(ESC to cancel).")
+    first = wait_for_key(mark_vk, cancel_vk=cancel_vk, timeout=300.0)
+    if first is None:
+        print("Cancelled.")
+        return 1
+    print(f"  top-left = {first}")
+
+    print(f"Now point at the BOTTOM-RIGHT corner and press {key_label}.")
+    second = wait_for_key(mark_vk, cancel_vk=cancel_vk, timeout=300.0)
+    if second is None:
+        print("Cancelled.")
+        return 1
+    print(f"  bottom-right = {second}")
+
+    outside = [p for p in (first, second) if not content.contains(p)]
+    if outside:
+        print(f"\nBoth corners have to be inside the emulator; {outside} "
+              f"{'is' if len(outside) == 1 else 'are'} outside {content}.")
+        return 1
+
+    x, y, w, h = corners_to_region(ctx.to_content(first), ctx.to_content(second))
+    if w < 2 or h < 2:
+        print(f"\nThat region is {w}x{h} -- mark two opposite corners, not the "
+              f"same point twice.")
+        return 1
+
+    print(f"\nRegion: {w}x{h} at content ({x}, {y})\n")
+    print(f"  --board {x},{y},{w},{h}\n")
+    print("Use it with any board reader, e.g.")
+    print(f"  python -m ttheart_sender.game.tsum assist --board {x},{y},{w},{h}")
+
+    if args.out:
+        region = Rect(content.left + x, content.top + y, w, h)
+        path = save_image(args.out, app.capture.grab(region))
+        print(f"\nWrote {path} -- check it is the region you meant.")
+    return 0
 
 
 def cmd_find(app: Application, args: argparse.Namespace) -> int:
@@ -445,7 +529,7 @@ def _count_steps(steps) -> int:
 
 #: Every subcommand name, used to detect "the user didn't pass one".
 _COMMANDS = {
-    "windows", "detect", "prepare", "shot", "snip", "point", "find",
+    "windows", "detect", "prepare", "shot", "snip", "point", "region", "find",
     "templates", "flows", "actions", "validate", "run", "play", "tray",
 }
 

@@ -7,6 +7,8 @@ description: Start a round from the main screen, play the board, clear the resul
 #   - run_flow: play
 #
 # and stop it at any time with the stop key (F12 by default).
+vars:
+  level_cap_found: false
 
 steps:
   # Clear anything left over from a previous round (the score tally, the High
@@ -43,6 +45,10 @@ steps:
       template: gameplay_footer
       timeout: 20
 
+  - wait_for:
+      template: go
+      timeout: 5
+
   # The round itself. It ends when the results screen appears; `duration` is
   # only the backstop for a round where that template never matches, so keep it
   # comfortably longer than a real round (60s, plus whatever FEVER adds).
@@ -60,12 +66,12 @@ steps:
   # tsum sitting bodily across the line did not count as blocking it. Raising
   # it rejects 6% more of the links a human drew and stops the crossings.
   - play_tsum:
-      duration: 90
-      until_found: timeup
+      duration: 300
+      until_found: [timeup, tsum_score, last_bonus, scoreboard]
       require_played: 1
       options:
         min_chain: 3
-        max_chain: 8
+        max_chain: 12
         link_px: 105
         block: 1.25
 
@@ -74,10 +80,21 @@ steps:
       timeout: 5
     optional: true
 
-  # An alternative ending, if `scoreboard` turns out to also match during play:
-  # stop on the timer instead by swapping the two lines above for
-  #   until_found: gameplay_clock_zero
-  # Check which one is safe with `python main.py find scoreboard` mid-round.
+  # `until_found` is only tested between drags, so a banner that is up for a
+  # second or two can come and go inside one drag and never be seen. Two
+  # endings are listed rather than one -- the loop stops on whichever it
+  # notices first, and `gameplay_clock_zero` is on screen for the run-up to
+  # `timeup` rather than for a moment. `duration` is still the last resort if
+  # both are missed.
+  #
+  # `scoreboard` would be a third, and it is the state the next step waits for
+  # anyway -- but only add it after checking it does NOT match mid-round with
+  # `python main.py find scoreboard` during play, or the round will end early.
+  - if_found:
+      template: raised_level_cap
+      timeout: 5
+      then:
+      - set: {level_cap_found: true}
 
   - wait_for:
       template: scoreboard

@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import logging
 import random
+import re
 import time
-from typing import Any, Dict, Optional
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 
@@ -114,6 +116,116 @@ def act_add(ctx: RunContext, params: Params) -> ActionResult:
 
     log.debug("%sadd %s -> %s", ctx.indent, amounts, totals)
     return ActionResult.ok(totals)
+
+
+#: Where :func:`act_time_gate` remembers the mark it last fired, when the step
+#: does not name a variable of its own. One gate per flag, so two gates can run
+#: side by side without treading on each other's history.
+TIME_GATE_STATE_SUFFIX = "_last_mark"
+
+
+def _minute_marks(value: Any, where: str) -> List[int]:
+    """The ``minutes:`` parameter as sorted, de-duplicated minutes of the hour.
+
+    A list is the natural way to write it in YAML, but ``--var
+    return_heart_minutes=15,50`` can only ever hand over a string, so a
+    separated string reads the same way.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        items: Sequence[Any] = [part for part in re.split(r"[,;\s]+", value.strip()) if part]
+    elif isinstance(value, (list, tuple)):
+        items = value
+    else:
+        items = [value]
+
+    marks = set()
+    for item in items:
+        try:
+            minute = int(round(float(item)))
+        except (TypeError, ValueError) as exc:
+            raise ActionError(f"{where}: {item!r} is not a minute of the hour") from exc
+        if not 0 <= minute <= 59:
+            raise ActionError(f"{where}: minute {minute} is outside 0-59")
+        marks.add(minute)
+    return sorted(marks)
+
+
+def _mark_at_or_before(now: datetime, marks: Sequence[int]) -> datetime:
+    """The most recent time one of ``marks`` came round, at or before ``now``."""
+    hour = now.replace(minute=0, second=0, microsecond=0)
+    passed = [minute for minute in marks if minute <= now.minute]
+    if passed:
+        return hour.replace(minute=passed[-1])
+    # None have come round yet this hour, so the last one was the final mark of
+    # the hour before.
+    return hour - timedelta(hours=1) + timedelta(minutes=marks[-1])
+
+
+def _mark_after(now: datetime, marks: Sequence[int]) -> datetime:
+    """The next time one of ``marks`` comes round. Only used for the log line."""
+    hour = now.replace(minute=0, second=0, microsecond=0)
+    upcoming = [minute for minute in marks if minute > now.minute]
+    if upcoming:
+        return hour.replace(minute=upcoming[0])
+    return hour + timedelta(hours=1, minutes=marks[0])
+
+
+@action("time_gate", primary="minutes", summary="Raise a flag when a minute of the hour comes round")
+def act_time_gate(ctx: RunContext, params: Params) -> ActionResult:
+    """Set ``save_as`` true on the first check after a minute-of-hour mark.
+
+    Built for a bot loop that has to do something on the clock rather than
+    every cycle -- `- time_gate: {minutes: [15, 50], save_as: send_heart_check}`
+    puts the flag up once at :15 and once at :50, whichever cycle happens to be
+    running when the minute goes by.
+
+    Marks that went by *before* the first check are treated as already handled:
+    a restart at 9:20pm waits for 9:50 instead of firing immediately, so
+    stopping and starting the bot cannot squeeze in extra rounds. Once armed,
+    the gate does catch up -- a cycle long enough to step over a mark still
+    raises the flag on the far side of it, just once.
+
+    Lowering the flag afterwards is the flow's job; this step only ever raises
+    it, so the branch that consumes it decides what "done" means.
+    """
+    marks = _minute_marks(params.raw("minutes"), params.step.location)
+    flag = params.string("save_as")
+    # Kept in a flow variable rather than on the action so that a re-entered
+    # flow (resume.yaml is called from launch.yaml) keeps its history.
+    state_key = params.string("state", f"{flag}{TIME_GATE_STATE_SUFFIX}")
+
+    if not marks:
+        # An empty schedule is "never", not an error: it is what an unset
+        # panel field or `--var minutes=` amounts to.
+        log.debug("%stime_gate has no marks; %s stays down", ctx.indent, flag)
+        ctx.set_var(flag, False)
+        return ActionResult.ok(False)
+
+    now = datetime.now()
+    current = _mark_at_or_before(now, marks).isoformat(timespec="minutes")
+    previous = ctx.variables.get(state_key)
+
+    if previous is None:
+        ctx.set_var(state_key, current)
+        ctx.set_var(flag, False)
+        log.info(
+            "%stime_gate armed at :%02d -- %s next at %s",
+            ctx.indent, now.minute, flag, _mark_after(now, marks).strftime("%H:%M"),
+        )
+        return ActionResult.ok(False)
+
+    hit = current != str(previous)
+    if hit:
+        ctx.set_var(state_key, current)
+        log.info("%stime_gate reached %s -- %s up", ctx.indent, current[-5:], flag)
+    else:
+        log.debug(
+            "%stime_gate waiting for %s", ctx.indent, _mark_after(now, marks).strftime("%H:%M")
+        )
+    ctx.set_var(flag, hit)
+    return ActionResult.ok(hit)
 
 
 @action("stop", primary="message", summary="End the flow early")

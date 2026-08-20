@@ -1,0 +1,47 @@
+name: unlock_tsum_level_cap
+description: Unlock tsum level
+
+steps:
+  - click: [456, 866]
+
+  - wait: 0.5
+
+  # change sort
+  - click: [452, 488]
+
+  - wait: 0.5
+
+  - click: [377, 510]
+
+  - wait: 0.35
+
+  # click close
+  - click: [276, 862]
+
+  # click bottom left
+  - click: [20, 967]
+
+  - wait: 0.2
+
+  # click first tsum
+  - click: [91, 575]
+
+  - wait: 0.2
+
+  # click lock
+  - click: [57, 414]
+
+  - wait: 0.35
+
+  # click ok
+  - find_click: {template: ok_button, timeout: 5}
+
+  - wait: 0.35
+
+  - find_click: {template: cap_raised, timeout: 5}
+
+  - wait: 0.5
+
+  - find_click:
+          template: back_button
+          timeout: 3

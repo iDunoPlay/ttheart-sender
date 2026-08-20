@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from ttheart_sender.config import Config, ConfigError, deep_merge, from_dict, load_config
@@ -48,3 +50,25 @@ def test_load_config_reads_file_and_local_overlay(tmp_path):
 def test_missing_config_file_falls_back_to_defaults(tmp_path):
     config = load_config(tmp_path)
     assert config.matching.confidence == 0.85
+
+
+def test_collected_samples_land_beside_the_exe_not_inside_the_bundle(tmp_path, monkeypatch):
+    """A one-file build unpacks into a temp dir that is wiped on exit.
+
+    Logs already dodge that; training data has to as well, or a session's
+    samples are deleted the moment the app closes and nobody notices until
+    they go looking for the folder to send.
+    """
+    exe_dir, bundle = tmp_path / "app", tmp_path / "_MEI"
+    exe_dir.mkdir()
+    bundle.mkdir()
+    (bundle / "config.yaml").write_text("dataset:\n  enabled: true\n", encoding="utf-8")
+
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(exe_dir / "ttheart-sender.exe"))
+    monkeypatch.setattr(sys, "_MEIPASS", str(bundle), raising=False)
+
+    config = load_config()
+
+    assert config.root == bundle.resolve(), "flows and templates still come from the bundle"
+    assert config.dataset_dir == exe_dir.resolve() / "dataset"

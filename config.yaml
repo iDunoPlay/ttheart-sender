@@ -75,3 +75,31 @@ runner:
   stop_on_cursor_exit: true  # stop if the cursor leaves the emulator window
   cursor_exit_margin: 16     # px of slack around the window before it trips
   max_iterations: 100000
+
+# Training samples for improving tsum detection. Off by default. When on, a
+# few drags per round save the board twice -- once as detection saw it, once
+# while the game highlights the tsums it counts as linkable -- into
+# `dataset/` next to the .exe. That highlight is the label, so the data
+# needs no annotating; zip a session folder to send it on.
+#
+# Check a collection before trusting it:  python -m ttheart_sender.game.tsum dataset
+# The first one ran all night and produced nothing usable, because the marks
+# were photographed before the game had drawn them. See docs/DATASET-FINDINGS.md.
+dataset:
+  enabled: false
+  dir: dataset
+  per_round: 20            # cap per round -- boards within one round are alike
+  every: 4                 # sample every Nth drag rather than the first N
+  quality: 85              # JPEG quality of the saved crops
+
+  # How the label itself is photographed. These are the collector's own, not
+  # `--hold-delay`: that one is paid on every drag and is tuned for speed.
+  delay: 0.25              # wait before reading the marks; below 0.15 they have not rendered
+  frames: 3                # only what changed in ALL of them counts as a mark
+  gap: 0.05                # seconds between those frames
+  max_motion: 12.0         # drop samples taken while the board was still falling. 0 = keep all
+
+  # Budgets over the whole dataset directory, not one session. There is no
+  # per-day cap: unattended, a night of play wrote 803MB / 5,729 samples.
+  max_mb: 2048             # stop collecting once the folder reaches this. 0 = no cap
+  max_total: 0             # or once it holds this many samples. 0 = no cap

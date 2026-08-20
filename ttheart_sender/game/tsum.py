@@ -58,10 +58,32 @@ DEFAULT_BOARD = (0.015, 0.245, 0.970, 0.565)  # x, y, w, h
 # the right one without the caller having to know or pass anything.
 LAYOUTS: dict[tuple[int, int], dict] = {
     (994, 578): {                       # live `main.py shot` of LDPlayer
-        "board": (8, 265, 522, 535),
+        # Two rects, and which one is used depends on FEVER -- see
+        # :class:`FeverWatch`.
+        #
+        # `board` is tight on the middle of the pile. Offline metrics prefer
+        # the wider rect below (median radius 22.9 vs 16.2 over 151 captured
+        # in-play frames, and a radius collapse below 12px on 13.9% of frames
+        # against 26.5%), because a rect that slices tsums at its edge makes
+        # them read smaller than they are and drags the radius estimate down.
+        # It is kept anyway: it plays better, which is the measure that counts,
+        # and those proxies say nothing about whether the chains found are ones
+        # worth dragging.
+        #
+        # `fever_board` is the rect FEVER borrows for its ~10s. It was
+        # re-measured with `main.py region` on 2026-08-19: it sits higher than
+        # `board` (the pile rides up under FEVER) and is inset at the sides.
+        # The metrics above were taken against the older, wider FEVER rect it
+        # replaces (8,265,522,535), so they no longer describe this one.
+        "board": (10, 314, 525, 456),
+        "fever_board": (22, 291, 502, 451),
         "base": "83,858,26",
     },
     (956, 542): {                       # saved screenshot, no emulator chrome
+        # Deliberately left at the full play area: it is a different capture
+        # geometry, and mapping the crop above onto it would be arithmetic on
+        # an unmeasured offset rather than a measurement. Re-run `region` on a
+        # saved screenshot if the labelled boards need to match.
         "board": (8, 258, 524, 505),
         "base": "76,830,26",
     },
@@ -70,6 +92,17 @@ LAYOUTS: dict[tuple[int, int], dict] = {
 
 def _layout(shape) -> dict:
     return LAYOUTS.get((shape[0], shape[1]), {})
+
+
+#: How long FEVER runs once the meter maxes out. The template only marks the
+#: moment it fills, so the state has to be held open for its duration.
+FEVER_SECONDS = 10.0
+
+#: `max_fever` is the meter at full, gold, an instant before FEVER starts.
+#: Measured over 151 captured frames it scores 0.79-0.82 on the three frames
+#: that really are the trigger and 0.66 on the next best, so the shipped 0.85
+#: default misses it and anything in 0.70-0.78 separates it cleanly.
+FEVER_CONFIDENCE = 0.75
 
 MIN_CHAIN = 3  # game rule: a chain of 3+ same tsums clears
 
@@ -512,7 +545,11 @@ def detect(
         opened = _mask(kind, open_px=max(1, int(round(radius * 0.18))))
         work.append((kind, _dt(opened, max_hole), radius * 0.62))
 
-    found: list[Tsum] = []
+    # Peak depth is carried beside each Tsum rather than read back off `t.r`,
+    # because `t.r` is clipped at the radius: every fully visible tsum ties
+    # there, and the sort below then falls back to insertion order -- i.e. to
+    # whichever cluster id k-means happened to number first.
+    found: list[tuple[float, Tsum]] = []
     reach = max(2, int(round(radius)))
     for kind, dt, floor in work:
         colour = _lab_to_bgr(centres[kind])
@@ -525,7 +562,7 @@ def detect(
                     # entirely in healed-in area, so there is no tsum here.
                     continue
                 cx, cy, score = snapped
-            found.append(Tsum(cx, cy, min(score, radius), kind, colour))
+            found.append((score, Tsum(cx, cy, min(score, radius), kind, colour)))
 
     # A blob can peak twice on one tsum (a highlight splits the mask, or a
     # loose peak floor finds two maxima on one face). Keep only the deepest
@@ -533,9 +570,26 @@ def detect(
     # that genuinely touch sit ~2.44r apart, so anything closer than 1.6r is
     # two readings of one tsum. Measured over 14 real boards, 1.6 removes every
     # impossible overlap (223 -> 0) while keeping 730 detections.
-    found.sort(key=lambda t: -t.r)
+    #
+    # Sorting on unclipped depth rather than on `t.r` scores identically over
+    # the ten labelled boards (f1 0.762 either way); it is here to make the
+    # winner of a collision follow from the evidence instead of from cluster
+    # numbering, which is not stable between fits.
+    #
+    # DO NOT normalise depth per kind before this sort. An external HSV-window
+    # reader found it had to -- its hand-authored windows nest, so a window
+    # that is a superset of another scores higher on the narrow character's own
+    # sprites and wins every collision, erasing that character board-wide. That
+    # failure cannot happen here: k-means centres partition colour space, so no
+    # cluster is a superset of another and depth is already comparable. Ported
+    # over anyway and measured, it is a straight loss -- f1 0.762 -> 0.748 as a
+    # global sort key, and 0.762 -> 0.749 restricted to colliding pairs of
+    # different kinds. It lifts every peak of a shallow cluster, and the
+    # shallow clusters are mostly the spurious ones, so phantoms take slots off
+    # real tsums (boards 4 and 5 lost 4 real detections each).
+    found.sort(key=lambda p: -p[0])
     kept: list[Tsum] = []
-    for t in found:
+    for _, t in found:
         if all((t.x - o.x) ** 2 + (t.y - o.y) ** 2 > (radius * 1.6) ** 2 for o in kept):
             kept.append(t)
 
@@ -1044,10 +1098,16 @@ def synth(width: int = 540, height: int = 960, count: int = 46, seed: int = 7,
 _LABEL_MODES = ("path", "missed", "false", "group")
 
 
-def _board_rect(shape, spec: Optional[str]):
+def _board_rect(shape, spec: Optional[str], *, fever: bool = False):
+    """The play area for this frame. `fever` picks the wider FEVER rect.
+
+    An explicit `spec` always wins, FEVER or not: someone who passed `--board`
+    asked for that rect and swapping it underneath them would be surprising.
+    """
     h, w = shape[:2]
     if spec is None:
-        measured = _layout(shape).get("board")
+        layout = _layout(shape)
+        measured = (layout.get("fever_board") if fever else None) or layout.get("board")
         if measured:
             return measured
         f = DEFAULT_BOARD
@@ -1069,8 +1129,19 @@ class PlayReport:
     """
 
     played: int = 0
-    #: Total tsums in chains that verifiably cleared. The throughput number.
+    #: Total tsums dragged through. Not a result: with the clear check off it
+    #: is the length of the chains proposed, and the game rejects some of them
+    #: outright -- a 3-chain it only marks two of pops nothing at all.
+    dragged: int = 0
+    #: Tsums seen to leave the board, and only ever set when `--verify-clears`
+    #: measured it. The throughput number, when there is one.
     cleared: int = 0
+    #: Was `cleared` measured at all? Without this a quiet 0 reads as a round
+    #: that cleared nothing rather than one that never looked.
+    checked: bool = False
+    #: Drags the emulator registered but the game refused to clear -- the
+    #: chain was not really one character. `--verify-clears` only.
+    rejected: int = 0
     #: Drags that ran but changed nothing -- the cost of an over-permissive
     #: link rule, and the half a positive-only label set cannot measure.
     stalled: int = 0
@@ -1086,14 +1157,87 @@ class PlayReport:
     stopped: bool = False
 
     def describe(self) -> str:
-        chains = f"played {self.played} chains, cleared {self.cleared} tsums"
+        chains = f"played {self.played} chains, dragged {self.dragged} tsums"
         if self.played:
-            chains += f" (mean {self.cleared / self.played:.1f}/chain)"
+            chains += f" (mean {self.dragged / self.played:.1f}/chain)"
+        if self.checked:
+            # The two numbers are worth seeing together: the gap between them
+            # is the waste, and it is the only figure here worth tuning for.
+            share = f" ({100 * self.cleared / self.dragged:.0f}%)" if self.dragged else ""
+            chains += f", cleared {self.cleared}{share}"
         out = f"{chains}, {self.stalled} drag(s) did not register"
+        if self.rejected:
+            out += f", {self.rejected} the game would not accept"
         if self.trimmed or self.abandoned:
             out += (f"; the game trimmed {self.trimmed} member(s) and rejected "
                     f"{self.abandoned} chain(s) outright")
         return out
+
+
+class FeverWatch:
+    """Is FEVER running right now?
+
+    FEVER repaints the board and animates it for about ten seconds, and it is
+    the state the detector reads worst -- so it is worth knowing about, and
+    worth reading from the game rather than inferred from detection going
+    wrong. The `max_fever` template is the meter at full, gold, an instant
+    before FEVER starts: a *trigger*, visible for a moment, not a state that
+    can be tested for while it lasts. So a match opens a window and the window
+    is what everything else asks about.
+
+    Degrades to "never FEVER" when the template is missing, which keeps this
+    optional rather than a new hard dependency for anyone whose `templates/`
+    predates it.
+    """
+
+    def __init__(self, matcher, templates, *, seconds: float = FEVER_SECONDS,
+                 confidence: float = FEVER_CONFIDENCE,
+                 name: str = "max_fever", clock=time.monotonic) -> None:
+        self.matcher = matcher
+        self.seconds = seconds
+        self.confidence = confidence
+        self.clock = clock
+        self._until = 0.0
+        self._was = False
+        try:
+            self.template = templates.get(name)
+        except Exception:  # noqa: BLE001 - a missing template is not an error here
+            log.debug("no %s template; FEVER tracking disabled", name)
+            self.template = None
+
+    @property
+    def enabled(self) -> bool:
+        return self.template is not None
+
+    def update(self, frame) -> bool:
+        """Look at one frame; return whether FEVER is running as of now.
+
+        Re-arms on every match rather than only on the first. The meter stays
+        full for several frames as it fills, and each of those pushes the
+        deadline out -- which is right, because FEVER has not started counting
+        down until the bar actually starts draining.
+        """
+        if self.template is None:
+            return False
+        if self.matcher.find(frame, self.template, confidence=self.confidence):
+            self._until = self.clock() + self.seconds
+        return self.active
+
+    @property
+    def active(self) -> bool:
+        return self.clock() < self._until
+
+    def took_effect(self) -> Optional[str]:
+        """"fever"/"normal" the first time the state flips, else None.
+
+        Lets a caller log the transition and drop cached state without keeping
+        its own copy of the previous value.
+        """
+        now = self.active
+        if now == self._was:
+            return None
+        self._was = now
+        return "fever" if now else "normal"
 
 
 @dataclass
@@ -1178,9 +1322,47 @@ def drag_chain(points: Sequence[tuple[int, int]], *, step_px: float = 8.0,
         pyautogui.mouseUp()
 
 
+def cleared_by_drag(before_crop: np.ndarray, after_crop: np.ndarray,
+                    tsums: Sequence[Tsum], nodes: Sequence[int], *,
+                    tol: float) -> tuple[list[int], list[float], float]:
+    """Which of the dragged tsums are actually gone?
+
+    The whole-crop diff `--verify` uses answers a different question -- did
+    the emulator see the stroke at all -- and cannot answer this one, because
+    a live board animates. The score counter ticks, the timer runs, the FEVER
+    meter fills and idle tsums jiggle, so the mean across the crop clears
+    `--change-tol` whether or not anything popped.
+
+    Looking only where the chain was is what separates the two. A tsum that
+    cleared is replaced by whatever falls into its place, which is a large
+    change inside its own disk; a tsum that merely jiggled is still the same
+    face in nearly the same spot.
+
+    Returns the members that changed, their per-disk means, and the median
+    over the tsums that were *not* dragged -- the board's own idle noise, so a
+    reading always carries the yardstick it should be judged against.
+    """
+    diff = cv2.absdiff(after_crop, before_crop).max(axis=2)
+    radius = max(2, int(min(t.r for t in tsums) * 0.55))
+
+    def _disk(t: Tsum) -> float:
+        mask = np.zeros(diff.shape, np.uint8)
+        cv2.circle(mask, (int(t.x), int(t.y)), radius, 1, -1)
+        return float(diff[mask.astype(bool)].mean())
+
+    chain = set(nodes)
+    values = [_disk(tsums[n]) for n in nodes]
+    idle = [_disk(t) for i, t in enumerate(tsums) if i not in chain]
+    baseline = float(np.median(idle)) if idle else 0.0
+    gone = [n for n, value in zip(nodes, values) if value > tol]
+    return gone, values, baseline
+
+
 def marked_by_game(drv, before_crop: np.ndarray, board: tuple, tsums: Sequence[Tsum],
                    nodes: Sequence[int], *, delay: float, threshold: float,
-                   aura: float) -> list[int]:
+                   aura: float, out: Optional[dict] = None,
+                   frames: int = 1, gap: float = 0.0,
+                   floor_mult: float = 0.0) -> list[int]:
     """Of a chain's members, which ones did the game light up?
 
     Holding a tsum makes the game mark everything you can link to it -- both
@@ -1195,25 +1377,212 @@ def marked_by_game(drv, before_crop: np.ndarray, board: tuple, tsums: Sequence[T
     any case. Only distant members are ever dropped, which makes this a
     conservative trim: it removes the long reaches that the guesswork gets
     wrong, and never second-guesses the near ones.
+
+    Two things decide whether the answer is worth anything, and both default
+    to what ``--verify-hold`` can afford rather than to what reads best:
+
+    * `delay` under ~0.15s photographs the board before the game has drawn the
+      highlight. ``--verify-hold`` runs at 0.10 on purpose -- it pays this on
+      every drag -- and the sample collector, which pays on one drag in four,
+      does not and should not.
+    * `frames` of 1 diffs against a board that is still moving. Reading
+      several and keeping only what changed in *all* of them is the same
+      defence :func:`marks_on_board` takes, for the same reason: a mark is
+      present in every frame of the hold, a settling tsum is somewhere else by
+      the next one.
+
+    `out` receives the reading as well as the frame -- `values` per tsum,
+    the `baseline` of idle motion they should be judged against, and the
+    `marked` indices over the whole board. A caller that only wants to trim a
+    chain can ignore it; the collector writes it down, because a sample whose
+    baseline swamps its marks is one that has to be thrown away rather than
+    trained on.
     """
     bx, by, bw, bh = board
     time.sleep(delay)
-    crop = drv.grab()[by:by + bh, bx:bx + bw]
-    diff = cv2.absdiff(crop, before_crop).max(axis=2)
+    grabs = [drv.grab()[by:by + bh, bx:bx + bw]]
+    for _ in range(max(0, frames - 1)):
+        if gap:
+            time.sleep(gap)
+        grabs.append(drv.grab()[by:by + bh, bx:bx + bw])
+    crop = grabs[0]
+    diff = np.minimum.reduce(
+        [cv2.absdiff(g, before_crop) for g in grabs]).max(axis=2)
 
     head = tsums[nodes[0]]
     r = max(2, int(min(t.r for t in tsums) * 0.55))
+
+    def _disk(t: Tsum) -> float:
+        m = np.zeros(diff.shape, np.uint8)
+        cv2.circle(m, (int(t.x), int(t.y)), r, 1, -1)
+        return float(diff[m.astype(bool)].mean())
+
+    values = [_disk(t) for t in tsums]
+    # The board's own idle jiggle, measured off the tsums this stroke is not
+    # touching -- the same yardstick `cleared_by_drag` reports, and the one
+    # thing that says whether a reading over `threshold` means anything.
+    chain = set(nodes)
+    idle = [v for i, v in enumerate(values) if i not in chain]
+    baseline = float(np.median(idle)) if idle else 0.0
+
+    # A mark has to clear the board's own floor, not just a fixed number.
+    # Measured with `hold` on four boards, the game's marks land 8x to 25x
+    # above the median untouched tsum -- 61-65 against a floor of 7.5, 95
+    # against 3.8, 167 against 6.8. The fixed 8.0 sits *inside* that floor's
+    # noise on a live board and admitted 23 to 35 tsums per press, which is
+    # why every reading looked like half the board. `floor_mult` of 0 keeps
+    # the old fixed behaviour for `--verify-hold`, whose A/B was measured
+    # under it.
+    bar = max(threshold, floor_mult * baseline) if floor_mult else threshold
+
     keep = [nodes[0]]
     for n in nodes[1:]:
         t = tsums[n]
         if math.hypot(t.x - head.x, t.y - head.y) <= aura:
             keep.append(n)
             continue
+        if values[n] > bar:
+            keep.append(n)
+
+    # The marked frame is the only record of the game's answer, and it is gone
+    # a moment later. `out` hands it to a caller that wants to keep it (the
+    # sample collector) without this function knowing what a dataset is.
+    if out is not None:
+        out["marked_frame"] = crop
+        out["values"] = values
+        out["baseline"] = baseline
+        out["bar"] = bar
+        out["marked"] = [i for i, v in enumerate(values)
+                         if v > bar and i != nodes[0]]
+    return keep
+
+
+# --------------------------------------------------------------------------
+# assist: the user presses, we read the marks and walk the path
+# --------------------------------------------------------------------------
+_VK_LBUTTON = 0x01
+
+#: The sample collector default, quoted by `hold` when it suggests a new one.
+DATASET_DELAY = 0.25
+
+
+def _lbutton_down() -> bool:
+    """Is the left mouse button physically down right now?
+
+    Polled rather than hooked. A press the user makes lands on the emulator and
+    is never delivered to this process, so there is no event to listen for --
+    and ``GetAsyncKeyState`` is already how
+    :mod:`ttheart_sender.control.hotkey` reads the stop key, so nothing new is
+    being relied on here.
+    """
+    import ctypes
+
+    return bool(ctypes.windll.user32.GetAsyncKeyState(_VK_LBUTTON) & 0x8000)
+
+
+def marks_on_board(before_crop: np.ndarray, held, tsums: Sequence[Tsum],
+                   radius: float, *, pressed: int, threshold: float, aura: float):
+    """Every tsum the game lit up while `pressed` was held.
+
+    `held` is one frame from during the hold, or several. Several is worth the
+    milliseconds whenever anything on the board moves by itself: a mark is
+    present in *every* frame of the hold, while a FEVER sparkle, a popping
+    bubble or a still-settling tsum is somewhere else by the next one. Taking
+    the per-pixel *minimum* of the differences keeps only what persisted.
+
+    Measured on six boards with 45 moving sparkles painted over them: one frame
+    reports 10.7 false marks on average, two reports 0.7, three reports none,
+    and the real marks survive all three unchanged.
+
+    The board-wide counterpart to :func:`marked_by_game`. That one re-checks
+    the members of a chain this module already proposed, so its risky move is
+    *dropping* a member and it keeps anything under the glow regardless. Here
+    the game is the only source of the chain -- nothing was guessed first -- so
+    the risky move is the opposite one, adding a tsum the game never marked,
+    and a reaction under the glow has to clear the same threshold as any other.
+
+    Returns ``(hits, aura_only, diff)``. `aura_only` are hits close enough to
+    the press that the glow alone could explain them (it washes over ~90px and
+    that is where the warthog false positive in ``hold`` came from). They are
+    still returned as hits, because dragging over a tsum the game will not
+    accept costs a detour rather than a broken chain -- but they are counted
+    separately so a bad reading shows up in the report instead of silently
+    steering the path.
+    """
+    frames = [held] if isinstance(held, np.ndarray) else list(held)
+    diff = np.minimum.reduce(
+        [cv2.absdiff(f, before_crop) for f in frames]).max(axis=2)
+    r = max(2, int(radius * 0.5))
+    head = tsums[pressed]
+    hits: list[int] = []
+    aura_only: list[int] = []
+    for i, t in enumerate(tsums):
+        if i == pressed:
+            continue
         m = np.zeros(diff.shape, np.uint8)
         cv2.circle(m, (int(t.x), int(t.y)), r, 1, -1)
-        if float(diff[m.astype(bool)].mean()) > threshold:
-            keep.append(n)
-    return keep
+        if float(diff[m.astype(bool)].mean()) <= threshold:
+            continue
+        hits.append(i)
+        if math.hypot(t.x - head.x, t.y - head.y) <= aura:
+            aura_only.append(i)
+    return hits, aura_only, diff
+
+
+def tour_from(start: int, members: Sequence[int], tsums: Sequence[Tsum]) -> list[int]:
+    """Greedy nearest-neighbour order that is forced to begin at `start`.
+
+    Neither existing router will do when a finger is already on a tsum:
+    :func:`_nearest_neighbor_tour` chooses its own start, and
+    :func:`orient_chain` may reverse the result to shorten the opening hop.
+    Both are free choices only while nothing is being touched yet.
+    """
+    remaining = set(members) - {start}
+    order = [start]
+    while remaining:
+        last = tsums[order[-1]]
+        nxt = min(remaining,
+                  key=lambda i: (tsums[i].x - last.x) ** 2 + (tsums[i].y - last.y) ** 2)
+        order.append(nxt)
+        remaining.remove(nxt)
+    return order
+
+
+def walk_path(points: Sequence[tuple[int, int]], *, step_px: float = 8.0,
+              per_step: float = 0.004,
+              still_down: Optional[Callable[[], bool]] = None,
+              check_stop: Optional[Callable[[], None]] = None) -> int:
+    """Move the cursor through `points` without ever pressing or releasing.
+
+    :func:`drag_chain` owns a whole stroke -- press, walk, release. This is the
+    middle third alone, for when the *user's* finger is what holds the button
+    down. Windows carries the physical button state in the move messages a
+    cursor warp generates, so the emulator sees touch movement with the button
+    still held, exactly as it does when ``drag_chain`` pressed it itself.
+
+    Same ~8px stepping and for the same reason: the chain is built from what
+    the touch passes over, and a jump straight to the next tsum would teleport
+    past everything in between.
+
+    Returns the number of legs completed. It stops early when `still_down`
+    goes false -- the user let go mid-path, and every further move would be a
+    bare hover starting nothing.
+    """
+    import pyautogui
+
+    pyautogui.PAUSE = 0.0
+    walked = 0
+    for (x0, y0), (x1, y1) in zip(points, points[1:]):
+        steps = max(1, int(math.hypot(x1 - x0, y1 - y0) / step_px))
+        for s in range(1, steps + 1):
+            if check_stop is not None:
+                check_stop()
+            if still_down is not None and not still_down():
+                return walked
+            pyautogui.moveTo(x0 + (x1 - x0) * s / steps, y0 + (y1 - y0) * s / steps)
+            time.sleep(per_step)
+        walked += 1
+    return walked
 
 
 def _settle(drv: Driver, *, max_wait: float, tol: float = 2.5):
@@ -1353,6 +1722,35 @@ def _pop_bubbles(drv: Driver, frame, templates: Sequence, confidence: float,
     return popped
 
 
+def _open_dataset(opts, say):
+    """Build the sample collector for this round, or None.
+
+    Kept out of `play_loop` so a missing or unwritable directory is a message
+    and a round played normally, never a round that does not happen.
+    """
+    directory = getattr(opts, "dataset", "")
+    if not directory:
+        return None
+    from .dataset import DatasetWriter
+
+    writer = DatasetWriter(Path(directory),
+                           per_round=getattr(opts, "dataset_limit", 20),
+                           every=getattr(opts, "dataset_every", 4),
+                           quality=getattr(opts, "dataset_quality", 85),
+                           delay=getattr(opts, "dataset_delay", 0.25),
+                           frames=getattr(opts, "dataset_frames", 3),
+                           gap=getattr(opts, "dataset_gap", 0.05),
+                           floor_mult=getattr(opts, "dataset_floor_mult", 5.0),
+                           max_motion=getattr(opts, "dataset_max_motion", 12.0),
+                           max_mb=getattr(opts, "dataset_max_mb", 2048.0),
+                           max_total=getattr(opts, "dataset_total", 0))
+    if not writer.enabled:
+        return None
+    say(f"collecting up to {writer.per_round} detection sample(s) this round "
+        f"({writer.frames} frame(s) at +{writer.delay:.2f}s)")
+    return writer
+
+
 def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "PlayReport":
     """Grab the board, pick the best chain, drag it -- once, or on a loop.
 
@@ -1376,7 +1774,11 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
     # tsums in play don't change mid-game, so it's fit once and reused. Same for
     # the radius and the base-tsum lookup.
     palette, radius, base = None, opts.radius, None
+    fever = FeverWatch(drv.matcher, drv.templates)
+    if not fever.enabled:
+        say("no max_fever template -- FEVER will be played on the normal board rect")
     played = misses = stalls = 0
+    samples = _open_dataset(opts, say)
     # Rolling window of "which chain did we just play". A board that keeps
     # offering the same handful of chains is a board nothing is clearing on --
     # see the loop-detection check below.
@@ -1427,7 +1829,17 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
                     say(f"    popped {what}")
                     frame = _settle(drv, max_wait=opts.settle)
 
-            bx, by, bw, bh = _board_rect(frame.shape, opts.board)
+            # The board rect is not fixed: FEVER gets the wider one. Cached
+            # palette, radius and base all belong to the rect they were fitted
+            # on, so a switch throws them away rather than reading the new crop
+            # through the old crop's colours.
+            fever.update(frame)
+            flipped = fever.took_effect()
+            if flipped:
+                say(f"    {flipped.upper()} -- board rect now "
+                    f"{_board_rect(frame.shape, opts.board, fever=fever.active)}")
+                palette, radius, base = None, opts.radius, None
+            bx, by, bw, bh = _board_rect(frame.shape, opts.board, fever=fever.active)
             crop = frame[by:by + bh, bx:bx + bw]
 
             t0 = time.perf_counter()
@@ -1514,7 +1926,6 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
                     skip_kinds.clear()
                     misses = 0
                 continue
-            misses = 0
 
             # Last gate before committing to a drag: make sure every stop in
             # this chain really is the same character. A single misclassified
@@ -1628,11 +2039,51 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
             probe: dict = {}
 
             def _ask_the_game():
-                """Trim the chain to what the game marks, while it is held."""
-                kept = marked_by_game(drv, before, (bx, by, bw, bh), tsums,
-                                      best.nodes, delay=opts.hold_delay,
-                                      threshold=opts.hold_threshold,
-                                      aura=opts.hold_aura)
+                """Read what the game marks while the first tsum is held.
+
+                Two callers, one capture. `--verify-hold` uses the answer to
+                trim the stroke; the sample collector wants the frame it was
+                read from. Either alone is reason enough to press and look,
+                so with only `--dataset` on, the marks are recorded and the
+                chain is dragged exactly as proposed.
+                """
+                seen: dict = {}
+                # A sampled drag reads the mark the collector's way -- long
+                # enough for the game to have drawn it, and more than once, so
+                # motion does not pass for a highlight. `--verify-hold` alone
+                # keeps its own faster, blinder read: it pays on every drag,
+                # and that cost is the reason it is tuned the way it is.
+                collecting = samples is not None and sampling
+                kept = marked_by_game(
+                    drv, before, (bx, by, bw, bh), tsums, best.nodes,
+                    delay=samples.delay if collecting else opts.hold_delay,
+                    threshold=opts.hold_threshold, aura=opts.hold_aura,
+                    frames=samples.frames if collecting else 1,
+                    gap=samples.gap if collecting else 0.0,
+                    floor_mult=samples.floor_mult if collecting else 0.0,
+                    out=seen)
+                if collecting:
+                    samples.record(
+                        before, seen.get("marked_frame"), reading=seen,
+                        board=(bx, by, bw, bh),
+                        radius=radius, tsums=tsums, head=best.nodes[0],
+                        proposed=best.nodes, kept=kept, fever=fever.active,
+                        options={"k": opts.k, "scale": opts.scale,
+                                 "link_px": opts.link_px, "block": opts.block,
+                                 "mode": opts.mode, "purity": opts.purity,
+                                 "min_chain": opts.min_chain,
+                                 "max_chain": opts.max_chain,
+                                 # The play settings in force, for context.
+                                 # What the *label* was photographed with is
+                                 # under "capture" -- a sampled drag reads the
+                                 # mark on the collector's terms, not these.
+                                 "hold_delay": opts.hold_delay,
+                                 "hold_threshold": opts.hold_threshold,
+                                 "hold_aura": opts.hold_aura},
+                    )
+                if not opts.verify_hold:
+                    # Collection must not change how the round is played.
+                    return screen
                 probe["dropped"] = len(best.nodes) - len(kept)
                 probe["kept"] = len(kept)
                 if len(kept) < opts.min_chain:
@@ -1644,8 +2095,11 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
                                           by + tsums[best.nodes[0]].y)]
                 return [drv.to_screen(bx + tsums[i].x, by + tsums[i].y) for i in kept]
 
+            sampling = samples is not None and samples.wants()
+            if samples is not None:
+                samples.seen_drag()
             drag_chain(screen, step_px=opts.step_px, per_step=per_step, hold=opts.hold,
-                       after_press=_ask_the_game if opts.verify_hold else None)
+                       after_press=_ask_the_game if (opts.verify_hold or sampling) else None)
 
             if probe.get("abandoned"):
                 misses += 1
@@ -1723,10 +2177,39 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
                 stalls = 0
                 skip_kinds.clear()
 
+                if opts.verify_clears:
+                    # The stroke registered -- the board moved. Whether these
+                    # particular tsums went is a separate question, and this
+                    # is the only place with the frames to answer it.
+                    gone, values, idle = cleared_by_drag(
+                        before, after, tsums, best.nodes, tol=opts.clear_tol)
+                    report.checked = True
+                    report.cleared += len(gone)
+                    say(f"    popped {len(gone)}/{len(best.nodes)} "
+                        f"({'/'.join(f'{v:.0f}' for v in values)} vs idle {idle:.0f})")
+                    if not gone:
+                        # Not a stall: the drag was delivered and the game
+                        # declined it, which is a misread chain rather than a
+                        # missed stroke -- so blacklist the kind and leave the
+                        # drag speed alone.
+                        report.rejected += 1
+                        skip_kinds.add(best.kind)
+
+            # `misses` is a streak of frames that produced nothing draggable,
+            # and it clears here rather than anywhere earlier: every way of
+            # ending up with nothing -- no chain, every chain impure, a drag
+            # the game refused -- has to feed the same counter, or a board
+            # that fails at a later gate than the one being counted keeps
+            # resetting it and max_misses is never reached. That is exactly
+            # what a purity-fail streak did: chains existed, so the counter
+            # was cleared, so the shuffle that would have un-stuck the board
+            # never fired.
+            misses = 0
             played += 1
             # What was dragged, not what was proposed: with --verify-hold the
-            # chain may have been trimmed after the press.
-            report.cleared += probe.get("kept", len(best))
+            # chain may have been trimmed after the press. Still not a count
+            # of what cleared -- see `PlayReport.dragged`.
+            report.dragged += probe.get("kept", len(best))
 
             if deadline is None:
                 report.reason = "one chain played"
@@ -1742,6 +2225,13 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
         report.played, report.stopped = played, True
         say(f"stopped -- {report.describe()}")
         raise
+    finally:
+        # An aborted round's samples are as good as a finished one's, so the
+        # file is closed on every way out rather than only the tidy one.
+        if samples is not None:
+            samples.close()
+            if samples.summary():
+                say(samples.summary())
 
     report.played = played
     say(report.describe())
@@ -1983,6 +2473,24 @@ def _hold(args) -> int:
         app.close()
         raise SystemExit("no tsums detected -- is a round actually running?")
 
+    # The gate `play_loop` has always had, and this probe did not. A frame
+    # detection reads badly does not announce itself: one run here found 134
+    # tsums at r~12px on a board whose tsums are ~28px, pressed a phantom
+    # sitting on bare water, and -- because a press that lands on nothing
+    # changes nothing -- reported that the game marks nothing and that the
+    # whole approach was closed. `play` would have thrown that same frame away
+    # untouched (134 is past its --max-tsums of 110). Refusing here is not a
+    # detection fix; it is refusing to draw conclusions from a frame that was
+    # never read properly.
+    if not (args.min_tsums <= len(tsums) <= args.max_tsums):
+        app.close()
+        raise SystemExit(
+            f"{len(tsums)} tsums at r~{radius:.1f}px is not a board detection "
+            f"can read\n(expected {args.min_tsums}-{args.max_tsums}). Anything "
+            f"pressed on this frame would be a\nphantom, so nothing it reported "
+            f"would mean anything. Re-run -- and if it keeps\nhappening on this "
+            f"board, `analyze` a saved frame and try another -k.")
+
     # Refuse to press a board that is still moving: every reading would be the
     # pile shifting rather than anything the press did, which is precisely how
     # the previous run produced a boardful of false highlights.
@@ -2020,6 +2528,28 @@ def _hold(args) -> int:
 
     sx, sy = int(rect.left + bx + pick.x), int(rect.top + by + pick.y)
     print(f"{len(tsums)} tsums, r~{radius:.1f}px, board still (drift {drift:.2f})")
+
+    # The count gate above catches a frame read catastrophically badly. It
+    # does not catch one read merely badly: 101 tsums at r~15px passed it, and
+    # those detections were two or three per real tsum. The tell is a high
+    # count *and* a radius the count cannot support -- tsums fill the board,
+    # so n of them imply a size, and detections much smaller are fragments.
+    #
+    # Both halves are needed. On radius alone this fired on a perfectly good
+    # 50-tsum board that happened to read 22.6px where another frame of the
+    # same board read 27.3px; frame-to-frame radius wobbles by that much
+    # without anything being wrong. A real board holds ~50-70 tsums, so it is
+    # the count that says "split", and the radius only confirms it.
+    #
+    # A warning rather than a refusal: calibrated on five frames, which is
+    # enough to flag one and not enough to discard one.
+    implied = math.sqrt(0.7 * bw * bh / (len(tsums) * math.pi))
+    if len(tsums) > 75 and radius < 0.75 * implied:
+        print(f"  WARNING: {len(tsums)} tsums is already more than a board holds, "
+              f"and that many\n  would measure ~{implied:.0f}px, not {radius:.1f}px. "
+              f"Detection is probably splitting each\n  tsum into several, so the "
+              f"one it presses may be a fragment and the partners\n  it predicts "
+              f"may be fragments too.")
     if expect:
         print(f"we think {len(expect)} tsums share its character: "
               f"{', '.join(f'({tsums[i].x:.0f},{tsums[i].y:.0f})' for i in expect)}")
@@ -2050,17 +2580,30 @@ def _hold(args) -> int:
 
     pyautogui.moveTo(sx, sy)
     time.sleep(0.05)
+    # The clock starts at mouseDown, which is when the game learns about the
+    # press -- not after the wiggle below. Starting it after cost ~0.1s of
+    # unmeasured time and made every onset read as "+0.00s, already at peak",
+    # which is indistinguishable from a contaminated baseline. It is the same
+    # instant `--hold-delay` and `dataset.delay` are counted from, so the
+    # number transfers to them directly.
+    t0 = time.perf_counter()
     pyautogui.mouseDown()
     shots = []
+    stamps = []
     try:
+        # The wiggle is what makes the emulator flush the touch-down at all --
+        # a press with no motion behind it never registers -- so it is part of
+        # delivering the press, and the ~0.08s it takes is time the game has
+        # already had.
         for dx in (1, 0, -1, 0):
             pyautogui.moveTo(sx + dx, sy)
             time.sleep(0.02)
         # Sample throughout rather than once at the end: a highlight that
         # animates in, or one that shows briefly and stops, would be missed by
         # a single grab timed badly.
-        deadline = time.perf_counter() + args.hold
+        deadline = t0 + args.hold
         while time.perf_counter() < deadline:
+            stamps.append(time.perf_counter() - t0)
             shots.append(app.capture.grab(rect))
             time.sleep(0.1)
     finally:
@@ -2112,32 +2655,436 @@ def _hold(args) -> int:
     lit = sum(1 for c in others if c > args.threshold)
     print(f"{lit} other tsum(s) changed by more than {args.threshold}")
 
-    # The one comparison that settles it. If the game marks matches, the tsums
-    # we predicted share the character should react and the rest should not.
-    if expect and len(expect) > 1:
+    # Before anything is concluded about marking: did the press land at all?
+    #
+    # Pressing a real tsum makes the game draw a chain counter on it, so a
+    # pressed tsum that did not change is a press that went nowhere -- and a
+    # run that pressed nothing cannot say whether the game marks. This check
+    # used to be missing, and its absence was not harmless: a run that pressed
+    # bare water between two tsums (detection had offered a phantom there,
+    # among 134 detections at r~12px on a board whose tsums are ~28px)
+    # reported "the pressed tsum reacted and its predicted partners did not"
+    # and declared the whole approach closed. Every word of that was wrong --
+    # the pressed tsum had read 0.0, and nine other tsums had reacted at
+    # 112-124 against a board median of 0.0.
+    if pressed <= args.threshold:
+        print(f"\n-> INCONCLUSIVE: the press did not land. Nothing changed where "
+              f"we pressed\n   ({pressed:.1f}), and a real press draws a chain "
+              f"counter on the tsum it hits.")
+        if lit:
+            print(f"   {lit} other tsum(s) DID react (up to {others[0]:.1f}) -- see "
+                  f"hold_diff.png. That is\n   something the game drew, but not an "
+                  f"answer to this press.")
+        if len(tsums) > 90 or radius < 15:
+            print(f"   Likely cause: detection is over-splitting. {len(tsums)} "
+                  f"detections at r~{radius:.1f}px\n   is roughly double what a real "
+                  f"board holds, so the tsum it picked was a\n   phantom sitting on "
+                  f"background. Fix detection on this board first --\n   `analyze` "
+                  f"the saved frame and check the count and radius look sane.")
+        print("   Re-run once a press actually registers.")
+    else:
+        # Read the game's answer off the board first, and only then ask how
+        # well the clustering predicted it. The two questions were tangled
+        # here, and the tangle gave a wrong verdict: with five predicted
+        # partners of which one was real, the *median* partner reaction was
+        # 2.1 against a board floor of 3.8, so a press that lit exactly one
+        # tsum at 94.7 out of a still board was reported as "motion, not
+        # marking". The clustering being wrong is the finding, not a reason to
+        # disbelieve the mark.
+        #
+        # So: the floor is the board's own median, the bar is well clear of
+        # it, and whatever clears the bar is what the game drew. That reading
+        # does not care whether `expect` was any good.
         idx = tsums.index(pick)
-        partners = [changes[i] for i in expect if i != idx]
-        rest = [c for i, c in enumerate(changes) if i != idx and i not in expect]
-        print(f"\npredicted partners ({len(partners)}): "
-              f"{', '.join(f'{c:.1f}' for c in partners)}")
-        print(f"everything else: median {np.median(rest):.1f}, "
-              f"max {max(rest):.1f}" if rest else "everything else: none")
-        hot_partners = sum(1 for c in partners if c > args.threshold)
-        if hot_partners and rest and np.median(partners) > 3 * max(1.0, np.median(rest)):
-            print(f"-> {hot_partners}/{len(partners)} predicted partners reacted and "
-                  f"the rest of the board did not. The game IS marking matches, and "
-                  f"that mark is character ground truth worth reading.")
-        elif hot_partners:
-            print(f"-> {hot_partners} partners reacted, but so did the rest of the "
-                  f"board -- that is motion, not marking. Re-run on a stiller board.")
+        rest_all = [(i, c) for i, c in enumerate(changes) if i != idx]
+        floor = float(np.median([c for _, c in rest_all]))
+        bar = max(args.threshold, 5 * floor)
+        marked = [i for i, c in rest_all if c > bar]
+        share = len(marked) / max(1, len(rest_all))
+        if expect:
+            print(f"\npredicted partners: "
+                  f"{', '.join(f'{changes[i]:.1f}' for i in expect if i != idx)}")
+        print(f"board floor {floor:.1f}, so a mark has to clear {bar:.1f}")
+
+        if share > 0.5:
+            print(f"-> {len(marked)} of {len(rest_all)} tsums cleared it. That is most "
+                  f"of the board, which is\n   motion or a screen-wide effect, not the "
+                  f"game naming a character.\n   Re-run on a stiller board.")
+        elif not marked:
+            print("-> the pressed tsum reacted and nothing else on the board did. "
+                  "The game\n   marks only what you are touching, so there is "
+                  "nothing to read off and\n   this route is closed.")
         else:
-            print("-> the pressed tsum reacted and its predicted partners did not. "
-                  "The game marks only what you are touching, so there is nothing "
-                  "to read off and this route is closed.")
-    elif lit == 0:
-        print("-> only the pressed tsum reacted, but it had no partners to mark, "
-              "so this run cannot tell you which. Re-run for a board with a chain.")
+            hit = [i for i in marked if i in expect]
+            print(f"-> the game marked {len(marked)} tsum(s) "
+                  f"({', '.join(f'{changes[i]:.0f}' for i in marked[:8])}). "
+                  f"The mark is real\n   and it is character ground truth worth "
+                  f"reading.")
+            if expect:
+                missed = [i for i in expect if i != idx and i not in marked]
+                print(f"   Clustering predicted {len(expect) - 1} partner(s) and got "
+                      f"{len(hit)} of the {len(marked)} right,\n   with {len(missed)} "
+                      f"prediction(s) the game did not mark. That gap is exactly\n"
+                      f"   what a collected sample records.")
+            _mark_onset(shots, stamps, crop, (bx, by, bw, bh), tsums, marked,
+                        radius, args.threshold)
     print(f"wrote hold_before/held/diff/marked.png to {out}")
+    return 0
+
+
+def _mark_onset(shots, stamps, before_crop, board, tsums, partners, radius,
+                threshold) -> None:
+    """When, after the press, did the mark actually appear?
+
+    `hold` reports the strongest reaction at any moment of a three-second
+    hold, which proves the mark exists but says nothing about when it arrived
+    -- and "when" is the only number the sample collector needs. Its whole
+    failure mode is photographing too early: 0.10s produced 5,729 samples with
+    no label in them, and 0.25s produced a still board with no marks on it.
+
+    Reported as the first frame at which the partners clear `threshold`, and
+    the first at which they reach most of their eventual strength. A delay set
+    between the two catches a mark that is drawn but still fading in; anything
+    below the first is the mistake schema 1 made.
+    """
+    if not shots or not partners:
+        return
+    bx, by, bw, bh = board
+    r = max(2, int(radius * 0.5))
+    masks = []
+    for i in partners:
+        m = np.zeros((bh, bw), np.uint8)
+        cv2.circle(m, (int(tsums[i].x), int(tsums[i].y)), r, 1, -1)
+        masks.append(m.astype(bool))
+
+    series = []
+    for t, shot in zip(stamps, shots):
+        d = cv2.absdiff(shot[by:by + bh, bx:bx + bw], before_crop).max(axis=2)
+        series.append((t, float(np.median([d[m].mean() for m in masks]))))
+    peak = max(v for _, v in series)
+    if peak <= threshold:
+        return
+
+    # An onset in the very first frame is not a fast mark, it is a broken
+    # measurement: the frame is grabbed within milliseconds of the touch and
+    # nothing the game draws can be at full strength by then. What it really
+    # says is that the baseline already differed from the hold -- a chain
+    # still glowing from the previous press, a score popup mid-flight, or a
+    # board that had not finished settling. Reporting "+0.00s, set the delay
+    # to 0.15" off that would send the collector back to exactly the timing
+    # that made schema 1 worthless.
+    if series[0][1] >= 0.8 * peak:
+        print(f"\n   mark onset: UNRESOLVED -- already at full strength "
+              f"({series[0][1]:.0f} of a {peak:.0f} peak)\n   in the first frame, "
+              f"at +{series[0][0]:.2f}s. Two readings and this cannot separate them:\n"
+              f"   the mark renders faster than a press can be photographed, or the\n"
+              f"   baseline already differed (a chain still glowing, a score popup in\n"
+              f"   flight). Check hold_diff.png -- a chain counter or drifting score\n"
+              f"   text means the second. If the frame is clean, the delay is not what\n"
+              f"   is holding collection back.")
+        return
+
+    first = next((t for t, v in series if v > threshold), None)
+    full = next((t for t, v in series if v >= 0.8 * peak), None)
+    settled = f"80% of peak at +{full:.2f}s" if full is not None else "never settled"
+    print(f"\n   mark onset: first over {threshold:g} at +{first:.2f}s, "
+          f"{settled} (peak {peak:.0f})")
+    if full is not None:
+        # Rounded up to the next 50ms and given a little headroom: the reading
+        # has to survive a frame arriving late, not merely the median case.
+        suggest = math.ceil((full + 0.10) * 20) / 20
+        print(f"   -> set dataset.delay to about {suggest:.2f} in config.yaml "
+              f"(default {DATASET_DELAY:.2f})")
+        if suggest > 0.6:
+            print(f"      That is slow enough to be worth checking against "
+                  f"round throughput\n      before collecting a long session.")
+
+
+def _assist(args) -> int:
+    """You hold a tsum; the app reads what the game marked and drags through it.
+
+    The other half of ``hold``. That probe proved the game answers the question
+    detection guesses at -- press a tsum and every tsum you could link to it
+    lights up, identity and reachability together, and it is right exactly
+    where the colour clustering is wrong. ``--verify-hold`` then tried to spend
+    that answer inside ``play`` and lost decisively: reading it cost ~0.1s on
+    every drag, which halved the chains played, and 196 dragged tsums lost to
+    527. The lesson recorded there is that throughput dominates accuracy, so
+    accuracy work has to be free at run time to be worth anything.
+
+    Here it is free. The human chooses when to press, so there is no throughput
+    to lose, and a human holds far longer than the 0.10s that run was racing to
+    keep down -- which is the delay the docs warn sits below the 0.15s floor
+    where marks have not finished rendering. This mode gets the cleaner read
+    that ``--verify-hold`` could never afford.
+
+    The loop is: watch for the press while keeping the newest frame as a
+    baseline, wait for the marks to render, diff, order the marked tsums into a
+    path starting at the one under the finger, and warp the cursor along it.
+    Nothing here presses or releases the button -- that stays with the user,
+    unless ``--auto-release`` is given.
+    """
+    from ..app import Application
+    from ..control.hotkey import StopKeyWatcher
+
+    import pyautogui
+
+    app = Application.create()
+    app.attach_window(prepare=not args.no_prepare)
+    rect = app.content_rect()
+    watcher = StopKeyWatcher(app.config.runner.stop_key)
+    drv = Driver.from_app(app, rect, watcher=watcher, say=print)
+    out = Path(args.dir)
+    if args.debug:
+        out.mkdir(parents=True, exist_ok=True)
+
+    def release_wait() -> None:
+        """Block until the button is up, so one hold only ever serves once."""
+        while _lbutton_down():
+            watcher.check()
+            time.sleep(0.02)
+
+    # The frame shape is fixed for the run, but the rect is not: FEVER gets a
+    # wider one. So the shape is read once and the rect re-derived per press,
+    # which is also the only moment its answer can change anything.
+    shape = drv.grab().shape
+    fever = FeverWatch(drv.matcher, drv.templates)
+    bx, by, bw, bh = _board_rect(shape, args.board)
+    if not fever.enabled:
+        print("no max_fever template -- FEVER will be read on the normal board rect")
+
+    print(f"assist ready -- hold a tsum and keep holding; {watcher.describe()}")
+    if args.dry_run:
+        print("dry run: the path is reported and drawn to disk, the cursor is not moved")
+
+    served = failed = 0
+    try:
+        while True:
+            watcher.check()
+
+            # -- wait for the press, keeping the newest frame as the baseline.
+            # The marks are read as a difference, so the "before" has to come
+            # from before a press whose timing is the user's to choose. A grab
+            # costs ~5ms, so the baseline is at most a frame or two stale --
+            # far inside the ~150ms the glow takes to render, which is what
+            # makes a rolling baseline clean rather than a race.
+            release_wait()
+            # Whole frames, not crops: the rect can change under FEVER, and the
+            # baseline has to be re-croppable once that is known. Only the
+            # drift reading is taken through the current rect.
+            prev = drv.grab()
+            drift = 0.0
+            while not _lbutton_down():
+                watcher.check()
+                frame = drv.grab()
+                # Drift over the *board*, not the whole frame. Measured over
+                # the frame it never reads still during a round and never
+                # could: the score counter, the timer and the FEVER meter all
+                # animate continuously, so a full-frame reading is a HUD
+                # activity meter that says nothing about the pile.
+                drift = float(cv2.absdiff(frame[by:by + bh, bx:bx + bw],
+                                          prev[by:by + bh, bx:bx + bw]).mean())
+                prev = frame
+            press = pyautogui.position()
+            baseline = prev
+
+            # The button is watched globally -- there is no event to subscribe
+            # to for a press that lands on the emulator -- so a click anywhere
+            # else on the desktop arrives here too. Ignore those silently
+            # rather than counting them as a press that came to nothing.
+            if not rect.contains(press):
+                release_wait()
+                continue
+
+            # -- let the marks render, and give up if the hold does not last.
+            deadline = time.perf_counter() + args.delay
+            while time.perf_counter() < deadline and _lbutton_down():
+                watcher.check()
+                time.sleep(0.01)
+            if not _lbutton_down():
+                print("  released before the marks rendered -- keep holding until "
+                      "the path has been drawn")
+                failed += 1
+                continue
+
+            # Several frames, spaced, rather than one. Anything that moves by
+            # itself -- FEVER's sparkles, a bubble popping, a tsum still
+            # falling -- lands somewhere different in each, while a mark holds
+            # still, and `marks_on_board` keeps only what persisted. The gap
+            # has to be long enough for the animation to actually move.
+            shots = []
+            for i in range(max(1, args.mark_frames)):
+                if i:
+                    time.sleep(args.mark_gap)
+                    if not _lbutton_down():
+                        break
+                watcher.check()
+                shots.append(drv.grab())
+            held = shots[-1]
+
+            # Off by default. `hold` aborts on a moving board because a press
+            # on a settling pile reads the settling, and that is still true --
+            # but refusing on it up front proved wrong in play: the pile is
+            # rarely perfectly still mid-round, and the user is the one who
+            # picked the moment. The reading itself is checked instead, below,
+            # where motion is both easier to recognise and the thing that
+            # actually matters.
+            if args.drift > 0 and drift > args.drift:
+                print(f"  board still moving (drift {drift:.2f}) -- let the pile "
+                      f"settle before pressing")
+                failed += 1
+                release_wait()
+                continue
+
+            # Which rect applies to *this* press. Read off the held frames --
+            # the meter is in every one of them, and asking here means the
+            # answer is current rather than however old the last press was.
+            for s in shots:
+                fever.update(s)
+            was_fever = fever.active
+            bx, by, bw, bh = _board_rect(shape, args.board, fever=was_fever)
+            crop = baseline[by:by + bh, bx:bx + bw]
+
+            t0 = time.perf_counter()
+            tsums, radius, _ = detect(crop, k=args.k, include_dark=args.include_dark)
+            if not tsums:
+                print("  no tsums detected -- is a round actually running?")
+                failed += 1
+                release_wait()
+                continue
+
+            # Which one is under the finger? Board coordinates, via the content
+            # area: the same conversion `to_screen` does, run backwards.
+            px = press.x - rect.left - bx
+            py = press.y - rect.top - by
+            # By index, not by value: Tsum is a plain dataclass, so `.index()`
+            # would match the first tsum with equal fields rather than this one.
+            pressed = min(range(len(tsums)),
+                          key=lambda i: (tsums[i].x - px) ** 2 + (tsums[i].y - py) ** 2)
+            near = tsums[pressed]
+            gap = math.hypot(near.x - px, near.y - py)
+            # Generous, with an absolute floor. Being slightly wrong about
+            # which tsum is under the finger costs little -- the path starts
+            # from the cursor's real position either way, and the marks come
+            # from the game rather than from this guess -- whereas refusing a
+            # press the game did accept costs the whole chain. The floor is
+            # there because the radius estimate itself dips on a frame caught
+            # mid-animation, and 1.5 radii of a bad radius rejected presses
+            # that were 18px from a centre.
+            if gap > max(radius * 2.0, 30.0):
+                print(f"  pressed board ({px:.0f}, {py:.0f}), which is not on any "
+                      f"tsum I can see -- the nearest is {gap:.0f}px away")
+                failed += 1
+                release_wait()
+                continue
+
+            hits, aura_only, diff = marks_on_board(
+                crop, [s[by:by + bh, bx:bx + bw] for s in shots], tsums, radius,
+                pressed=pressed, threshold=args.threshold, aura=args.aura)
+
+            # The reading, not the precondition. A board that moved between
+            # the baseline and the hold lights up almost everything, because
+            # every tsum that shifted differs from where it was -- so an
+            # implausible share of the board reacting is motion (or FEVER)
+            # rather than marks. This catches what the drift guard was aiming
+            # at, at the point where it is unambiguous: a real press marks the
+            # tsums of one character, never most of the pile.
+            share = len(hits) / max(1, len(tsums) - 1)
+            if share > args.max_marked:
+                print(f"  {len(hits)} of {len(tsums) - 1} tsums lit up "
+                      f"({share:.0%}) -- that is the board moving, not the game "
+                      f"marking; let the pile settle")
+                failed += 1
+                release_wait()
+                continue
+
+            # No cap by default. `play` caps chain length to keep a guessed
+            # tour tight, but these are not guesses -- the game marked exactly
+            # what is linkable, and a longer chain scores better.
+            members = hits
+            if args.max_chain > 0 and len(members) + 1 > args.max_chain:
+                members = sorted(members, key=lambda i: (tsums[i].x - near.x) ** 2
+                                 + (tsums[i].y - near.y) ** 2)[:args.max_chain - 1]
+            order = tour_from(pressed, [pressed] + members, tsums)
+            think = (time.perf_counter() - t0) * 1000
+
+            note = f", {len(aura_only)} of them inside the glow" if aura_only else ""
+            print(f"  {'[FEVER] ' if was_fever else ''}{len(tsums)} tsums, "
+                  f"r~{radius:.1f}px, drift {drift:.2f} -- "
+                  f"game marked {len(hits)}{note}  ({think:.0f}ms)")
+
+            if args.debug:
+                vis = held[by:by + bh, bx:bx + bw].copy()
+                for i, t in enumerate(tsums):
+                    colour = ((0, 255, 255) if i == pressed
+                              else (0, 165, 255) if i in aura_only
+                              else (0, 255, 0) if i in hits else (90, 90, 90))
+                    cv2.circle(vis, (int(t.x), int(t.y)), int(radius * 0.85), colour,
+                               2 if i == pressed or i in hits else 1, cv2.LINE_AA)
+                for a, b in zip(order, order[1:]):
+                    cv2.line(vis, (int(tsums[a].x), int(tsums[a].y)),
+                             (int(tsums[b].x), int(tsums[b].y)), (255, 0, 255), 2, cv2.LINE_AA)
+                stamp = time.strftime("%H%M%S")
+                for name, im in ((f"assist_{stamp}_marked", vis),
+                                 (f"assist_{stamp}_diff", diff)):
+                    ok, buf = cv2.imencode(".png", im)
+                    if ok:
+                        buf.tofile(str(out / f"{name}.png"))
+
+            if len(order) < args.min_chain:
+                print(f"  only {len(order)} tsum(s) in the chain, want {args.min_chain} "
+                      f"-- not moving; release and try another")
+                # Nothing marked at all usually means the game never saw the
+                # press. An unfocused window eats the first click to activate
+                # itself, which is the same trap that cost `hold` a run -- and
+                # it looks identical to a tsum with no partners.
+                if not hits:
+                    print("     (nothing lit up: if you just alt-tabbed back, "
+                          "the window ate that press -- try again)")
+                failed += 1
+                release_wait()
+                continue
+
+            # Start from where the finger actually is, not from the pressed
+            # tsum's centre. They are within one tsum of each other, and the
+            # cursor's real position is the truth about where the touch is --
+            # warping to the centre first would add a leg that buys nothing.
+            points = [(press.x, press.y)]
+            points += [drv.to_screen(bx + tsums[i].x, by + tsums[i].y) for i in order[1:]]
+
+            if args.dry_run:
+                print("  path: " + " -> ".join(f"({x},{y})" for x, y in points))
+                served += 1
+                release_wait()
+                continue
+
+            t1 = time.perf_counter()
+            walked = walk_path(points, step_px=args.step_px, per_step=args.per_step,
+                               still_down=_lbutton_down, check_stop=watcher.check)
+            drew = (time.perf_counter() - t1)
+            if walked < len(points) - 1:
+                # The commonest way a press comes to nothing, by a distance. A
+                # 40-tsum chain is seconds of walking and there is no way to
+                # tell from the game that it is still going, so the honest fix
+                # is --auto-release (on by default), not asking for a steadier
+                # hand.
+                print(f"  you released after {walked} of {len(points) - 1} legs "
+                      f"({drew:.1f}s in) -- the rest of the chain was not drawn")
+                failed += 1
+            else:
+                served += 1
+                if args.auto_release:
+                    pyautogui.mouseUp()
+                    print(f"  drew {len(order)} tsums in {drew:.1f}s and released")
+                else:
+                    print(f"  drew {len(order)} tsums in {drew:.1f}s -- release now")
+            release_wait()
+    except StopRequested as exc:
+        print(exc)
+    finally:
+        app.close()
+
+    print(f"assist served {served} chain(s); {failed} press(es) came to nothing")
     return 0
 
 
@@ -2710,6 +3657,269 @@ def _score_adjacency(label_files: Sequence[Path], folder: Path, tol_frac: float)
     print("  --link-px can ever join them. 'blocked' is the third-tsum test.")
 
 
+def _dataset(args) -> int:
+    """Is a collected dataset actually labelled, or is it 803MB of noise?
+
+    A sample is worth keeping only if the change between `before` and `marked`
+    is the game's highlight. Nothing about a folder of JPEGs says whether it
+    is, and the first collection ran for thirteen hours before anybody could
+    tell -- so this is the check that has to run before a collection is
+    trusted, trained on, or sent anywhere.
+
+    Three questions, in the order that decides the answer:
+
+    1. **Was the board still?** `baseline` is the median change over the tsums
+       the stroke never touched. It is the floor any mark has to clear. When it
+       sits above the threshold, the reading is the pile settling.
+    2. **Do the marks look like one character?** The game marks same-character
+       tsums, so the ones it lit should share an appearance -- measured here as
+       Lab distance to the pressed tsum's own colour, against the distance to
+       the rest of the board. A ratio near 1 means the reading carries no
+       information about identity, whatever threshold it was taken at.
+    3. **Does it agree with k-means?** Only worth asking once 1 and 2 pass. The
+       point of the label is to correct the clustering, so disagreement is the
+       signal being collected -- but disagreement from a reading that failed
+       question 2 is just noise disagreeing with a working detector.
+    """
+    root = Path(args.dir)
+    # Three different problems used to print the same line. The commonest by
+    # far is pointing this at the default before anything has ever collected
+    # into it, and "no session folders" reads like a verdict on the data
+    # rather than what it is -- nothing has been collected yet.
+    if not root.exists():
+        raise SystemExit(
+            f"{root.resolve()} does not exist.\n"
+            f"Nothing has collected into it yet. Set `dataset.enabled: true` in "
+            f"config.yaml\n(or tick Data collection in the tray), play a round, "
+            f"then run this again --\nthe folder appears on the first sampled "
+            f"drag. To check a collection that lives\nsomewhere else, pass "
+            f"--dir <path to it>.")
+    if not root.is_dir():
+        raise SystemExit(f"{root} is a file, not a dataset directory")
+    sessions = sorted(p for p in root.iterdir() if p.is_dir())
+    if not sessions:
+        raise SystemExit(
+            f"{root.resolve()} holds no session folders.\n"
+            f"A session is a `<timestamp>_<pid>` directory, written on the first "
+            f"sampled drag\nof a round -- so an empty dataset directory means "
+            f"collection never ran, or every\nsample was refused. The round "
+            f"summary says which.")
+
+    rows: list[tuple[Path, dict]] = []
+    schemas: dict[int, int] = {}
+    for folder in sessions:
+        jl = folder / "samples.jsonl"
+        if not jl.exists():
+            continue
+        for line in jl.read_text(encoding="utf-8").splitlines():
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            v = int(row.get("schema", 0))
+            schemas[v] = schemas.get(v, 0) + 1
+            rows.append((folder, row))
+    if not rows:
+        raise SystemExit(f"no samples in {root}")
+    if args.limit:
+        rows = rows[:args.limit]
+
+    total_bytes = sum(f.stat().st_size for f in root.rglob("*") if f.is_file())
+    print(f"{len(rows)} sample(s) in {len(sessions)} session(s), "
+          f"{total_bytes / 1024 / 1024:.0f}MB on disk")
+    print("  schema: " + ", ".join(f"v{k} x{v}" for k, v in sorted(schemas.items())))
+
+    baselines: list[float] = []
+    marked_share: list[float] = []
+    agree: list[float] = []
+    base_rate: list[float] = []
+    lifts: list[float] = []
+    strong: list[tuple] = []
+    read = 0
+    for folder, row in rows:
+        tsums = row.get("tsums") or []
+        head = int(row.get("head", 0))
+        if len(tsums) < 10 or head >= len(tsums):
+            continue
+        opts = row.get("options") or {}
+        threshold = float(opts.get("hold_threshold", 8.0))
+        aura = float(opts.get("hold_aura", 90.0))
+
+        # Schema 2 wrote the reading down; schema 1 did not, so it has to be
+        # recomputed from the images. Either way the number means the same
+        # thing, which is what makes the two collections comparable.
+        #
+        # The images get decoded regardless, up to `--appearance` samples: the
+        # appearance test below is the one that decides the verdict, and a run
+        # that skips it can only report that it does not know. Skipping it and
+        # passing on the other two measures is how this command first blessed
+        # a collection whose marks were not there.
+        values = row.get("marks")
+        before = None
+        if not values or args.reread or len(lifts) < args.appearance:
+            i = int(row["index"])
+            before = cv2.imread(str(folder / f"{i:04d}_before.jpg"))
+            marked = cv2.imread(str(folder / f"{i:04d}_marked.jpg"))
+            if before is None or marked is None or before.shape != marked.shape:
+                continue
+            if not values or args.reread:
+                values = _disk_means(cv2.absdiff(marked, before).max(axis=2), tsums)
+        values = np.asarray(values, np.float32)
+        if len(values) != len(tsums):
+            continue
+        read += 1
+
+        chain = set(row.get("proposed") or [])
+        idle = [v for i, v in enumerate(values) if i not in chain]
+        baseline = row.get("baseline")
+        if baseline is None:
+            baseline = float(np.median(idle)) if idle else 0.0
+        baselines.append(float(baseline))
+
+        hx, hy = tsums[head]["x"], tsums[head]["y"]
+        far = np.array([math.hypot(t["x"] - hx, t["y"] - hy) > aura for t in tsums])
+        # Score against the bar the sample was actually judged on. Schema 1
+        # had only the fixed threshold, and that is most of why every reading
+        # looked like half the board: measured with `hold`, real marks sit
+        # 8x-25x above the board's floor, and 8.0 sits inside the floor's own
+        # noise on a live board. `--floor-mult` re-scores either collection at
+        # a floor-relative bar so the two can be compared on equal terms.
+        floor = float(np.median(values[far])) if far.any() else 0.0
+        bar = float(row.get("bar") or 0.0)
+        if args.floor_mult:
+            bar = max(threshold, args.floor_mult * floor)
+        lit = values > (bar or threshold)
+        lit[head] = False
+        if far.sum() < 5:
+            continue
+        marked_share.append(float(lit[far].mean()))
+
+        # Needs pixels, so only when the images are being decoded anyway.
+        if before is not None and (far & lit).any() and (far & ~lit).any():
+            lab = _disk_lab(cv2.cvtColor(before, cv2.COLOR_BGR2Lab), tsums)
+            dist = np.linalg.norm(lab - lab[head], axis=1)
+            lifts.append(float(dist[far & ~lit].mean() /
+                               max(1e-6, dist[far & lit].mean())))
+
+        # The shape of the reaction, reported rather than interpreted. A count
+        # of "strongly reacting" tsums was tried here as a way to separate a
+        # real board-wide highlight from the pressed tsum glowing alone, at
+        # four different thresholds; none of them separated the two, because
+        # the pressed tsum's own glow is *weaker* than a score popup drifting
+        # over the board. The appearance test below is the discriminator.
+        strong.append((float(values[head]), float(np.median(values[far])),
+                       float(values[far].max())))
+
+        kind = np.array([t["kind"] for t in tsums])
+        same = (kind == kind[head]) & far
+        if (far & lit).any():
+            agree.append(float(same[far & lit].mean()))
+            base_rate.append(float(same[far].mean()))
+
+    if not read:
+        raise SystemExit("no sample could be read -- are the .jpg files present?")
+
+    arr = np.asarray(baselines)
+    print("\nboard motion at press time (median change over untouched tsums):")
+    for q in (10, 50, 90):
+        print(f"  p{q:<3d} {np.percentile(arr, q):6.1f}")
+    over = float((arr > 8.0).mean())
+    print(f"  past the 8.0 mark threshold on {over * 100:5.1f}% of samples"
+          f"{'   <- the diff is reading motion' if over > 0.2 else ''}")
+
+    print(f"\nshare of the board outside the glow read as marked: "
+          f"{np.mean(marked_share) * 100:.1f}%")
+
+    if strong:
+        sa = np.asarray(strong)
+        print(f"\nreaction to the press: pressed tsum {np.median(sa[:, 0]):.0f}, "
+              f"board median {np.median(sa[:, 1]):.0f},\n  strongest other tsum "
+              f"{np.median(sa[:, 2]):.0f}. The strongest is usually a score popup "
+              f"drifting\n  across rather than a mark, which is why none of these "
+              f"decides anything alone.")
+
+    lift = float(np.mean(lifts)) if lifts else None
+    if lift is not None:
+        print(f"\nappearance test ({len(lifts)} samples): tsums read as marked sit "
+              f"{lift:.2f}x closer in\n  colour to the pressed tsum than the rest of "
+              f"the board. 1.00x means the\n  reading knows nothing about identity -- "
+              f"the game's own marks are all one\n  character, so a real label scores "
+              f"well above 1.")
+
+    if agree:
+        print(f"\nagreement with k-means: {np.mean(agree) * 100:.1f}% of marked tsums "
+              f"share the pressed\n  tsum's cluster, against {np.mean(base_rate) * 100:.1f}% "
+              f"for marking at random.")
+
+    # Three outcomes, not two. "Motion" and "no highlight" produce nearly
+    # identical numbers everywhere except the motion baseline, and they need
+    # opposite fixes -- settle the board, or hold longer. Telling a user to
+    # fix motion on a collection whose motion is already clean sends them
+    # round the loop for nothing.
+    print()
+    if over > 0.2:
+        print("-> UNUSABLE: the diff is reading the board move. What changed between")
+        print("   the two frames is the pile settling, not the game answering.")
+        print("   Collect again past the 0.15s render floor and with more than one")
+        print("   frame (the schema 2 defaults do both), and re-run until board")
+        print("   motion p50 sits well under 8.")
+        return 1
+    if lift is None:
+        print("-> INCONCLUSIVE. The board was still, but the test that decides this")
+        print("   needs the images and none could be decoded. Check the .jpg files")
+        print("   are present next to samples.jsonl.")
+        return 2
+    if lift < 1.3:
+        print("-> UNUSABLE: the board was still, and the marks still are not there.")
+        print("   The tsums that reacted look no more like the pressed character than")
+        print("   the rest of the board does, so whatever changed was not the game")
+        print("   naming a character. Motion is no longer the problem, so the delay")
+        print("   is the next thing to rule out -- find when the mark actually")
+        print("   renders before collecting more:")
+        print("     python -m ttheart_sender.game.tsum hold --hold 3.0")
+        print("   then raise dataset.delay in config.yaml past what that reports.")
+        print("   If `hold` shows no board-wide highlight at any delay, this build")
+        print("   does not have the feature and the label has to come from elsewhere.")
+        return 1
+    # A lift just over the bar is not the same as a clean label, and saying so
+    # matters: `hold` reads real marks at 8x-25x the board floor with the lit
+    # tsums plainly one character, which lands far above this. Treating 1.35
+    # from 19 samples as a green light would repeat the mistake this command
+    # was written to stop.
+    if lift < 1.6 or len(lifts) < 100:
+        print(f"-> MARGINAL. The marks are there ({lift:.2f}x) but not cleanly, "
+              f"on {len(lifts)} sample(s).")
+        print("   For comparison, `hold` reads a real mark at 8x-25x the board's")
+        print("   floor with the lit tsums obviously one character. Collect more")
+        print("   before training on this, and re-run -- a lift that climbs with")
+        print("   sample count is a real signal, one that sits still is not.")
+        return 0
+    print("-> the marks are in the frames. Worth training on.")
+    return 0
+
+
+def _disk_means(diff: np.ndarray, tsums: Sequence[dict]) -> list[float]:
+    """Mean change inside each tsum's disk -- the reading `marked_by_game` takes."""
+    r = max(2, int(min(t["r"] for t in tsums) * 0.55))
+    out = []
+    for t in tsums:
+        m = np.zeros(diff.shape[:2], np.uint8)
+        cv2.circle(m, (int(t["x"]), int(t["y"])), r, 1, -1)
+        out.append(float(diff[m.astype(bool)].mean()))
+    return out
+
+
+def _disk_lab(lab: np.ndarray, tsums: Sequence[dict]) -> np.ndarray:
+    """Mean Lab colour inside each tsum's disk."""
+    r = max(2, int(min(t["r"] for t in tsums) * 0.55))
+    out = []
+    for t in tsums:
+        m = np.zeros(lab.shape[:2], np.uint8)
+        cv2.circle(m, (int(t["x"]), int(t["y"])), r, 1, -1)
+        out.append(lab[m.astype(bool)].mean(axis=0))
+    return np.asarray(out, np.float32)
+
+
 def _live(args) -> int:
     """Grab the real emulator repeatedly and time the whole loop.
 
@@ -2787,7 +3997,57 @@ def add_play_args(play, *, merge_default: bool):
                       help="while the first tsum is held, read which tsums the "
                            "game marks as linkable and drop the chain members it "
                            "did not mark. Costs one capture per drag, because the "
-                           "press is the start of the stroke either way")
+                           "press is the start of the stroke either way. "
+                           "MEASURED AND NOT RECOMMENDED: at --hold-delay 0.10 "
+                           "the highlight has not rendered and the board is "
+                           "still moving, so the reading is noise -- replayed "
+                           "over 5,729 collected drags it dropped a mean 3 of 4 "
+                           "members on 43% of them. See docs/DATASET-FINDINGS.md")
+    play.add_argument("--dataset", default="",
+                      help="collect training samples for detection into this "
+                           "directory; empty (the default) collects nothing. "
+                           "Each sampled drag saves the board before the press "
+                           "and again while the game highlights what it marked "
+                           "-- that highlight is the label. Costs one extra "
+                           "capture and --hold-delay on sampled drags only")
+    play.add_argument("--dataset-limit", type=int, default=20,
+                      help="most samples to keep from one round")
+    play.add_argument("--dataset-every", type=int, default=4,
+                      help="sample every Nth drag; boards inside one round are "
+                           "alike, so a stride buys more variety than a burst")
+    play.add_argument("--dataset-quality", type=int, default=85,
+                      help="JPEG quality for the saved crops")
+    play.add_argument("--dataset-delay", type=float, default=0.25,
+                      help="seconds to wait after the press before photographing "
+                           "the marks, on sampled drags only. Not --hold-delay: "
+                           "that one is paid on every drag and is set below the "
+                           "0.15s floor where the game has finished drawing the "
+                           "highlight, which is why the first 5,729 samples "
+                           "carried no label at all")
+    play.add_argument("--dataset-frames", type=int, default=3,
+                      help="frames to read the marks from. Only what changed in "
+                           "ALL of them counts -- a mark is in every frame, a "
+                           "settling tsum is not. 1 frame is what schema 1 used "
+                           "and it read motion")
+    play.add_argument("--dataset-gap", type=float, default=0.05,
+                      help="seconds between those frames")
+    play.add_argument("--dataset-floor-mult", type=float, default=5.0,
+                      help="a mark must beat the board's own noise floor by "
+                           "this multiple. Measured with `hold`, real marks sit "
+                           "8x-25x above it, while the fixed --hold-threshold "
+                           "sits inside that floor on a live board. 0 = use the "
+                           "fixed threshold")
+    play.add_argument("--dataset-max-motion", type=float, default=12.0,
+                      help="refuse to keep a sample whose board was already "
+                           "jiggling this hard at press time -- the reading is "
+                           "motion, not marks. 0 = keep everything")
+    play.add_argument("--dataset-max-mb", type=float, default=2048.0,
+                      help="stop collecting once the dataset directory reaches "
+                           "this size. There is no per-day limit; without a "
+                           "budget a night of play wrote 803MB. 0 = no cap")
+    play.add_argument("--dataset-total", type=int, default=0,
+                      help="stop collecting once the dataset directory holds "
+                           "this many samples in total. 0 = no cap")
     play.add_argument("--hold-delay", type=float, default=0.10,
                       help="seconds to wait after pressing before reading the marks. "
                            "Paid on every drag, so it is the main speed cost of "
@@ -2834,6 +4094,16 @@ def add_play_args(play, *, merge_default: bool):
                       help="consecutive no-chain frames before giving up")
     play.add_argument("--no-verify", dest="verify", action="store_false",
                       help="skip the did-it-clear check after each drag")
+    play.add_argument("--verify-clears", action="store_true",
+                      help="after each drag, check the dragged tsums' own pixels "
+                           "rather than the whole crop, and report how many "
+                           "actually left the board. Costs no extra capture -- "
+                           "--verify already grabs the frame it reads")
+    play.add_argument("--clear-tol", type=float, default=20.0,
+                      help="mean change inside a tsum's disk that counts as "
+                           "'it is gone'. The log prints the board's idle noise "
+                           "beside every reading, so a round tells you whether "
+                           "this needs moving")
     play.add_argument("--change-tol", type=float, default=2.0,
                       help="mean pixel change below this means the drag did not register")
     play.add_argument("--max-repeats", type=int, default=3,
@@ -2967,8 +4237,68 @@ def main() -> int:
     hp.add_argument("--max-chain", type=int, default=8)
     hp.add_argument("--board")
     hp.add_argument("-k", type=int, default=12)
+    hp.add_argument("--min-tsums", type=int, default=20,
+                    help="refuse to press a frame with fewer detections than "
+                         "this -- the same gate `play` applies")
+    hp.add_argument("--max-tsums", type=int, default=110,
+                    help="and refuse one with more. Over-split frames offer "
+                         "phantoms to press, and a press that lands on nothing "
+                         "looks exactly like a game that marks nothing")
     hp.add_argument("--no-dark", dest="include_dark", action="store_false")
     hp.add_argument("--no-prepare", action="store_true")
+
+    asi = sub.add_parser("assist", help="you hold a tsum, the app reads the game's "
+                                        "marks and drags the chain for you")
+    asi.add_argument("--delay", type=float, default=0.25,
+                     help="seconds to wait after your press before reading the marks. "
+                          "0.15 is the floor below which they have not rendered; "
+                          "unlike --verify-hold there is no throughput to lose here, "
+                          "so this is deliberately generous")
+    asi.add_argument("--threshold", type=float, default=8.0,
+                     help="mean pixel change that counts as 'the game marked this one'")
+    asi.add_argument("--mark-frames", type=int, default=3,
+                     help="how many frames to read the marks from. Only what "
+                          "changed in ALL of them counts, which is what keeps "
+                          "FEVER's sparkles and a settling pile out of the "
+                          "reading. Measured: 1 frame gives ~11 false marks "
+                          "against moving sparkles, 2 gives 0.7, 3 gives none")
+    asi.add_argument("--mark-gap", type=float, default=0.05,
+                     help="seconds between those frames -- long enough that "
+                          "anything animating has moved on")
+    asi.add_argument("--aura", type=float, default=90.0,
+                     help="the glow washes over this radius, so hits within it are "
+                          "reported separately -- they may be splash rather than marks")
+    asi.add_argument("--min-chain", type=int, default=3,
+                     help="below this the cursor is not moved at all: the game clears "
+                          "nothing under three, so a short path is worse than none")
+    asi.add_argument("--max-chain", type=int, default=0,
+                     help="0 = drag everything the game marked. A cap keeps a guessed "
+                          "tour tight in `play`, but nothing here is guessed")
+    asi.add_argument("--step-px", type=float, default=8.0)
+    asi.add_argument("--per-step", type=float, default=0.004)
+    asi.add_argument("--drift", type=float, default=0.0,
+                     help="refuse to read a board drifting by more than this, "
+                          "measured over the board only. 0 = never refuse up "
+                          "front; --max-marked catches the same thing after the "
+                          "fact, and more reliably")
+    asi.add_argument("--max-marked", type=float, default=0.5,
+                     help="refuse a reading where more than this share of the "
+                          "board lit up -- that is the pile moving, not the game "
+                          "marking one character")
+    asi.add_argument("--no-auto-release", dest="auto_release", action="store_false",
+                     help="wait for you to let go instead of releasing for you "
+                          "once the path is walked. Releasing early is the "
+                          "commonest way a press is wasted, which is why the "
+                          "release is taken over by default")
+    asi.add_argument("--dry-run", action="store_true",
+                     help="report the path it would draw without moving the cursor")
+    asi.add_argument("--debug", action="store_true",
+                     help="write the marked-up board and the raw diff per press")
+    asi.add_argument("--dir", default="scratchpad")
+    asi.add_argument("--board")
+    asi.add_argument("-k", type=int, default=12)
+    asi.add_argument("--no-dark", dest="include_dark", action="store_false")
+    asi.add_argument("--no-prepare", action="store_true")
 
     lab = sub.add_parser("label", help="mark up a board: chains you'd drag, and detection's mistakes")
     lab.add_argument("image", type=Path)
@@ -3003,6 +4333,32 @@ def main() -> int:
     sc.add_argument("--tol", type=float, default=0.6,
                     help="how close a re-detected tsum must be to a labelled one "
                          "to count as the same, in radii")
+
+    ds = sub.add_parser("dataset", help="check whether a collected dataset is "
+                                       "actually labelled before trusting it")
+    ds.add_argument("--dir", default="dataset",
+                    help="the dataset directory holding the session folders")
+    ds.add_argument("--limit", type=int, default=0,
+                    help="stop after this many samples. 0 = all of them; a "
+                         "full pass over a night's collection decodes "
+                         "thousands of JPEGs")
+    ds.add_argument("--floor-mult", type=float, default=0.0,
+                    help="re-score with a bar this many times the board's own "
+                         "noise floor instead of the bar the sample recorded. "
+                         "Real marks sit 8x-25x above that floor, so this is "
+                         "how a schema 1 collection (fixed threshold only) is "
+                         "compared with a schema 2 one on equal terms")
+    ds.add_argument("--appearance", type=int, default=200,
+                    help="decode this many samples for the appearance test -- "
+                         "the one that decides the verdict. Lower it to skip "
+                         "faster over a huge collection; 0 turns it off, and "
+                         "the verdict then reports that it does not know")
+    ds.add_argument("--reread", action="store_true",
+                    help="recompute the reading from the images instead of "
+                         "trusting what the row recorded. Required for schema "
+                         "1 folders, which recorded nothing, and the way to "
+                         "re-score a schema 2 collection at a different "
+                         "threshold")
 
     live = sub.add_parser("live", help="grab the emulator N times and report real throughput")
     live.add_argument("-n", "--frames", type=int, default=20)
@@ -3041,6 +4397,9 @@ def main() -> int:
     if args.cmd == "hold":
         return _hold(args)
 
+    if args.cmd == "assist":
+        return _assist(args)
+
     if args.cmd == "idle":
         return _idle(args)
 
@@ -3055,6 +4414,9 @@ def main() -> int:
 
     if args.cmd == "score":
         return _score(args)
+
+    if args.cmd == "dataset":
+        return _dataset(args)
 
     if args.cmd in ("play", "play2"):
         return _play(args)

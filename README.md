@@ -117,43 +117,64 @@ while a flow is running.
 screen, above the taskbar:
 
 ```
-ttheart-sender v0.1.0   <- which build this is
+ ttheart-sender v1.4.1   <- the caption says which build this is
 [x] Always on top
 Mode
  (o) Resume  ( ) Launch  ( ) Play (beta)
-[ ] Auto Play
+[ ] Auto Play                             <- play a round between cycles
 ────────────────────────
-Purchase box
-[ ] Premium box plus
-[x] Premium box
-[x] Pick-up capsule
-[x] Happiness capsule
+[x] Return Heart                          <- send hearts on the clock
+     Every hour at        [ 15 |v| ] min
+     and at               [ 50 |v| ] min
 ────────────────────────
-[      Buy tsum       ]  <- runs purchase_box with the ticks above
+Purchase box          [   Buy tsum   ]  <- runs purchase_box with the ticks
+[ ] Premium Box+
+[x] Premium Box
+[x] Pick-up Capsule
+[x] Happiness Box
+────────────────────────
 [ Stop - Running: ... ]  <- Run when idle, Stop while a run is going
 [ Open logs ] [ Exit  ]
 ```
 
-Right-clicking the icon does nothing: the panel replaced the old context menu,
-which is why **Exit** and **Open logs** are on it — they are the only way out
-of the app.
+The panel opens by itself at launch, so there is nothing to discover on a first
+run; after that, left-clicking the icon puts it away and brings it back.
+Right-clicking the icon offers **Exit** and nothing else — a way out that does
+not depend on finding the panel first, which is also why **Exit** and **Open
+logs** are repeated on the panel itself.
 
 Every choice is written to `ttheart-settings.json` next to the logs and reloaded
 at the next launch, so the panel opens the way you left it. Delete that file to
 go back to the defaults shown above. `--mode` and `--play` still work on the
 command line and win over the saved file for that session.
 
-**Auto Play** is the on/off switch for the dice roll in the Resume/Launch
-cycle, and it starts **unticked**: the tray passes `play_chance_percent: 0`, so
-the cycle only claims gifts and sends hearts. Tick it and the flow's own
-`play_chance_percent` applies instead — 8% per cycle as shipped. Change those
-odds in `vars:` at the top of [`flows/resume.yaml`](flows/resume.yaml) and
-[`flows/launch.yaml`](flows/launch.yaml), or per run with
-`run resume --var play_chance_percent=25`. Start the tray with `--play` to have
-it ticked from the outset.
-(The dedicated **Play** mode is unaffected — it plays rounds outright.)
+**Auto Play** decides what a Resume/Launch cycle does between passes, and it
+starts **unticked**: the cycle claims gifts, sends hearts and pauses 30–90s
+between them. Tick it and every cycle plays a round *instead of* that pause. It
+is all or nothing — the tray passes `play_chance_percent: 100` when it is
+ticked and `0` when it is not.
 
-A console `run resume` has no panel to ask, so it uses the flow's 8% as written.
+The flows keep the finer grain for console runs: `run resume --var
+play_chance_percent=25` plays a quarter of the time, and the `vars:` in
+[`flows/resume.yaml`](flows/resume.yaml) and
+[`flows/launch.yaml`](flows/launch.yaml) are what a console run with no `--var`
+uses. Start the tray with `--play` to have the box ticked from the outset. (The
+dedicated **Play** mode is unaffected — it plays rounds outright.)
+
+**Return Heart** puts the heart-sending pass on the clock instead of running it
+every cycle. Unticked — the default — nothing changes: every cycle works
+through the ranking list. Tick it and the two spinners become minutes of the
+hour, so `15` and `50` send at 9:15, 9:50, 10:15, 10:50 and so on. In between,
+a cycle still claims the mailbox and plays or waits; it just goes home instead
+of opening the rankings.
+
+A mark that went by *before* the run started counts as already handled: start
+the bot at 9:20 and the first send is at 9:50, not straight away. Stopping and
+restarting therefore cannot squeeze in extra passes. Once running the gate does
+catch up — a round long enough to step over 9:50 still sends on the far side of
+it, once. Set both spinners to the same minute for one send an hour. From a
+console it is `run resume --var return_heart_timed=true --var
+return_heart_minutes=15,50`.
 
 Picking a mode or toggling a tick only *selects* it; **Run** is what launches
 it, and a run keeps whatever it started with. **Buy tsum** greys out while
@@ -280,7 +301,7 @@ animation, or every frame lands mid-bounce and nothing ever looks still.
 Actions: `find`, `find_click` (`tap`), `click_all`, `wait_for`,
 `wait_until_gone`, `click`, `move`, `drag`, `scroll`, `key`, `hotkey`, `type`,
 `wait`, `log`, `set`, `add` (`incr`), `screenshot`, `if` (`when`), `if_found`,
-`chance`, `repeat`,
+`chance`, `time_gate`, `repeat`,
 `while_found`,
 `run_flow`, `prepare_window`, `stop`. Run `python main.py actions` for the
 one-line summary of each, and read [flows/example.yaml](flows/example.yaml) for

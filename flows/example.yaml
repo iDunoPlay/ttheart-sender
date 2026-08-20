@@ -53,6 +53,22 @@ steps:
         - log: "Idling for a bit"
         - wait: {min: 3, max: 8}
 
+  # Clock gate: raise a flag the first time a minute of the hour goes by.
+  # `minutes: [15, 50]` means twice an hour; "15, 50" works too, which is all
+  # `--var` can hand over. Marks that passed before the first check count as
+  # handled, so a restart never fires one straight away; after that a cycle
+  # long enough to step over a mark still fires, once. Putting the flag back
+  # down is the flow's job -- see flows/resume.yaml for the full pattern.
+  - time_gate:
+      minutes: [15, 50]
+      save_as: on_the_clock
+
+  - if:
+      value: ${on_the_clock}
+      then:
+        - log: "A mark just went by"
+        - set: {on_the_clock: false}
+
   # --- the main loop ----------------------------------------------------
   - repeat:
       times: ${taps}

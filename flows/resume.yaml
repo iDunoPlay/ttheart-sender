@@ -2,10 +2,23 @@ name: resume_send_heart
 description: Send heart without restart LDPlayer
 
 vars:
-  # How often a cycle stops to play a round. The tray's "Play rounds" toggle
-  # overrides this with 0 when it is unticked; a console run uses the value
-  # here unless `--var play_chance_percent=N` says otherwise.
+  # How often a cycle stops to play a round instead of waiting. The tray's
+  # "Auto Play" tick box drives this: 100 when ticked, 0 when not -- the panel
+  # has no middle ground any more, it either plays every cycle or none. A
+  # console run keeps the finer grain: the value here, or `--var
+  # play_chance_percent=N`.
   play_chance_percent: 8
+
+  # "Return Heart" on the panel: send hearts on the clock instead of every
+  # cycle. Off here so a console run behaves the way it always has; the tray
+  # ticks it on and supplies the two marks from its spinners.
+  return_heart_timed: false
+  # Minutes of the hour to send on, e.g. [15, 50] = :15 and :50 past every
+  # hour. `--var return_heart_minutes=15,50` works too.
+  return_heart_minutes: [15, 50]
+  # Raised by the time_gate below when a mark goes by, lowered again as soon
+  # as the hearts have gone out.
+  send_heart_check: false
 
 steps:
   
@@ -31,12 +44,55 @@ steps:
 
         - wait: {min: 0.4, max: 0.7}
 
-        - run_flow: send_heart
+        # Does this cycle send hearts? Timed, that is once per mark per hour --
+        # time_gate raises send_heart_check on the first cycle after :15 or
+        # :50 goes by, and stays down in between. Untimed, every cycle sends,
+        # which is what this loop did before the panel grew the tick box.
+        #
+        # A mark that went by before the run started counts as handled, so
+        # restarting the bot at :20 waits for :50 rather than firing straight
+        # away -- see act_time_gate.
+        - if:
+            value: ${return_heart_timed}
+            then:
+            - time_gate:
+                minutes: ${return_heart_minutes}
+                save_as: send_heart_check
+            else:
+            - set: {send_heart_check: true}
 
-        # play game
+        - if:
+            value: ${send_heart_check}
+            then:
+            - run_flow: send_heart
+            # Back down until the next mark. Safe to write after the call:
+            # run_flow isolates send_heart's own variables and restores this
+            # loop's copy on the way out, so this `set` lands on the copy the
+            # gate reads next cycle.
+            - set: {send_heart_check: false}
+            else:
+            # send_heart is what normally leaves the game on the home screen
+            # (its last step taps home_button). Skipping it would leave the
+            # mailbox open, so the next cycle's blind tap at [453, 224] lands
+            # on whatever the mailbox has put there. Optional because the nav
+            # rail is on screen either way -- a miss costs a scan, not a run.
+            - find_click:
+                template: home_button
+                timeout: 3
+              optional: true
+
+        # Play a round instead of idling between cycles. The tray sets
+        # play_chance_percent to 0 while Auto Play is unticked, so the roll
+        # never hits and every cycle takes the wait branch as before.
         - chance:
             percent: ${play_chance_percent}
             then:
-            - run_flow: play
-
-        - wait: {min: 30, max: 90}
+            - wait: {min: 5, max: 30}
+            - run_flow: {flow: play, isolate: false}
+            - if:
+                value: ${level_cap_found}
+                then:
+                - run_flow: unlock_tsum_level_cap
+                - set: {level_cap_found: false}
+            else:
+            - wait: {min: 30, max: 90}

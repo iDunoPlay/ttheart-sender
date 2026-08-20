@@ -11,10 +11,11 @@ from __future__ import annotations
 import logging
 import threading
 from enum import Enum
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from ..exceptions import TTHeartError
 from .modes import DEFAULT_MODE, MODES, Mode, get_mode
+from .settings import RETURN_HEART_MINUTES_DEFAULT, clamp_minutes
 
 log = logging.getLogger(__name__)
 
@@ -24,11 +25,19 @@ log = logging.getLogger(__name__)
 SHUTDOWN_TIMEOUT = 8.0
 
 #: Flow variable holding the odds (in percent) that a cycle plays a round.
-#: launch.yaml / resume.yaml declare their own value; the tray overrides it with
-#: :data:`PLAY_CHANCE_OFF` unless the user ticks "Play rounds".
+#: launch.yaml / resume.yaml declare their own value; the tray always overrides
+#: it. The panel offers a tick box rather than odds, so from here it is only
+#: ever all or nothing -- a console run keeps the finer grain via `--var`.
 PLAY_CHANCE_VAR = "play_chance_percent"
 #: What that variable becomes while the tray toggle is off -- never play.
 PLAY_CHANCE_OFF = 0
+#: ...and while it is on -- play every cycle.
+PLAY_CHANCE_ON = 100
+
+#: Flow variables behind the panel's "Return Heart" section: whether hearts go
+#: out on the clock at all, and the minutes of the hour they go out on.
+RETURN_HEART_VAR = "return_heart_timed"
+RETURN_HEART_MINUTES_VAR = "return_heart_minutes"
 
 
 class RunState(Enum):
@@ -46,12 +55,18 @@ class AutomationService:
         *,
         mode: str = DEFAULT_MODE,
         play: bool = False,
+        return_heart: bool = False,
+        return_heart_minutes: Optional[Sequence[int]] = None,
         on_change: Optional[Callable[[], None]] = None,
         on_notify: Optional[Callable[[str, str, bool], None]] = None,
     ) -> None:
         self._app = app
         self._mode: Mode = get_mode(mode) or MODES[0]
         self._play = bool(play)
+        self._return_heart = bool(return_heart)
+        self._return_heart_minutes = clamp_minutes(
+            RETURN_HEART_MINUTES_DEFAULT if return_heart_minutes is None else return_heart_minutes
+        )
         self._state = RunState.IDLE
         #: What the live run is called -- the mode's label, or "Buy tsum" for
         #: a one-off job, so the panel can say what it is waiting on.
@@ -72,6 +87,18 @@ class AutomationService:
         """Whether a run is allowed to break off and play a round."""
         with self._lock:
             return self._play
+
+    @property
+    def return_heart(self) -> bool:
+        """Whether hearts go out on the clock rather than every cycle."""
+        with self._lock:
+            return self._return_heart
+
+    @property
+    def return_heart_minutes(self) -> List[int]:
+        """The minutes of the hour hearts go out on, while that is on."""
+        with self._lock:
+            return list(self._return_heart_minutes)
 
     @property
     def state(self) -> RunState:
@@ -136,12 +163,51 @@ class AutomationService:
     def toggle_play(self) -> bool:
         return self.set_play(not self.play)
 
+    def set_return_heart(self, enabled: bool) -> bool:
+        """Turn timed heart-sending on or off for the next Start."""
+        enabled = bool(enabled)
+        with self._lock:
+            if self._return_heart is enabled:
+                return False
+            self._return_heart = enabled
+        log.info(
+            "Return Heart %s (%s)",
+            "on" if enabled else "off",
+            self._describe_return_heart(),
+        )
+        self._on_change()
+        return True
+
+    def set_return_heart_minutes(self, minutes: Sequence[int]) -> bool:
+        """Set the marks the next Start hands the flow. Clamped to 0-59."""
+        marks = clamp_minutes(minutes)
+        with self._lock:
+            if self._return_heart_minutes == marks:
+                return False
+            self._return_heart_minutes = marks
+        log.info("Return Heart marks set to %s", self._describe_return_heart())
+        self._on_change()
+        return True
+
     def _describe_play(self) -> str:
-        return "flow default" if self.play else f"{PLAY_CHANCE_VAR}={PLAY_CHANCE_OFF}"
+        return f"{PLAY_CHANCE_VAR}={self._chance()}"
+
+    def _describe_return_heart(self) -> str:
+        if not self.return_heart:
+            return "every cycle"
+        return ", ".join(f":{minute:02d}" for minute in self.return_heart_minutes)
+
+    def _chance(self) -> int:
+        """All or nothing: the panel's tick box is the only switch there is."""
+        return PLAY_CHANCE_ON if self.play else PLAY_CHANCE_OFF
 
     def _variables(self) -> Optional[Dict[str, Any]]:
-        """Overrides for the next run; ``None`` leaves the flow's own vars be."""
-        return None if self.play else {PLAY_CHANCE_VAR: PLAY_CHANCE_OFF}
+        """Overrides for the next run. The panel always has the last word."""
+        return {
+            PLAY_CHANCE_VAR: self._chance(),
+            RETURN_HEART_VAR: self.return_heart,
+            RETURN_HEART_MINUTES_VAR: self.return_heart_minutes,
+        }
 
     def start(self) -> bool:
         """Run the selected mode. Does nothing if a run is already going."""

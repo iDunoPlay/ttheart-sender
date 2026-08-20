@@ -38,9 +38,10 @@ its `class=` into `window.target.class_names` in `config.yaml`.
 
 Two entry points. `flows/launch.yaml` launches the game and clears the startup
 prompts, then hands off to `flows/resume.yaml` — the forever loop that claims
-the mailbox, sends hearts, and (if `play_chance_percent` says so) breaks off to
-play a round. `resume` on its own skips the launch and assumes the game is
-already up.
+the mailbox, sends hearts (every cycle, or on the clock when
+`return_heart_timed` is set), and (if `play_chance_percent` says so) plays a
+round instead of pausing between cycles. `resume` on its own skips the launch
+and assumes the game is already up.
 
 ```powershell
 python main.py run launch --dry-run   # log the clicks, send nothing
@@ -57,6 +58,7 @@ python main.py validate               # parse them without running
 python main.py snip send_heart        # re-crop a button (F8 at each corner)
 python main.py find send_heart        # test-match it right now
 python main.py point                  # hover + F8 to read a coordinate
+python main.py region                 # F8 at two corners -> the --board string
 ```
 
 ---
@@ -332,6 +334,225 @@ centrality so weakly it chose a tsum off the bottom edge of the play area; and
 a pick with no partners, which cannot distinguish "marks nothing" from "had
 nothing to mark". If a probe reports a negative, suspect the probe first.
 
+#### …but it wins when you are the one pressing
+
+```powershell
+python -m ttheart_sender.game.tsum assist            # hold a tsum, keep holding
+python -m ttheart_sender.game.tsum assist --dry-run  # report the path, move nothing
+python -m ttheart_sender.game.tsum assist --debug    # + write what it saw per press
+```
+
+`assist` is a separate mode, not a change to `play` — switch between them by
+running one or the other. You press and hold a tsum yourself; it reads which
+tsums the game marked, orders them into a path starting at the one under your
+finger, and warps the cursor through them. **It never presses** — your press
+is what starts the stroke — and by default it *does* release, the moment the
+path is walked. Pass `--no-auto-release` to keep the release yourself.
+
+That default is measured, not tidiness. In the first live run, releasing early
+was the commonest way a press was wasted: three of six good readings were cut
+short, one after 25 of 41 legs. A long chain is seconds of walking and the game
+gives no sign that it is still going, so asking for a steadier hand was never
+the fix.
+
+This is the same reading `--verify-hold` does, and none of what sank it
+applies. That run lost because it paid ~0.1s on every drag and halved the
+chains played; here you choose when to press, so there is no throughput to
+lose. Better, it gets a *cleaner* read: `--hold-delay` was being squeezed to
+0.10 to save time, below the 0.15 floor where marks have not rendered, whereas
+a human holds far longer than either. `--delay` defaults to 0.25 for that
+reason.
+
+Three differences from `play`'s chain building, all because the game is
+answering rather than being guessed at:
+
+- **No length cap** (`--max-chain 0`). `play` caps at 8 to keep a *guessed*
+  tour tight; there is no guess here, and longer scores better.
+- **The path is forced to start under your finger.** `orient_chain` may reverse
+  a path to shorten its opening hop and `_nearest_neighbor_tour` picks its own
+  start — free choices only while nothing is being touched yet.
+- **Hits under the glow are kept but counted separately.** `marked_by_game`
+  keeps everything within the aura *regardless*, because its risky move is
+  dropping a member from a chain. Here the risky move is the opposite one, so
+  a reaction inside the aura has to clear the same threshold as any other, and
+  the report says how many hits were aura-close so a bad reading is visible.
+
+It refuses rather than guesses, and prints why: you pressed somewhere that is
+not on a detected tsum, the game marked fewer than `--min-chain` tsums (below
+three it clears nothing, so a short path is worse than none), or **more than
+`--max-marked` of the board lit up**.
+
+That last one replaces the drift check `hold` uses, and is worth explaining.
+Refusing up front on a moving board was tried first and was wrong twice over.
+It measured drift across the *whole frame*, which never reads still during a
+round and never could — the score counter, the timer and the FEVER meter all
+animate continuously, so it was a HUD activity meter that said nothing about
+the pile. And even measured correctly, the pile is rarely perfectly still
+mid-round, and you are the one who picked the moment.
+
+So the reading is judged instead of the precondition. A board that shifted
+between the baseline and the hold differs from itself *everywhere*, so nearly
+every tsum clears the threshold — indistinguishable from marks one tsum at a
+time, obvious in the aggregate. Real readings came in at 15% and 32% of the
+board; a press caught mid-settle reported 86%; a synthetic 4px shift measures
+59%. Hence a 50% default. `--drift` still exists and still refuses up front,
+now measured over the board alone, but defaults to 0 (off).
+
+The button is watched globally, because a press that lands on the emulator
+sends this process no event to subscribe to. Clicks anywhere else on the
+desktop are ignored silently, so leaving `assist` running while you use another
+window is harmless.
+
+#### Narrowing what it looks at
+
+Every board reader — `assist`, `play`, `analyze`, `hold` — takes `--board
+x,y,w,h`, in pixels relative to the emulator's content area. Without it the
+rect comes from the frame size, via the layouts measured in `LAYOUTS`.
+
+**The live layout (994x578) carries two rects, and FEVER decides which.**
+
+```python
+"board":       (10, 314, 525, 456),   # tight on the pile -- the default
+"fever_board": (22, 291, 502, 451),   # FEVER's own rect -- used for its ~10s
+```
+
+The tight rect plays better, and that is the measure that counts. Offline
+proxies disagree — over 151 captured in-play frames the wide rect holds a
+median radius of 22.9 against 16.2, and collapses below 12px on 13.9% of
+frames against 26.5% — because a rect that slices tsums at its edge makes them
+read *smaller* than they are (the distance transform measures the visible
+inscribed radius) and drags the radius estimate down. Those proxies say
+nothing about whether the chains found are worth dragging, which is why they
+lose the argument to a played round.
+
+FEVER gets its own rect and hands it back afterwards. It was re-measured with
+`region` on 2026-08-19: it sits higher than the normal rect (the pile rides up
+under FEVER) and is inset at the sides. The 40%-vs-none FEVER radius-collapse
+figure quoted before belonged to the older, wider FEVER rect it replaces
+(`8,265,522,535`), so it no longer describes this one.
+
+An explicit `--board` is never swapped out — someone who passed a rect asked
+for that rect.
+
+Narrowing is safe for the skill icon: `read_base_kind` is handed the full frame
+rather than the crop, because the button sits below the play area.
+
+Measure it by marking two corners:
+
+```powershell
+python main.py region -o scratchpad/region.png
+#   Point at the TOP-LEFT corner of the region and press F8
+#   Now point at the BOTTOM-RIGHT corner and press F8
+#
+#   Region: 502x451 at content (22, 291)
+#     --board 22,291,502,451
+```
+
+Then paste it in:
+
+```powershell
+python -m ttheart_sender.game.tsum assist --board 22,291,502,451
+```
+
+Corners can be marked in either order or on either diagonal. `-o` saves a crop
+of what you selected, which is worth doing: a board rect that is slightly wrong
+is not *obviously* wrong — detection still returns tsums, just the wrong set,
+and half a tsum sliced by the edge of the rect reads as a smaller tsum and
+drags the radius estimate down with it. Look at the crop rather than trusting
+the numbers.
+
+`point` gives the same coordinate space one point at a time (`content=(x, y)`)
+if you would rather do the subtraction yourself, and `--board full` uses the
+whole captured frame.
+
+Two things a narrower region changes, both worth knowing before you shrink it:
+
+- **Marks outside it are invisible.** The game lights up every linkable tsum on
+  the board, so cropping does not stop it marking them — it stops `assist`
+  *seeing* them, and the chain it draws is that much shorter.
+- **Detection gets faster**, since k-means and the distance transform both
+  scale with area. That is the real reason to crop: `live -n 20` will tell you
+  what you actually bought.
+
+| flag | what it changes |
+|---|---|
+| `--board x,y,w,h` | restrict every reader to that rect; `region` measures it |
+| `--delay 0.25` | wait before reading the marks; 0.15 is the floor |
+| `--threshold 8.0` | mean pixel change that counts as a mark |
+| `--aura 90` | radius the glow splashes over |
+| `--min-chain 3` | below this the cursor does not move |
+| `--max-chain 0` | 0 = drag everything marked |
+| `--mark-frames 3` | read the marks from N frames; only persistent change counts |
+| `--mark-gap 0.05` | seconds between those frames |
+| `--max-marked 0.5` | reject a reading where over half the board lit up |
+| `--drift 0` | 0 = off; refuse up front on a board moving this much |
+| `--no-auto-release` | keep the release yourself instead of it letting go |
+| `--dry-run` / `--debug` | report only / save the marked board and raw diff |
+
+#### FEVER
+
+FEVER turns the board's background black and animates it for ~10 seconds, and
+detection is visibly worse throughout. Two separate things are going on, and
+only one of them is currently fixed.
+
+**The mark reading is fixed.** A two-frame diff cannot tell a mark from
+anything else that moved, and during FEVER everything moves — so a single
+frame reads the animation as marks. `assist` now samples `--mark-frames`
+frames (default 3) spaced `--mark-gap` apart and keeps only what changed in
+*all* of them: a mark holds still for the whole hold, a sparkle is somewhere
+else by the next frame. Measured over six boards with 45 moving sparkles
+painted on:
+
+| frames | real marks kept | false marks |
+|---|---|---|
+| 1 | 2.67 / 3 | 10.7 |
+| 2 | 2.67 / 3 | 0.7 |
+| **3** | **2.67 / 3** | **0.0** |
+
+It costs ~110ms of the hold, which is free here for the same reason the
+generous `--delay` is. The same trick suppresses a still-settling pile, so it
+helps outside FEVER too.
+
+**FEVER is detected, not inferred.** `templates/max_fever.png` is the meter at
+full — gold, the instant before FEVER starts. `FeverWatch` matches it on every
+frame and opens a ten-second window; everything else asks the window, not the
+template, because the gold bar is a *trigger* visible for a moment rather than
+a state that lasts.
+
+Two details it needs, both measured on the 151 captured frames:
+
+- **Its own confidence, 0.75.** The three frames that really are the trigger
+  score 0.79-0.82 and the next best scores 0.66, so the shipped 0.85 default
+  matches *none* of them and anything in 0.70-0.78 separates them cleanly.
+- **A ten-second window.** After the cleanest trigger the FEVER glow persists
+  for 19 frames at 0.5s spacing — 9.5s, which is the ten seconds FEVER runs.
+
+The window re-arms on every match rather than only the first: the bar sits full
+for several frames before it starts draining, and FEVER has not begun counting
+down until it does.
+
+A missing `max_fever` template disables the switch and says so, rather than
+failing — `templates/` predating it still runs.
+
+**Do not detect FEVER by board darkness.** It was tried and it is wrong: during
+FEVER the board is a dark navy *ringed with neon*, but it stays full of
+brightly lit tsums, so median lightness barely moves. Frames that do read dark
+are mostly skill activations, and real FEVER frames were missed entirely.
+
+To capture more FEVER frames, note that `grab` **drops** frames whose tsum
+count looks implausible — during FEVER, precisely the frames worth keeping.
+Widen the filter:
+
+```powershell
+python -m ttheart_sender.game.tsum grab --prefix fever -n 120 --interval 0.5 `
+    --min-tsums 0 --max-tsums 100000
+```
+
+One limit worth knowing: the mark is read as a difference, so a glow that
+barely changes a tsum's pixels reads as no mark. Keep your hand still while it
+draws — a physical mouse movement fights the warped cursor — and note that a
+touchscreen cannot work this way at all, since the cursor is what gets moved.
+
 `eval` re-detects every reviewed board, matches detections to ground truth by
 position, and reports precision, recall and f1, plus two kind errors the
 groups expose: **splits** (one character read as several colour clusters, so
@@ -392,6 +613,160 @@ credited if a human separately marked the miss.
 
 ---
 
+## Did the drag actually clear anything?
+
+`played N chains, cleared M tsums` used to be a claim nobody had checked: `M`
+was the length of the chains *proposed*, so a 3-chain the game marked only two
+of counted as three cleared while nothing popped at all. The report now says
+`dragged`, which is what that number always was, and only prints `cleared`
+when something measured it.
+
+`--verify` cannot measure it. That check is the mean difference across the
+whole crop against `--change-tol 2.0`, and it answers a different question --
+did the emulator see the stroke. A live board passes it on animation alone:
+the score counter, the timer, the FEVER meter and a settling pile all move.
+
+`--verify-clears` looks only where the chain was:
+
+```powershell
+python -m ttheart_sender.game.tsum play --duration 90 --verify-clears
+```
+
+```
+  BASE chain of 5  (52 tsums, 96ms)
+    popped 5/5 (78/128/35/145/142 vs idle 4)
+  #3 chain of 3  (49 tsums, 91ms)
+    popped 0/3 (6/5/7 vs idle 5)
+```
+
+A tsum that cleared is replaced by whatever falls into its place -- a large
+change inside its own disk. One that jiggled is the same face a pixel or two
+over. Measured on a real board: a 1-3px whole-board shift moves a disk by
+**5-8**, while a tsum actually replaced moves by **35-145**. `--clear-tol 20`
+sits in that gap, and every reading prints the board's own idle noise beside
+it (the median over the tsums that were *not* dragged) so a round tells you
+whether the threshold needs moving.
+
+It costs no extra capture: `--verify` already grabs the frame this reads.
+
+Two failures it separates that used to look identical:
+
+| | what it means | the cure |
+|---|---|---|
+| board did not change | the emulator missed the stroke | walk slower, `--per-step` |
+| board changed, nothing popped | the chain was not one character | do not offer that kind again |
+
+Only the second is reported as `the game would not accept`; it blacklists the
+kind and leaves the drag speed alone, because slowing down cannot fix a chain
+that was misread rather than mis-delivered.
+
+Still off by default: it is a measurement, and the point of measuring is to
+compare a round with it against a round without.
+
+---
+
+## Collecting training data while you play
+
+The ceiling above is the reason this exists: colour cannot separate two
+characters that share one, and the fix is a signal colour does not carry. That
+needs data, and the game already gives it away — holding a tsum lights up
+every tsum it counts as linkable, which is identity *and* reachability, judged
+by the only authority that matters. Off by default; switch it on in
+`config.yaml`:
+
+```yaml
+dataset:
+  enabled: true
+  dir: dataset            # relative paths land next to the .exe
+  per_round: 20           # cap per round
+  every: 4                # sample every Nth drag
+  quality: 85
+
+  delay: 0.25             # wait for the mark to render before photographing it
+  frames: 3               # only what changed in ALL of them counts as a mark
+  gap: 0.05
+  max_motion: 12.0        # drop samples taken while the board was still falling
+
+  max_mb: 2048            # stop once the whole dataset folder reaches this
+  max_total: 0            # or once it holds this many samples. 0 = no cap
+```
+
+or per run, without touching the config:
+
+```powershell
+python -m ttheart_sender.game.tsum play --dataset dataset --dataset-limit 20
+```
+
+Flow runs (`python main.py play`, `python main.py run resume`) read the
+config, not the flags -- a flow can still override per step with
+`options: {dataset: some/other/dir}`.
+
+From the tray, tick **Data collection** in the panel. It writes to the same
+place and takes effect on the next round, no restart. The box and
+`dataset.enabled` name the same switch: a first launch shows whatever
+config.yaml says, and after that the box is the one that decides -- unticking
+it has to survive a config file that still says `true`.
+
+Each sampled drag writes three things into `dataset/<timestamp>_<pid>/`:
+
+| | |
+|---|---|
+| `NNNN_before.jpg` | the board crop the chain was chosen from |
+| `NNNN_marked.jpg` | the same crop while the game shows what it marked |
+| `samples.jsonl` | detections, the chain, what survived, settings in force |
+
+**The label is the difference between the two images**, so nothing needs
+annotating by hand — and a character you equip for the first time labels
+itself the first time it is pressed, which is exactly the case a fixed
+classifier would have to be retrained for.
+
+### Check a collection before you trust it
+
+```powershell
+python -m ttheart_sender.game.tsum dataset --dir dataset
+```
+
+It reports whether the marks are actually in the frames — how still the board
+was at press time, how much of it read as marked, and whether the marked tsums
+look like one character — and exits non-zero when the answer is no.
+
+**Run it on the first session, not after the tenth hour.** The first
+collection ran all night and produced 5,729 samples with no usable label in
+any of them, because the highlight was photographed 0.10s after the press,
+before the game had drawn it. The defaults above fix that; this command is how
+you confirm it. Full write-up in [DATASET-FINDINGS.md](DATASET-FINDINGS.md).
+
+### What it costs
+
+The press is the start of the drag either way, so the only cost is the
+`delay` pause and `frames` captures, on sampled drags only. At the defaults
+that is ~20 sampled drags a round rather than the ~100 `--verify-hold` pays
+for — the throughput trap that sank per-drag verification does not apply at
+1-in-4, which is what buys collection a delay long enough for the mark to
+actually be there. The stroke itself is untouched unless `--verify-hold` is
+*also* on: with only `--dataset`, the marks are recorded and the chain is
+dragged exactly as proposed, so the samples describe the bot you actually run.
+
+Disk is the real cost: ~150 KB a sample, so ~3 MB a round at the defaults, or
+roughly 300 MB per hundred rounds.
+
+**There is no per-day cap** — nothing rations collection by date, and
+`per_round` bounds one round rather than the sum of them. Left running
+unattended, the first collection wrote 803 MB and 5,729 samples in thirteen
+hours. `max_mb` (2 GB by default) and `max_total` are the budgets that stop
+it; they are checked against the whole dataset directory when each round opens
+its session folder, so an already-spent budget means that round collects
+nothing rather than that it fails. Clear the folder out, or raise the cap, to
+resume. Drop `per_round` or `quality` to slow the fill rate instead.
+
+### Sending it on
+
+Zip a session folder. The crops are the board rect only — no account name, no
+score, no window chrome — and `samples.jsonl` carries the app version and a
+schema number so an old session stays readable after the format moves on.
+
+---
+
 ## Play from a flow
 
 `play_tsum` is a flow action, so a round is a step like any other:
@@ -427,8 +802,8 @@ There is deliberately **no countdown**: the flow waits for `gameplay_footer`
 | Parameter | Meaning |
 | --- | --- |
 | `duration` | Seconds before it gives up waiting for the end template |
-| `until_found` | Template that means the round is over (checked before each move) |
-| `until_gone` | Same, inverted — a template that vanishes when the round ends |
+| `until_found` | Template that means the round is over (checked before each move); a list stops on any of them |
+| `until_gone` | Same, inverted — a template that vanishes when the round ends; a list must *all* be gone |
 | `confidence` | Match threshold for those two only |
 | `require_played` | Minimum chains for the step to count as successful |
 | `options` | Any `play` flag by its long name with `_` for `-` |
@@ -437,6 +812,21 @@ Both stop templates are matched against the frame the loop already grabbed, so
 watching for the end costs no extra screenshot. It's checked *before* anything
 on that frame is clicked — once the round is over the board is gone, and a
 "chain" found on the results screen would drag across live buttons.
+
+That check only runs *between* drags, though, so a banner that shows for a
+second or two can appear and disappear inside a single drag and never be seen.
+Name several endings to get more than one chance at it:
+
+```yaml
+- play_tsum:
+    duration: 300
+    until_found: [timeup, gameplay_clock_zero]   # whichever lands first
+```
+
+`until_found` stops on **any** template in the list; `until_gone` needs **all**
+of its templates to be gone, so one flaky match on a still-live board can't end
+the round early. Each name is one more match per iteration — list the two or
+three endings that really occur, not everything that might.
 
 `--dry-run` skips this step entirely: the drag code drives pyautogui directly
 for speed, so unlike the other actions it has no no-op backend.
