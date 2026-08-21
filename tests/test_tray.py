@@ -20,51 +20,35 @@ from ttheart_sender.control.hotkey import StopKeyWatcher
 from ttheart_sender.exceptions import WindowNotFoundError
 from ttheart_sender.tray.modes import MODES, get_mode
 from ttheart_sender.tray.service import (
-    BOWL_REJECT_VAR,
     CLAIM_ALL_VAR,
     PLAY_CHANCE_OFF,
     PLAY_CHANCE_ON,
     PLAY_CHANCE_VAR,
     RETURN_HEART_MINUTES_VAR,
     RETURN_HEART_VAR,
-    TSUM_MODE_VAR,
     AutomationService,
     RunState,
 )
 from ttheart_sender.tray.settings import (
     CLAIM_PATTERN_DEFAULT,
     CLAIM_PATTERNS,
-    BOWL_REJECT_OFF,
-    BOWL_REJECT_ON,
     RETURN_HEART_MINUTES_DEFAULT,
-    TSUM_MODE_DEFAULT,
-    TSUM_MODES,
-    bowl_reject_value,
     claim_all_flag,
     clamp_minute,
     clamp_minutes,
     normalize_claim_pattern,
-    normalize_tsum_mode,
 )
 
 DEFAULT_MARKS = list(RETURN_HEART_MINUTES_DEFAULT)
 
 
-def overrides(chance=PLAY_CHANCE_OFF, timed=False, marks=None, claim_all=False,
-              tsum_mode=TSUM_MODE_DEFAULT, bowl_reject=BOWL_REJECT_ON):
-    """What a run started from the panel should be handed.
-
-    The panel's Play Settings ride along on every run, not only a played one:
-    the flow forwards them into `play_tsum`'s options, and a cycle that never
-    reaches a round simply never reads them.
-    """
+def overrides(chance=PLAY_CHANCE_OFF, timed=False, marks=None, claim_all=False):
+    """What a run started from the panel should be handed."""
     return {
         PLAY_CHANCE_VAR: chance,
         RETURN_HEART_VAR: timed,
         RETURN_HEART_MINUTES_VAR: DEFAULT_MARKS if marks is None else list(marks),
         CLAIM_ALL_VAR: claim_all,
-        TSUM_MODE_VAR: tsum_mode,
-        BOWL_REJECT_VAR: bowl_reject,
     }
 
 
@@ -817,75 +801,3 @@ def test_ticking_the_box_creates_no_folder(tmp_path):
     tray._set_toggle("collect_data", True)
 
     assert not (tmp_path / "dataset").exists()
-
-
-# -- Play Settings --------------------------------------------------------
-def test_play_settings_default_to_normal_with_the_bowl_filter_on():
-    app = FakeApp()
-    service = AutomationService(app)
-
-    assert service.tsum_mode == TSUM_MODE_DEFAULT == "normal"
-    assert service.bowl_reject is True
-
-    service.start()
-    wait_for(lambda: service.state is RunState.IDLE)
-    assert app.variables == [overrides()]
-
-
-def test_the_tick_box_becomes_sixty_or_zero():
-    app = FakeApp()
-    service = AutomationService(app)
-
-    assert service.set_bowl_reject(False)
-    service.start()
-    wait_for(lambda: service.state is RunState.IDLE)
-    assert app.variables[-1][BOWL_REJECT_VAR] == BOWL_REJECT_OFF
-
-    assert service.set_bowl_reject(True)
-    service.start()
-    wait_for(lambda: service.state is RunState.IDLE)
-    assert app.variables[-1][BOWL_REJECT_VAR] == BOWL_REJECT_ON
-
-
-def test_picking_color_reaches_the_flow():
-    app = FakeApp()
-    service = AutomationService(app)
-
-    assert service.set_tsum_mode("color")
-    assert service.set_tsum_mode("color") is False, "no change, no notify"
-    service.start()
-    wait_for(lambda: service.state is RunState.IDLE)
-    assert app.variables[-1][TSUM_MODE_VAR] == "color"
-
-
-def test_an_unknown_mode_leaves_the_current_one_alone():
-    app = FakeApp()
-    service = AutomationService(app)
-    service.set_tsum_mode("color")
-
-    assert service.set_tsum_mode("sideways") is False
-    assert service.tsum_mode == "color"
-
-
-def test_changing_play_settings_mid_run_does_not_change_the_live_run():
-    """Same rule as every other setting: a run keeps what it started with.
-
-    The reading decides what counts as a chain, so swapping it half way
-    through would make the round's own log unreadable.
-    """
-    app = FakeApp(block=True)
-    service = AutomationService(app)
-    service.start()
-    wait_for(lambda: service.state is RunState.RUNNING)
-
-    service.set_tsum_mode("color")
-    service.set_bowl_reject(False)
-    app.release.set()
-    wait_for(lambda: service.state is RunState.IDLE)
-
-    assert app.variables == [overrides()], "the live run saw the new settings"
-
-    service.start()
-    wait_for(lambda: service.state is RunState.IDLE)
-    assert app.variables[-1] == overrides(tsum_mode="color",
-                                          bowl_reject=BOWL_REJECT_OFF)

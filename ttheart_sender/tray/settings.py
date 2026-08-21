@@ -62,43 +62,6 @@ def normalize_claim_pattern(value: Any, default: str = CLAIM_PATTERN_DEFAULT) ->
     return default
 
 
-#: Panel radio -> the reading `play_tsum` uses to decide two tsums are the
-#: same character. "normal" groups them by whatever shades the board splits
-#: into; "color" sorts every tsum into one of the five characters a board
-#: actually deals. See flows/play.yaml and `tsum.TSUM_MODES`.
-TSUM_MODES = (
-    ("normal", "Normal"),
-    ("color", "Color"),
-)
-#: What a fresh install uses. Normal is the reading the bot has always used;
-#: color measures better offline but has no live A/B yet.
-TSUM_MODE_DEFAULT = TSUM_MODES[0][0]
-
-#: The panel offers `bowl_reject` as a tick box rather than a number, because
-#: the measured curve has one useful setting and an off. 60 is where detection
-#: f1 peaks (0.762 -> 0.791); higher starts discarding real tsums.
-BOWL_REJECT_ON = 60
-BOWL_REJECT_OFF = 0
-
-
-def bowl_reject_value(enabled: Any) -> int:
-    """The `bowl_reject` flow variable behind the tick box."""
-    return BOWL_REJECT_ON if enabled else BOWL_REJECT_OFF
-
-
-def normalize_tsum_mode(value: Any, default: str = TSUM_MODE_DEFAULT) -> str:
-    """A stored or user-supplied mode forced back onto a real radio.
-
-    Same guard as :func:`normalize_claim_pattern`: this runs on hand-edited
-    JSON, and an unknown value must not leave the panel with neither button
-    lit.
-    """
-    text = str(value).strip().casefold() if value is not None else ""
-    for key, _label in TSUM_MODES:
-        if key == text:
-            return key
-    return default
-
 
 #: Bounds for the Return Heart spinners. They are minutes of the hour, so the
 #: clock itself sets the range.
@@ -174,21 +137,7 @@ class PanelSettings:
     #: Save training samples while playing. Seeded from config.yaml's
     #: `dataset.enabled` the first time the panel runs, and the panel's own
     #: switch after that -- see :meth:`..tray.app.TrayApp._seed_collection`.
-    #: Stop the run when the cursor leaves the emulator. On by default,
-    #: matching config.yaml -- it is the safety net for a click that lands
-    #: somewhere it should not, and the quickest way to stop by hand.
-    #: Turning it off does NOT give the mouse back: the bot drives the
-    #: physical cursor, so it will keep taking it. It only stops the run
-    #: ending every time the pointer strays.
-    stop_on_cursor_exit: bool = True
     collect_data: bool = False
-    #: Which of :data:`TSUM_MODES` a played round reads the board with.
-    #: "normal" by default -- the reading the bot has always used.
-    tsum_mode: str = TSUM_MODE_DEFAULT
-    #: Throw away finds that are really the bowl showing between tsums. On by
-    #: default, matching flows/play.yaml: it measured best of the settings
-    #: tried, and it is the one that stops a drag walking to an empty spot.
-    bowl_reject: bool = True
     purchase: Dict[str, bool] = field(default_factory=_default_purchase)
 
     # -- conversion ------------------------------------------------------
@@ -224,7 +173,6 @@ class PanelSettings:
         # The loop above already copied it across as a plain string; this is
         # what keeps a typo in the file from lighting neither radio.
         settings.claim_pattern = normalize_claim_pattern(settings.claim_pattern)
-        settings.tsum_mode = normalize_tsum_mode(settings.tsum_mode)
         return settings
 
     def to_dict(self) -> Dict[str, Any]:

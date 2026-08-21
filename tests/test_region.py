@@ -50,11 +50,32 @@ def test_the_live_layout_has_a_normal_rect_and_a_separate_fever_one():
     from ttheart_sender.game.tsum import LAYOUTS
 
     live = LAYOUTS[(994, 578)]
-    assert live["board"] == (22, 395, 507, 370)
-    assert live["fever_board"] == (24, 324, 497, 439)
+    assert live["board"] == (10, 314, 525, 456)
+    assert live["fever_board"] == (22, 291, 502, 451)
     # The point is that they are *different* rects, not what the numbers are.
     # Re-measuring either is expected; losing the split is the regression.
     assert live["board"] != live["fever_board"]
+
+
+def test_the_board_rects_stay_generous():
+    """A tighter rect reads worse, however much better it looks.
+
+    Both rects were once re-measured by eye to something that framed the board
+    more neatly, and detection fell apart: slicing tsums at the edge makes them
+    read smaller, the radius estimate drops, and one tsum comes back as two or
+    three. On the same frames cropped both ways the radius went 17.7px -> 12.3px
+    and f1 0.697 -> 0.416. See the comment on LAYOUTS for the full numbers.
+
+    So this is a floor, not a measurement: re-measure freely, but a rect that
+    does not still cover this much of the screen is the known-bad direction and
+    needs the A/B before it lands.
+    """
+    from ttheart_sender.game.tsum import LAYOUTS
+
+    for key in ("board", "fever_board"):
+        x, y, w, h = LAYOUTS[(994, 578)][key]
+        assert x <= 22 and y <= 314, f"{key} starts too far in"
+        assert x + w >= 524 and y + h >= 742, f"{key} stops too short"
 
 
 def test_fever_selects_its_own_rect():

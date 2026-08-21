@@ -413,40 +413,43 @@ rect comes from the frame size, via the layouts measured in `LAYOUTS`.
 **The live layout (994x578) carries two rects, and FEVER decides which.**
 
 ```python
-"board":       (22, 395, 507, 370),   # normal play -- the default
-"fever_board": (24, 324, 497, 439),   # FEVER's own rect -- used for its ~10s
+"board":       (10, 314, 525, 456),   # normal play
+"fever_board": (22, 291, 502, 451),   # FEVER's ~10s
 ```
 
-**Both were re-measured on 2026-08-20 and are not yet A/B'd.** They replace
-`(10, 314, 525, 456)` and `(22, 291, 502, 451)`, and on the saved frames they
-read worse — same frames, only the crop changed:
+**Do not tighten them.** On 2026-08-20 both were re-measured by eye to
+`(22,395,507,370)` and `(24,324,497,439)` — rects that frame the board more
+neatly on screen — and play got markedly worse. Reverted the same day.
 
-| | old | new |
+The tight rect fits wholly inside the one above, so the comparison is one
+image cropped two ways rather than two captures:
+
+| | the rects above | the tight pair |
 |---|---|---|
-| normal, 13 saved boards | 60 tsums, r 21.8px, 8% off-gate | 82 tsums, r 14.8px, 17% off-gate |
-| FEVER, 24 saved frames | 44 tsums, r 17.7px, 8% off-gate | 40 tsums, r 17.8px, **38% off-gate** |
+| 15 in-play frames from that morning | 72 tsums, r 17.7px, 1/15 collapsed | 99 tsums, r 12.3px, **9/15 collapsed** |
+| 10 hand-labelled boards, detection | **f1 0.697**, 342 real found, 176 phantoms | f1 0.416, 193 real found, 590 phantoms |
 
-("off-gate" = frames `play` discards for holding under 20 or over 110 tsums.)
-The direction is the known mechanism: a rect that slices tsums at its edge
-makes them read *smaller* than they are (the distance transform measures the
-visible inscribed radius), the radius estimate drops, and detection
-over-splits.
+("collapsed" = radius read under 12px.) The mechanism: a rect that slices tsums
+at its edge makes them read *smaller* than they are — the distance transform
+measures the visible inscribed radius — so the radius estimate drops and one
+tsum detects as two or three. The tight rect therefore finds *more* things and
+fewer of them are tsums: 44% fewer real ones at triple the phantoms. It also
+cuts 114 labelled tsums out of frame entirely.
 
-Two reasons that is not a verdict. **This proxy has lost before** — the old
-`board` was the tighter of two candidates, scored worse on exactly these
-measures (median radius 22.9 against 16.2 over 151 in-play frames, radius
-collapse under 12px on 13.9% of frames against 26.5%) and still played better.
-How a chain plays is the measure that counts. And **the saved frames may be
-stale**: they date from the older rects, so if the emulator geometry has moved
-since, these figures describe nothing. `main.py shot` settles that — a frame
-that is no longer 994x578 does not use this layout entry at all.
+**A rect wants to be generous.** Overshooting into the bowl costs phantoms.
+Undershooting costs the radius estimate, and nothing downstream can recover
+from that.
 
-So A/B them before trusting them, with `--verify-clears`, on `cleared` and the
-count of drags that did not register.
+Untested and possibly better: `(8,265,522,535)`, the rect the labelled boards
+were marked with, scores f1 **0.775** — better than either. Not adopted,
+because those labels were made with that rect so the comparison flatters it,
+and because it is larger than any frame collected since, leaving nothing
+current to check it against. A/B it with `--verify-clears` before believing it.
 
 FEVER gets its own rect and hands it back afterwards; the pile rides up during
 it, which is why the two differ. The 40%-vs-none FEVER radius-collapse figure
-quoted in older notes belonged to `8,265,522,535`, two rects ago.
+quoted in older notes belonged to `8,265,522,535`, a different rect again — the
+one flagged as untested above.
 
 An explicit `--board` is never swapped out — someone who passed a rect asked
 for that rect.

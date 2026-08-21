@@ -62,15 +62,13 @@ def test_base_only_is_the_flag_that_filters_and_it_is_off_by_default():
     assert tsum.play_defaults().base_only is False
 
 
-def test_a_weak_base_reading_is_dropped_rather_than_obeyed():
-    """Past `BASE_WEAK` the icon matched nothing, so it must not sort anything.
+def test_no_base_reading_at_all_ranks_by_length():
+    """With `base_kind` None the ordering is by chain length alone.
 
-    Ranking on a guess is worse than ranking on length: it promotes a 3-chain
-    of whatever the guess landed on over a 7-chain that is really there.
+    `--no-base` is one way to get here; a board read before the icon has been
+    matched is the other. Either way nothing may be promoted for being the
+    base, because there is no base to promote.
     """
-    assert tsum.BASE_WEAK == 30.0
-    # With base_kind None -- what the loop passes once it drops a weak reading
-    # -- the ordering is by length alone.
     tsums = _row(1, 60, n=6) + _row(2, 300, n=3)
     chains = find_chains(tsums, 22.0, link_px=105, block=1.25, base_kind=None)
     assert chains[0].kind == 1 and len(chains[0]) == 6

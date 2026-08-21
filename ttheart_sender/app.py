@@ -49,9 +49,10 @@ class Application:
             scales=config.matching.scales,
         )
         self.stop = StopKeyWatcher(config.runner.stop_key)
-        # Registered whatever the setting says, and asked each time it polls:
-        # the tray can flip `stop_on_cursor_exit` mid-run, and a guard added
-        # conditionally here would have frozen that answer at startup.
+        # Registered whatever the setting says, and asked each time it polls
+        # rather than at startup, so `stop_on_cursor_exit` stays a live read of
+        # the config. The panel no longer offers it -- it is on by default and
+        # config.yaml is the only place it can be turned off.
         self.stop.add_guard(
             "cursor",
             CursorGuard(

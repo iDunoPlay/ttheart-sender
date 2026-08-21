@@ -18,12 +18,9 @@ from .modes import DEFAULT_MODE, MODES, Mode, get_mode
 from .settings import (
     CLAIM_PATTERN_DEFAULT,
     RETURN_HEART_MINUTES_DEFAULT,
-    TSUM_MODE_DEFAULT,
-    bowl_reject_value,
     claim_all_flag,
     clamp_minutes,
     normalize_claim_pattern,
-    normalize_tsum_mode,
 )
 
 log = logging.getLogger(__name__)
@@ -53,12 +50,6 @@ RETURN_HEART_MINUTES_VAR = "return_heart_minutes"
 #: branches to take, so the name is boiled down to this flag on the way out.
 CLAIM_ALL_VAR = "claim_all"
 
-#: Flow variables behind the panel's "Play Settings" section. play.yaml
-#: forwards both into the `play_tsum` step's `options:`, so they reach the
-#: board reader without the panel having to know that step exists.
-TSUM_MODE_VAR = "tsum_mode"
-BOWL_REJECT_VAR = "bowl_reject"
-
 
 class RunState(Enum):
     IDLE = "idle"
@@ -78,8 +69,6 @@ class AutomationService:
         return_heart: bool = False,
         return_heart_minutes: Optional[Sequence[int]] = None,
         claim_pattern: str = CLAIM_PATTERN_DEFAULT,
-        tsum_mode: str = TSUM_MODE_DEFAULT,
-        bowl_reject: bool = True,
         on_change: Optional[Callable[[], None]] = None,
         on_notify: Optional[Callable[[str, str, bool], None]] = None,
     ) -> None:
@@ -91,8 +80,6 @@ class AutomationService:
             RETURN_HEART_MINUTES_DEFAULT if return_heart_minutes is None else return_heart_minutes
         )
         self._claim_pattern = normalize_claim_pattern(claim_pattern)
-        self._tsum_mode = normalize_tsum_mode(tsum_mode)
-        self._bowl_reject = bool(bowl_reject)
         self._state = RunState.IDLE
         #: What the live run is called -- the mode's label, or "Buy tsum" for
         #: a one-off job, so the panel can say what it is waiting on.
@@ -131,18 +118,6 @@ class AutomationService:
         """Which pattern the mailbox pass uses -- see ``CLAIM_PATTERNS``."""
         with self._lock:
             return self._claim_pattern
-
-    @property
-    def tsum_mode(self) -> str:
-        """How a played round decides two tsums are the same character."""
-        with self._lock:
-            return self._tsum_mode
-
-    @property
-    def bowl_reject(self) -> bool:
-        """Whether finds that are really the bowl showing get thrown away."""
-        with self._lock:
-            return self._bowl_reject
 
     @property
     def state(self) -> RunState:
@@ -250,34 +225,6 @@ class AutomationService:
         self._on_change()
         return True
 
-    def set_tsum_mode(self, mode: str) -> bool:
-        """Pick the board reading the next Start will hand the flow.
-
-        Like every other setting here, a live run keeps what it started with:
-        the reading decides what counts as a chain, and swapping it mid-round
-        would make the round's own log unreadable.
-        """
-        chosen = normalize_tsum_mode(mode, self.tsum_mode)
-        with self._lock:
-            if self._tsum_mode == chosen:
-                return False
-            self._tsum_mode = chosen
-        log.info("Tsum mode set to %s (%s=%s)", chosen, TSUM_MODE_VAR, chosen)
-        self._on_change()
-        return True
-
-    def set_bowl_reject(self, enabled: bool) -> bool:
-        """Turn the "ignore the bowl" filter on or off for the next run."""
-        enabled = bool(enabled)
-        with self._lock:
-            if self._bowl_reject is enabled:
-                return False
-            self._bowl_reject = enabled
-        log.info("Bowl reject %s (%s=%s)", "on" if enabled else "off",
-                 BOWL_REJECT_VAR, bowl_reject_value(enabled))
-        self._on_change()
-        return True
-
     def _describe_play(self) -> str:
         return f"{PLAY_CHANCE_VAR}={self._chance()}"
 
@@ -297,8 +244,6 @@ class AutomationService:
             RETURN_HEART_VAR: self.return_heart,
             RETURN_HEART_MINUTES_VAR: self.return_heart_minutes,
             CLAIM_ALL_VAR: claim_all_flag(self.claim_pattern),
-            TSUM_MODE_VAR: self.tsum_mode,
-            BOWL_REJECT_VAR: bowl_reject_value(self.bowl_reject),
         }
 
     def start(self) -> bool:

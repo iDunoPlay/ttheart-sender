@@ -61,37 +61,22 @@ LAYOUTS: dict[tuple[int, int], dict] = {
         # Two rects, and which one is used depends on FEVER -- see
         # :class:`FeverWatch`.
         #
-        # Both re-measured with `main.py region` on 2026-08-20, replacing
-        # `board` (10,314,525,456) and `fever_board` (22,291,502,451).
+        # `board` is tight on the middle of the pile. Offline metrics prefer
+        # the wider rect below (median radius 22.9 vs 16.2 over 151 captured
+        # in-play frames, and a radius collapse below 12px on 13.9% of frames
+        # against 26.5%), because a rect that slices tsums at its edge makes
+        # them read smaller than they are and drags the radius estimate down.
+        # It is kept anyway: it plays better, which is the measure that counts,
+        # and those proxies say nothing about whether the chains found are ones
+        # worth dragging.
         #
-        # THESE READ WORSE ON THE SAVED FRAMES THAN WHAT THEY REPLACE, and the
-        # numbers are here so nobody has to rediscover it. Same frames, only
-        # the crop changed:
-        #
-        #   normal, 13 saved boards   old: 60 tsums r=21.8px,  8% off-gate
-        #                             new: 82 tsums r=14.8px, 17% off-gate
-        #   FEVER, 24 saved frames    old: 44 tsums r=17.7px,  8% off-gate
-        #                             new: 40 tsums r=17.8px, 38% off-gate
-        #
-        # ("off-gate" = frames `play` throws away for holding under 20 or over
-        # 110 tsums.) The direction is the mechanism already documented below:
-        # a rect that slices tsums at its edge makes them read smaller than
-        # they are, the radius estimate drops, and detection over-splits.
-        #
-        # Two reasons that is not automatically a verdict. First, this exact
-        # proxy has lost before: the previous `board` was tighter than the
-        # alternative, scored worse on it (median radius 22.9 vs 16.2 over 151
-        # in-play frames, radius collapse under 12px on 13.9% of frames against
-        # 26.5%) and still played better -- and how a chain plays is the
-        # measure that counts. Second, the saved frames date from the older
-        # rects; if the emulator geometry has moved since, they are stale and
-        # these figures describe nothing. `main.py shot` settles that -- a
-        # frame that is no longer 994x578 does not use this entry at all.
-        #
-        # So: worth an A/B before trusting, with `--verify-clears`, on the
-        # `cleared` and `did not register` counts.
-        "board": (22, 395, 507, 370),
-        "fever_board": (24, 324, 497, 439),
+        # `fever_board` is the rect FEVER borrows for its ~10s. It was
+        # re-measured with `main.py region` on 2026-08-19: it sits higher than
+        # `board` (the pile rides up under FEVER) and is inset at the sides.
+        # The metrics above were taken against the older, wider FEVER rect it
+        # replaces (8,265,522,535), so they no longer describe this one.
+        "board": (10, 314, 525, 456),
+        "fever_board": (22, 291, 502, 451),
         "base": "83,858,26",
     },
     (956, 542): {                       # saved screenshot, no emulator chrome
@@ -188,33 +173,6 @@ def _background_clusters(labels: np.ndarray, centres: np.ndarray) -> set[int]:
         if np.linalg.norm(c - centres[modal]) < 18:
             bg.add(i)
     return bg
-
-
-def board_colours(bgr: np.ndarray, palette: np.ndarray) -> np.ndarray:
-    """The Lab colours of the bowl behind the tsums, for a frame already fitted.
-
-    :func:`_background_clusters` answers the same question but wants the whole
-    label image, which only :func:`detect` has. This reads the crop's border
-    ring -- always board, never tsum -- assigns just those few thousand pixels
-    to the palette, and applies the identical rule: whatever dominates the ring
-    is background, plus anything within 18 Lab of it, which catches the lighter
-    rim gradient as one background rather than as a colour of its own.
-
-    Verified to pick the same clusters as `_background_clusters` on all ten
-    labelled boards, for ~2.5ms against a re-quantisation of the full crop.
-    """
-    lab = cv2.cvtColor(cv2.GaussianBlur(bgr, (5, 5), 0), cv2.COLOR_BGR2LAB)
-    mask = np.ones(bgr.shape[:2], bool)
-    mask[8:-8, 8:-8] = False
-    px = lab[mask].reshape(-1, 3).astype(np.float32)
-    if px.size == 0:
-        return palette[:0]
-
-    dist = (palette * palette).sum(axis=1)[None, :] - 2.0 * (px @ palette.T)
-    modal = int(np.bincount(dist.argmin(axis=1), minlength=len(palette)).argmax())
-    bg = [i for i, c in enumerate(palette)
-          if i == modal or np.linalg.norm(c - palette[modal]) < 18]
-    return palette[bg]
 
 
 def _lab_to_bgr(lab_centre: np.ndarray) -> tuple:
@@ -322,41 +280,6 @@ def _peaks(dt: np.ndarray, radius: float, floor: float,
     return out
 
 
-def _face_lab(bgr: np.ndarray, tsums: Sequence["Tsum"], radius: float,
-              *, fill: float = 0.0) -> np.ndarray:
-    """Median Lab colour of each tsum's inner face, one row per tsum.
-
-    The middle 0.45r only. Eyes, outline and the rim gradient all live further
-    out, and a sample that reaches them is a blend no character actually has.
-
-    This is the evidence every identity decision in this module runs on --
-    :func:`_recolour`, :func:`purity_filter` and :func:`fixed_kinds` all read
-    the same numbers, so a change here moves all three together.
-
-    Sampled in a box around each tsum rather than against a full-frame mask:
-    same medians, but the cost stops scaling with board size, which matters
-    once this runs on every frame instead of only when `--recolour` was on.
-    """
-    lab = cv2.cvtColor(cv2.GaussianBlur(bgr, (5, 5), 0), cv2.COLOR_BGR2LAB).astype(np.float32)
-    h, w = lab.shape[:2]
-    sample = max(2, int(radius * 0.45))
-    out = np.full((len(tsums), 3), fill, np.float32)
-
-    for i, t in enumerate(tsums):
-        cx, cy = int(t.x), int(t.y)
-        x0, y0 = max(0, cx - sample), max(0, cy - sample)
-        x1, y1 = min(w, cx + sample + 1), min(h, cy + sample + 1)
-        patch = lab[y0:y1, x0:x1]
-        if patch.size == 0:
-            continue
-        yy, xx = np.ogrid[y0:y1, x0:x1]
-        disc = (yy - cy) ** 2 + (xx - cx) ** 2 <= sample * sample
-        px = patch[disc]
-        if px.size:
-            out[i] = np.median(px, axis=0)
-    return out
-
-
 def _recolour(bgr: np.ndarray, tsums: list[Tsum], radius: float,
               thresh: float) -> list[Tsum]:
     """Re-decide which tsums are the same character, one sample per tsum.
@@ -388,7 +311,15 @@ def _recolour(bgr: np.ndarray, tsums: list[Tsum], radius: float,
     if len(tsums) < 2:
         return tsums
 
-    feats = _face_lab(bgr, tsums, radius)
+    lab = cv2.cvtColor(cv2.GaussianBlur(bgr, (5, 5), 0), cv2.COLOR_BGR2LAB).astype(np.float32)
+    sample = max(2, int(radius * 0.45))
+    feats = []
+    for t in tsums:
+        patch = np.zeros(bgr.shape[:2], np.uint8)
+        cv2.circle(patch, (int(t.x), int(t.y)), sample, 1, -1)
+        px = lab[patch.astype(bool)]
+        feats.append(np.median(px, axis=0) if px.size else np.zeros(3, np.float32))
+    feats = np.asarray(feats, np.float32)
 
     dist = np.linalg.norm(feats[:, None] - feats[None, :], axis=2)
     parent = list(range(len(tsums)))
@@ -421,214 +352,6 @@ def _recolour(bgr: np.ndarray, tsums: list[Tsum], radius: float,
     return tsums
 
 
-#: How many characters a board holds. The game deals a fixed hand: five
-#: without items, four when an item has removed one. It is not a tuning knob
-#: -- it is a fact about the board, and the whole value of :func:`fixed_kinds`
-#: comes from it being known rather than inferred.
-BOARD_KINDS = 5
-
-
-#: How the board's colours are read, as a name rather than a number.
-#:
-#: "normal" is the original reading: the pixel k-means clusters are the
-#: identity, so two tsums are the same character when they landed in the same
-#: colour cluster. "color" re-files every detection into the characters the
-#: board actually holds -- see :func:`fixed_kinds`.
-#:
-#: A name because this is a choice between two readings, not a dial. The
-#: number behind it is still reachable as `--kinds N`, which is what the
-#: four-character board an item leaves behind needs.
-TSUM_MODES: dict[str, int] = {"normal": 0, "color": BOARD_KINDS}
-
-
-def resolve_kinds(opts) -> int:
-    """How many characters to read this board as, from mode plus override.
-
-    `--kinds` wins when it is set, so `--tsum-mode color --kinds 4` is how you
-    say "the colour reading, on a board an item has taken a character off".
-    An explicit number beating the named default is the ordinary precedence,
-    and it keeps flows that already say `kinds: 5` working untouched.
-    """
-    override = getattr(opts, "kinds", 0) or 0
-    if override:
-        return int(override)
-    return TSUM_MODES.get(getattr(opts, "tsum_mode", "normal"), 0)
-
-
-def describe_mode(opts) -> str:
-    """One line naming the reading in force, for the run log."""
-    kinds = resolve_kinds(opts)
-    if not kinds:
-        return "reading: normal (colour clusters as they fall)"
-    named = next((n for n, v in TSUM_MODES.items() if v == kinds), None)
-    how = f"{named}" if named else f"color, {kinds} characters"
-    return f"reading: {how} ({kinds} characters per board)"
-
-
-def fixed_kinds(bgr: np.ndarray, tsums: list[Tsum], radius: float,
-                n: int = BOARD_KINDS, centres: Optional[np.ndarray] = None,
-                *, palette: Optional[np.ndarray] = None, over: int = 3,
-                spare: int = 1, seed: int = 0) -> tuple[list[Tsum], Optional[np.ndarray]]:
-    """Re-decide which tsums are the same character, knowing there are `n`.
-
-    :func:`_recolour` samples exactly the right evidence and is off by default
-    anyway, because it merges up to a *distance threshold* and no threshold is
-    defensible: the labels record only pairs that DO match, so a positive-only
-    score keeps improving as you merge more, right up to "everything is one
-    character". Tuned that way it read 80% -> 89% of drawn links and was a
-    clear end-to-end regression -- chains of 27 and 31 tsums.
-
-    The count removes the need for the threshold. A board holds `n` characters,
-    so the merge stops at `n` groups whatever the distances happen to be, and
-    the runaway that shelved `_recolour` cannot occur. Nothing here is fitted
-    against the labels; `n` comes from the game's rules.
-
-    The evidence supports it. Scored against the hand-marked groups with the
-    groups *given*, a nearest-centroid rule on these face colours is right
-    **95.1%** of the time (367 tsums over ten boards), on a within-group
-    scatter of ~7 Lab against ~20-30 between the closest pair of characters.
-    Face colour separates the hand; the only question was ever how to find the
-    centres without the answer key.
-
-    Not by fitting `n` centres directly -- that scores *worse* than the pixel
-    clusters it replaces (10 splits / 38 merges against 14 / 18). Detection
-    precision is ~0.675, so a third of what it is handed is phantom, and
-    k-means minimises total variance: the phantom mass is real mass, it buys
-    centres with it, and two genuine characters get folded together to pay.
-
-    So fit `over * n` centres and keep the `n` most populous. A character is
-    ~a fifth of a crowded board; a phantom sits wherever its stray pixels are,
-    and thinly. Over-provisioning lets the phantoms have their own centres and
-    then discards them. Measured over five seeds:
-
-    | centres fitted | splits | merges | total |
-    |---------------:|-------:|-------:|------:|
-    | 5 (no headroom)|     12 |     36 |    48 |
-    | 10             |     12 |     22 |    34 |
-    | **15 (3n)**    |  **9** | **13** |**22** |
-    | 20             |     12 |     14 |    26 |
-    | pixel k=12     |     14 |     18 |    32 |
-
-    14 through 18 all land at 22-25 and every seed agrees, so `over=3` sits on
-    a plateau rather than a tuned edge. `over` is a multiplier rather than a
-    count so that the `n=4` board an item leaves behind gets its headroom too
-    -- untested, for want of a labelled board with an item on it.
-
-    Population alone is still not enough, and this is what `spare` is for. On
-    8 of those 10 boards one seat went to a cluster that was *entirely*
-    phantom -- 16 of 16 on board 1 -- leaving four seats for five characters
-    and forcing a merge. The merges were not look-alike characters being
-    confused: measured over the pairs that actually merged, they sat a median
-    55.7 Lab apart by face colour. They merged because there was no bucket
-    left.
-
-    So `spare` extra seats are taken and the most board-coloured ones given
-    up. Phantoms are detections that landed on the bowl, so they cluster near
-    the bowl's colour -- 56 Lab from it against 175 for a real character. That
-    is not separable by a fixed threshold (some real characters sit closer to
-    their board than some phantoms do) but it does not need to be: exactly
-    `spare` are dropped, and only their *ranking* against this board's own
-    background decides which. Needs `palette` -- without it there is no
-    background to rank against and the seats go by population alone.
-
-    | rule | splits | merges | total |
-    |---|---:|---:|---:|
-    | pixel clusters, `k=12` | 14 | 18 | 32 |
-    | top `n` by population | 8.8 | 13.4 | 22.2 |
-    | **top `n+1`, drop the most board-like** | **8.4** | **9.4** | **17.8** |
-    | top `n+2`, drop 2 | 10.0 | 10.2 | 20.2 |
-
-    Averaged over five seeds; through `eval` itself it reads 9 splits and 8
-    merges. Every labelled character gets its own bucket on 8 of 10 boards,
-    up from 6.
-
-    The trade it makes: with no seat of their own, phantoms are assigned to
-    the nearest real character instead of being quarantined. `--purity` is
-    the guard already in place for that and catches 69% of them, for 13% of
-    real tsums wrongly dropped. `docs/TODO-fixed-kinds.md` has the rest.
-
-    `centres` can be passed back in to skip the fit, but DO NOT reuse them
-    across a round without measuring first. The hand of five is fixed for a
-    round, so reuse ought to be free -- it is not. The fit is deterministic on
-    a given frame (median centre movement 0.0 Lab over five seeds) but over
-    consecutive in-round frames a quarter of the centres move more than 20 Lab,
-    which at a within-character scatter of ~7 means a different character
-    entirely. The population ranking is the suspect: a character that a drag
-    has just cleared is briefly rarer than a phantom cluster, and loses its
-    seat. `play_loop` therefore refits every frame and re-reads the base tsum
-    with it. Returns the centres it used, or None when it declined to act.
-    """
-    if len(tsums) < n * over:
-        # Too few points to give the phantoms their own centres, and fitting
-        # `n` directly is measured above as worse than doing nothing. Leave the
-        # pixel-cluster kinds alone. A board this empty is not one the play
-        # loop acts on either -- `--min-tsums` is 20.
-        return tsums, centres
-
-    feats = _face_lab(bgr, tsums, radius)
-
-    if centres is None:
-        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.5)
-        cv2.setRNGSeed(seed)
-        _, labels, fitted = cv2.kmeans(np.ascontiguousarray(feats), n * over, None,
-                                       criteria, 8, cv2.KMEANS_PP_CENTERS)
-        counts = np.bincount(labels.ravel(), minlength=len(fitted))
-
-        # Population alone hands one of the n seats to a cluster made entirely
-        # of phantoms, which then costs a real character its own -- see the
-        # docstring. Take `spare` extra seats and give up the ones that look
-        # most like the bowl. No threshold: exactly `spare` are always dropped,
-        # and which ones is decided by this board's own background rather than
-        # by a number tuned on ten of them.
-        ranked = fitted[np.argsort(-counts)]
-        if palette is not None and spare > 0 and len(ranked) > n:
-            board = board_colours(bgr, palette)
-            pool = ranked[:n + spare]
-            if len(board):
-                far = np.linalg.norm(pool[:, None] - board[None], axis=2).min(axis=1)
-                pool = pool[np.argsort(-far)]
-            centres = pool[:n]
-        else:
-            centres = ranked[:n]
-        # k-means numbers its centres by where the initialisation landed, and
-        # the line above then reorders them by population, which moves with the
-        # board. Sorting by colour makes `kind` reproducible, which is what
-        # lets a caller cache a base-tsum id or a skip-list across frames.
-        centres = centres[np.lexsort((centres[:, 2], centres[:, 1], centres[:, 0]))]
-
-    kind = np.linalg.norm(feats[:, None] - centres[None], axis=2).argmin(axis=1)
-    for t, k in zip(tsums, kind):
-        t.kind = int(k)
-        t.colour = _lab_to_bgr(centres[k])
-    return tsums, centres
-
-
-#: A character's face colours sit this close to their own median, measured
-#: over the ten labelled boards. A kind much wider than this is not one
-#: character -- it is the bucket everything unmatched fell into.
-KIND_SCATTER = 7.0
-
-
-def kind_scatter(bgr: np.ndarray, tsums: Sequence[Tsum], radius: float) -> dict[int, float]:
-    """Mean Lab distance from each kind's own median, per kind.
-
-    The cheap test for whether a split is real. Every genuine character reads
-    near :data:`KIND_SCATTER`; a kind several times wider is holding more than
-    one thing. On `idle_03` at `--kinds 5` four kinds read 0.0-0.9 and the
-    fifth reads 35.6, which is the phantoms plus whichever character had no
-    seat left -- a verdict the counts alone (36, 5, 6, 8, 7) only hint at.
-    """
-    if not tsums:
-        return {}
-    feats = _face_lab(bgr, tsums, radius)
-    kinds = np.array([t.kind for t in tsums])
-    out = {}
-    for k in np.unique(kinds):
-        rows = feats[kinds == k]
-        out[int(k)] = float(np.linalg.norm(rows - np.median(rows, axis=0), axis=1).mean())
-    return out
-
-
 def purity_filter(bgr: np.ndarray, tsums: Sequence[Tsum], nodes: Sequence[int],
                   radius: float, tol: float) -> list[int]:
     """Drop chain members that don't actually look like the rest of the chain.
@@ -642,7 +365,16 @@ def purity_filter(bgr: np.ndarray, tsums: Sequence[Tsum], nodes: Sequence[int],
     if len(nodes) < 2:
         return list(nodes)
 
-    feats = _face_lab(bgr, [tsums[i] for i in nodes], radius, fill=1e6)
+    lab = cv2.cvtColor(cv2.GaussianBlur(bgr, (5, 5), 0), cv2.COLOR_BGR2LAB).astype(np.float32)
+    sample = max(2, int(radius * 0.45))
+    feats = []
+    for i in nodes:
+        m = np.zeros(bgr.shape[:2], np.uint8)
+        cv2.circle(m, (int(tsums[i].x), int(tsums[i].y)), sample, 1, -1)
+        px = lab[m.astype(bool)]
+        feats.append(np.median(px, axis=0) if px.size else np.full(3, 1e6, np.float32))
+
+    feats = np.asarray(feats, np.float32)
     centre = np.median(feats, axis=0)
     keep = [n for n, f in zip(nodes, feats) if float(np.linalg.norm(f - centre)) <= tol]
     return keep
@@ -677,8 +409,6 @@ def detect(
     heal_frac: float = 0.9,
     open_ratio: float = 2.2,
     recolour: float = 0.0,
-    kinds: int = 0,
-    bowl_reject: float = 0.0,
     floor_frac: float = 0.42,
     hole_frac: float = 0.8,
     palette: Optional[np.ndarray] = None,
@@ -872,29 +602,8 @@ def detect(
             vis[labels == i] = (0, 0, 255)  # what the dark pass has to work with
         cv2.imwrite(str(debug_dir / "clusters.png"), vis)
 
-    if bowl_reject > 0 and kept:
-        # A detection that landed on the bowl rather than on a tsum carries the
-        # bowl's colour. Measured over the ten labelled boards, real tsums sit a
-        # median 173 Lab from the board's own colour and phantoms 76, with the
-        # real p10 at 74 -- separated enough to act on, overlapping enough that
-        # the cutoff buys phantoms with real tsums rather than for free.
-        bowl = board_colours(bgr, centres)
-        if len(bowl):
-            faces = _face_lab(bgr, kept, radius)
-            far = np.linalg.norm(faces[:, None] - bowl[None], axis=2).min(axis=1)
-            kept = [t for t, d in zip(kept, far) if d >= bowl_reject]
-
     if recolour > 0:
         kept = _recolour(bgr, kept, radius, recolour)
-
-    # `kinds` is the same re-decision with the board's own character count in
-    # hand, and supersedes `recolour` when both are set. The centres are
-    # dropped here because `detect` already spends its third return value on
-    # the pixel palette, which the caller needs back to skip the refit. A
-    # caller that wants stable ids across frames calls `fixed_kinds` itself
-    # and keeps them -- see `play_loop`.
-    if kinds:
-        kept, _ = fixed_kinds(bgr, kept, radius, kinds, palette=centres)
 
     if scale != 1.0:
         radius /= scale
@@ -910,12 +619,6 @@ def detect(
 # Centre and radius of the skill icon's face, as fractions of a 540x960 screen.
 # Sampled from the middle of the glyph, well inside the button plate.
 BASE_ICON = (0.213, 0.852, 0.052)  # cx, cy, r
-
-#: Lab distance past which the skill icon has not really matched anything.
-#: `analyze` has printed a WEAK note at 30 since before `--kinds`; the play
-#: loop now refuses the reading outright at the same figure, because a base it
-#: cannot trust should not be allowed to sort chains ahead of longer ones.
-BASE_WEAK = 30.0
 
 
 def read_base_kind(
@@ -1278,61 +981,36 @@ def find_chains(
 # --------------------------------------------------------------------------
 # drawing
 # --------------------------------------------------------------------------
-def draw_chain(bgr: np.ndarray, tsums: Sequence[Tsum], chains: Sequence[Chain],
-               radius: float, *, glow: bool = True) -> np.ndarray:
-    """The stroke, drawn on whatever you hand it. Returns a new image.
-
-    Pulled out of :func:`draw` so the flattened views can carry the same
-    overlay rather than a second implementation of it that slowly stops
-    matching. The path is what the loop would actually drag: runners-up faint,
-    the chosen chain haloed and numbered, an arrow on the last leg for
-    direction.
-
-    `glow` washes each chain member in its own colour before ringing it. Worth
-    turning off over a flattened board, where the wash is the colour that is
-    already there and only costs contrast against the white ring.
-    """
-    out = bgr.copy()
-    if not chains:
-        return out
-
-    # Runner-up chains stay faint so the eye goes to the one we'd actually play.
-    for chain in chains[1:]:
-        pts = np.array([[int(tsums[i].x), int(tsums[i].y)] for i in chain.nodes], np.int32)
-        cv2.polylines(out, [pts], False, (90, 90, 90), 3, cv2.LINE_AA)
-
-    best = chains[0]
-    pts = [(int(tsums[i].x), int(tsums[i].y)) for i in best.nodes]
-    for t in (tsums[i] for i in best.nodes):
-        if glow:
-            overlay = out.copy()
-            cv2.circle(overlay, (int(t.x), int(t.y)), int(radius), t.colour, -1, cv2.LINE_AA)
-            out = cv2.addWeighted(overlay, 0.35, out, 0.65, 0)
-        cv2.circle(out, (int(t.x), int(t.y)), int(radius), (255, 255, 255), 2, cv2.LINE_AA)
-
-    arr = np.array(pts, np.int32)
-    cv2.polylines(out, [arr], False, (0, 0, 0), 9, cv2.LINE_AA)      # halo
-    cv2.polylines(out, [arr], False, (60, 255, 255), 4, cv2.LINE_AA)  # path
-    if len(pts) > 1:
-        cv2.arrowedLine(out, pts[-2], pts[-1], (60, 255, 255), 4, cv2.LINE_AA, tipLength=0.45)
-
-    for n, (px, py) in enumerate(pts, 1):
-        cv2.circle(out, (px, py), 12, (0, 0, 0), -1, cv2.LINE_AA)
-        cv2.putText(out, str(n), (px - 6 * len(str(n)), py + 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (60, 255, 255), 1, cv2.LINE_AA)
-    return out
-
-
 def draw(bgr: np.ndarray, tsums: Sequence[Tsum], chains: Sequence[Chain], radius: float) -> np.ndarray:
     out = cv2.addWeighted(bgr, 0.45, np.zeros_like(bgr), 0, 30)
 
     for t in tsums:
         cv2.circle(out, (int(t.x), int(t.y)), int(radius * 0.92), t.colour, 2, cv2.LINE_AA)
 
-    out = draw_chain(out, tsums, chains, radius)
+    # Runner-up chains stay faint so the eye goes to the one we'd actually play.
+    for chain in chains[1:]:
+        pts = np.array([[int(tsums[i].x), int(tsums[i].y)] for i in chain.nodes], np.int32)
+        cv2.polylines(out, [pts], False, (90, 90, 90), 3, cv2.LINE_AA)
 
     if chains:
         best = chains[0]
+        pts = [(int(tsums[i].x), int(tsums[i].y)) for i in best.nodes]
+        for t in (tsums[i] for i in best.nodes):
+            overlay = out.copy()
+            cv2.circle(overlay, (int(t.x), int(t.y)), int(radius), t.colour, -1, cv2.LINE_AA)
+            out = cv2.addWeighted(overlay, 0.35, out, 0.65, 0)
+            cv2.circle(out, (int(t.x), int(t.y)), int(radius), (255, 255, 255), 2, cv2.LINE_AA)
+
+        arr = np.array(pts, np.int32)
+        cv2.polylines(out, [arr], False, (0, 0, 0), 9, cv2.LINE_AA)      # halo
+        cv2.polylines(out, [arr], False, (60, 255, 255), 4, cv2.LINE_AA)  # path
+        cv2.arrowedLine(out, pts[-2], pts[-1], (60, 255, 255), 4, cv2.LINE_AA, tipLength=0.45)
+
+        for n, (px, py) in enumerate(pts, 1):
+            cv2.circle(out, (px, py), 12, (0, 0, 0), -1, cv2.LINE_AA)
+            cv2.putText(out, str(n), (px - 6 * len(str(n)), py + 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (60, 255, 255), 1, cv2.LINE_AA)
+
         label = f"{'BASE' if best.is_base else 'chain'}: {len(best)} tsums"
     else:
         label = "no chain of 3+ found"
@@ -1341,217 +1019,6 @@ def draw(bgr: np.ndarray, tsums: Sequence[Tsum], chains: Sequence[Chain], radius
     cv2.putText(out, f"{label}   |   {len(tsums)} detected   r={radius:.0f}px",
                 (8, 21), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
     return out
-
-
-#: Fill colours for `flatten(distinct=True)`, in BGR. Chosen to stay apart on
-#: screen even when the characters they stand for do not -- Mickey's peach face
-#: and Donald's white one are 15 Lab apart, which is a difference you cannot
-#: see but the whole question is whether the split found it.
-FLAT_COLOURS = [
-    (60, 60, 255),    # red
-    (60, 200, 60),    # green
-    (255, 160, 40),   # blue
-    (40, 200, 255),   # amber
-    (230, 80, 220),   # magenta
-    (220, 220, 60),   # cyan
-    (120, 120, 255),  # salmon
-    (60, 255, 255),   # yellow
-]
-
-
-def posterise(bgr: np.ndarray, centres: np.ndarray, *,
-              palette: Optional[np.ndarray] = None, dark_l: float = 60.0,
-              radius: Optional[float] = None, clean: bool = True,
-              distinct: bool = False, board_colour: tuple = (70, 45, 30),
-              ink_colour: tuple = (40, 40, 90)) -> np.ndarray:
-    """Repaint every pixel as the nearest character colour -- one flat ball each.
-
-    Unlike :func:`flatten`, which draws a disc at each detection, this touches
-    the image itself and needs no detections at all: each pixel goes to the
-    closest of the `centres` in Lab, so a mostly-pink tsum comes out a solid
-    pink ball with its real outline, not a circle standing in for one.
-
-    `palette` supplies the sinks -- the bowl behind the tsums and the dark ink
-    that outlines them. Without somewhere to put those, every shadow and every
-    gap is forced to whichever character it least dislikes, and the board comes
-    out as confetti.
-
-    The two sinks are painted differently on purpose. Give them one colour and
-    a black-bodied tsum disappears into the bowl, which reads as "detection
-    lost it" when what actually happened is the thing worth seeing: its body
-    is the same colour class as every other tsum's outline. In `ink_colour`
-    you can watch Mickey's body join up with the mesh of outlines running
-    across the whole board.
-
-    `clean` runs a median filter over the assignment, sized off `radius`. Face
-    detail -- eyes, muzzles, highlights -- is genuinely a different colour from
-    the face around it, so a raw assignment speckles every tsum. The filter is
-    what turns those speckles back into one ball, and it is the difference
-    between a picture that answers the question and one that does not.
-    """
-    lab = cv2.cvtColor(cv2.GaussianBlur(bgr, (5, 5), 0), cv2.COLOR_BGR2LAB)
-    flat = lab.reshape(-1, 3).astype(np.float32)
-
-    board = ink = np.zeros((0, 3), np.float32)
-    if palette is not None:
-        board = board_colours(bgr, palette)
-        # Ink is not a character either. detect() splits dark off for exactly
-        # this reason -- it is every tsum's outline AND a black tsum's face --
-        # and here it only has to be somewhere other than a character.
-        ink = np.asarray([c for c in palette if c[0] < dark_l], np.float32).reshape(-1, 3)
-
-    ref = np.vstack([np.asarray(centres, np.float32), board, ink])
-    dist = (ref * ref).sum(axis=1)[None, :] - 2.0 * (flat @ ref.T)
-    idx = dist.argmin(axis=1).astype(np.uint8).reshape(lab.shape[:2])
-
-    if clean and radius:
-        # Odd kernel, about a third of a tsum: wide enough to swallow an eye,
-        # narrow enough to keep two touching tsums apart.
-        ksize = max(3, int(radius * 0.35) | 1)
-        idx = cv2.medianBlur(idx, min(ksize, 255 if ksize % 2 else 254))
-
-    out = np.empty_like(bgr)
-    # `distinct` matters more here than it looks: two characters whose faces
-    # are 15 Lab apart repaint as two pastels you cannot tell apart, and
-    # telling them apart is the entire point of looking.
-    fills = ([FLAT_COLOURS[i % len(FLAT_COLOURS)] for i in range(len(centres))] if distinct
-             else [_lab_to_bgr(c) for c in centres])
-    fills = fills + [board_colour] * len(board) + [ink_colour] * len(ink)
-    for i, fill in enumerate(fills):
-        out[idx == i] = fill
-    return out
-
-
-def flatten(bgr: np.ndarray, tsums: Sequence[Tsum], radius: float, *,
-            mode: str = "paint", centres: Optional[np.ndarray] = None,
-            palette: Optional[np.ndarray] = None,
-            chains: Sequence[Chain] = (),
-            compare: bool = True, distinct: bool = False,
-            numbers: bool = True, scatter: Optional[dict] = None) -> np.ndarray:
-    """Repaint the board with one flat colour per character, to look at.
-
-    Turns "did it split the board into the right characters?" into something
-    answerable at a glance rather than by reading a table of counts. Two ways
-    of showing it, and they answer different questions:
-
-    * ``mode="paint"`` recolours the **pixels**, via :func:`posterise`. Each
-      tsum comes out a solid ball of its nearest character colour, keeping its
-      real outline. This is the honest picture of what colour alone can do,
-      and it needs no detections -- pass `centres` and `palette`.
-    * ``mode="disc"`` draws a disc at each **detection**. That shows what the
-      play loop is actually working from, including phantoms sitting on open
-      board and tsums it never found.
-    * ``mode="both"`` puts them side by side, which is where the two disagree
-      and the disagreement is the interesting part.
-
-    Paint falls back to disc when `centres` is missing, since there is nothing
-    to repaint towards.
-
-    `chains` draws the stroke the loop would drag, on every panel, through the
-    shared :func:`draw_chain` so it is the same overlay `draw` produces rather
-    than a lookalike. Drawing it on all of them is the point: the same path
-    over the real sprites and over the flattened board answers the question
-    the counts cannot, which is whether the chain stays on one character for
-    its whole length or wanders across a boundary the split got wrong.
-
-    `compare` puts the original beside it, because the flattened image alone
-    cannot show you a tsum that was never detected -- and missed tsums are the
-    bigger error (recall 0.874 against precision 0.675). Look for board that
-    stayed empty.
-
-    `distinct` swaps the real cluster colours for high-contrast ones. Worth
-    turning on for exactly the case the split is hardest: two characters whose
-    faces are 15 Lab apart render as two barely-different pastels, and you
-    cannot see whether they were separated. It costs you the ability to check
-    the colour against the sprite, so it is off by default.
-
-    Each disc gets a dark rim so a run of one character reads as N tsums rather
-    than as one blob, and `numbers` writes the kind id inside. The painted view
-    has no rims by design -- two touching tsums of one character merging into a
-    single blob is exactly what the game does when you drag them.
-
-    Pass `scatter` from :func:`kind_scatter` and any kind too wide to be a
-    single character is ringed in red in the legend. Worth doing: a bucket
-    holding the phantoms looks perfectly ordinary as a colour and a count, and
-    only gives itself away as a spread.
-    """
-    if mode not in ("paint", "disc", "both"):
-        raise ValueError(f"mode must be paint, disc or both, not {mode!r}")
-    if centres is None and mode != "disc":
-        mode = "disc"
-
-    flat = np.full_like(bgr, 24)
-    kinds = sorted({t.kind for t in tsums})
-    slot = {k: i for i, k in enumerate(kinds)}
-
-    for t in tsums:
-        fill = (FLAT_COLOURS[slot[t.kind] % len(FLAT_COLOURS)] if distinct
-                else tuple(int(c) for c in t.colour))
-        centre = (int(t.x), int(t.y))
-        cv2.circle(flat, centre, int(radius * 0.95), fill, -1, cv2.LINE_AA)
-        cv2.circle(flat, centre, int(radius * 0.95), (16, 16, 16), 2, cv2.LINE_AA)
-        if numbers:
-            # Dark text on a light fill and the reverse, or the id vanishes on
-            # whichever half of the palette matches the ink.
-            ink = (20, 20, 20) if sum(fill) > 380 else (245, 245, 245)
-            text = str(t.kind)
-            cv2.putText(flat, text, (centre[0] - 5 * len(text), centre[1] + 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, ink, 1, cv2.LINE_AA)
-
-    counts = {k: sum(1 for t in tsums if t.kind == k) for k in kinds}
-    swatch = {k: (FLAT_COLOURS[slot[k] % len(FLAT_COLOURS)] if distinct
-                  else next(tuple(int(c) for c in t.colour) for t in tsums if t.kind == k))
-              for k in kinds}
-
-    panels = [bgr] if compare else []
-    if mode in ("paint", "both"):
-        panels.append(posterise(bgr, centres, palette=palette, radius=radius,
-                                distinct=distinct))
-    if mode in ("disc", "both"):
-        panels.append(flat)
-
-    if chains:
-        # The glow is worth having over real sprites and not over a flat one,
-        # where washing a disc in the colour it already is only dulls the ring
-        # around it. `panels[0]` is the original whenever `compare` is on.
-        panels = [draw_chain(p, tsums, chains, radius,
-                             glow=compare and i == 0)
-                  for i, p in enumerate(panels)]
-    out = np.hstack(panels)
-
-    # Legend strip. Its height is fixed, so a board with more kinds than fit
-    # simply runs off the end rather than silently rescaling the picture.
-    bar = np.full((38, out.shape[1], 3), 16, np.uint8)
-    x = 10
-    wide = 0
-    for k in kinds:
-        spread = None if scatter is None else scatter.get(k)
-        loose = spread is not None and spread > KIND_SCATTER * 2
-        wide += loose
-        cv2.rectangle(bar, (x, 10), (x + 26, 30), swatch[k], -1)
-        cv2.rectangle(bar, (x, 10), (x + 26, 30),
-                      (60, 60, 255) if loose else (90, 90, 90), 2 if loose else 1)
-        text = f"#{k}: {counts[k]}" + ("" if spread is None else f" ~{spread:.0f}")
-        cv2.putText(bar, text, (x + 32, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
-                    (120, 120, 255) if loose else (235, 235, 235), 1, cv2.LINE_AA)
-        x += 32 + 22 + 12 * len(text)
-    out = np.vstack([out, bar])
-
-    header = np.full((28, out.shape[1], 3), 0, np.uint8)
-    order = (["original"] if compare else []) +             (["painted"] if mode in ("paint", "both") else []) +             (["discs"] if mode in ("disc", "both") else [])
-    note = f"   |   {', then '.join(order)}" if len(order) > 1 else ""
-    if chains:
-        best = chains[0]
-        note += (f"   |   {'BASE' if best.is_base else 'chain'} of {len(best)}"
-                 f" on #{best.kind}")
-    if scatter is not None:
-        note += (f"   |   {wide} kind(s) too wide to be one character" if wide
-                 else "   |   every kind is tight enough to be one character")
-    cv2.putText(header, f"{len(tsums)} tsums, {len(kinds)} character(s), r={radius:.0f}px" + note,
-                (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                (120, 120, 255) if scatter is not None and wide else (255, 255, 255),
-                1, cv2.LINE_AA)
-    return np.vstack([header, out])
 
 
 # --------------------------------------------------------------------------
@@ -2321,16 +1788,6 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
     lengths: deque = deque(maxlen=max(opts.repeat_len, opts.repeat_window))
     per_step = opts.per_step
     skip_kinds: set[int] = set()
-    # Resolved once: the mode cannot change mid-run, and reading it per frame
-    # would only invite it to.
-    kinds = resolve_kinds(opts)
-    say(describe_mode(opts))
-    # What the last "base tsum:" line said. With --kinds the base is re-read
-    # every frame, and a weak reading leaves `base` at None, so "announce when
-    # base is None" would announce on every single frame. Announcing on change
-    # instead needs no extra reset sites and says the useful thing anyway: the
-    # first read, and any frame the answer actually moves.
-    last_base_note: Optional[tuple] = None
     #: Set when the last pass ended without touching the board, so the next one
     #: can skip waiting for movement that cannot have happened.
     no_settle = False
@@ -2388,7 +1845,7 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
             t0 = time.perf_counter()
             tsums, radius, palette = detect(crop, k=opts.k, radius=radius, palette=palette,
                                             scale=opts.scale, include_dark=opts.include_dark,
-                                            merge=opts.merge, bowl_reject=opts.bowl_reject)
+                                            merge=opts.merge)
 
             # FEVER repaints the whole board in neon, so a palette fit during
             # normal play stops matching anything and the tsum count collapses.
@@ -2404,61 +1861,14 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
             if not plausible and palette is not None:
                 fresh, fresh_r, fresh_pal = detect(crop, k=opts.k, scale=opts.scale,
                                                    include_dark=opts.include_dark,
-                                                   merge=opts.merge,
-                                                   bowl_reject=opts.bowl_reject)
+                                                   merge=opts.merge)
                 if abs(len(fresh) - opts.min_tsums) < abs(len(tsums) - opts.min_tsums):
                     say(f"    recalibrated ({len(tsums)} -> {len(fresh)} tsums)")
                     tsums, radius, palette, base = fresh, fresh_r, fresh_pal, None
 
-            # Re-file the detections into the characters the board actually
-            # holds. Fitted per frame and deliberately not cached: measured
-            # over consecutive in-round frames, a quarter of the centres move
-            # more than 20 Lab from one to the next -- a whole character
-            # swapped out -- so a set pinned on the round's first frame is a
-            # set that can be wrong for the rest of it. The fit is 6-7ms.
-            kind_centres = None
-            if kinds:
-                tsums, kind_centres = fixed_kinds(crop, tsums, radius, kinds,
-                                                  palette=palette)
-                if kind_centres is not None:
-                    # A fresh fit renumbers everything, so a `base` carried
-                    # over from the previous frame now names some other
-                    # character. Refit and re-read go together or not at all.
-                    base = None
-                    # `skip_kinds` is left alone deliberately, though it holds
-                    # ids from the previous fit. The centres are sorted by
-                    # colour, so the same five characters number the same way
-                    # frame to frame and the skip still lands; it only misses
-                    # on a frame where a seat changed hands, and then costs one
-                    # wrongly-offered chain. Clearing it here would empty it
-                    # every frame, which is the same as not having it -- and
-                    # the stall path relies on it to break a loop.
-
             if base is None and opts.use_base:
-                # Against the face centres when there are any, and NOT the
-                # pixel palette: `kind` indexes those now, so reading the base
-                # out of the other set would hand `--base-only` a number
-                # pointing at a different character entirely.
-                ref = kind_centres if kind_centres is not None else palette
-                base, base_dist = read_base_kind(frame, ref, spec=opts.base)
-                # Only on the first read after a reset. With `--kinds` on this
-                # runs every frame, and one line per frame is not news.
-                # A big distance means the icon matched nothing on the board
-                # -- most often because the equipped tsum is a black-faced one
-                # that `include_dark` drops, so it is not among the faces at
-                # all. `analyze` has warned about this for a while; the loop
-                # did not, and with --kinds on it is worth more: every icon now
-                # lands on *some* character, so a bad match is a confidently
-                # wrong answer rather than an id that matches no chain and
-                # visibly plays nothing.
-                weak = base_dist > BASE_WEAK
-                note = (base, weak)
-                if note != last_base_note:
-                    say(f"base tsum: #{base} (Lab distance {base_dist:.1f})"
-                        + ("  (WEAK -- ranking by chain length instead)" if weak else ""))
-                    last_base_note = note
-                if weak:
-                    base = None   # do not let a guess outrank a real chain
+                base, base_dist = read_base_kind(frame, palette, spec=opts.base)
+                say(f"base tsum: cluster #{base} (Lab distance {base_dist:.1f})")
             chains = find_chains(tsums, radius, opts.link, block=opts.block,
                                  link_px=opts.link_px, base_kind=base, base_only=opts.base_only,
                                  mode=opts.mode, max_chain=opts.max_chain,
@@ -3702,10 +3112,8 @@ def _label(args) -> int:
 
     bx, by, bw, bh = _board_rect(img.shape, args.board)
     crop = img[by:by + bh, bx:bx + bw]
-    tsums, radius, pixel_palette = detect(crop, k=args.k, radius=args.radius,
-                                          include_dark=args.include_dark, merge=args.merge)
-    if args.kinds:
-        tsums, _ = fixed_kinds(crop, tsums, radius, args.kinds, palette=pixel_palette)
+    tsums, radius, _ = detect(crop, k=args.k, radius=args.radius,
+                              include_dark=args.include_dark, merge=args.merge)
     print(f"{len(tsums)} tsums detected, r~{radius:.1f}px")
     print("modes: 1=path  2=missed  3=false  4=same-kind group")
     print("       click to mark | n=next path/group  u=undo  c=clear")
@@ -3961,8 +3369,7 @@ def _score(args) -> int:
 #: Every `detect` keyword `eval --sweep` is allowed to vary. Spelled out rather
 #: than introspected so a typo is an error instead of a silently ignored knob.
 _SWEEPABLE = ("k", "radius", "include_dark", "dark_l", "merge", "heal_frac",
-              "open_ratio", "recolour", "kinds", "bowl_reject", "floor_frac",
-              "hole_frac", "scale")
+              "open_ratio", "recolour", "floor_frac", "hole_frac", "scale")
 
 #: Not `detect` arguments -- these shrink the board rect before the crop is
 #: taken, so they tune :data:`LAYOUTS` rather than detection. Sweepable because
@@ -4135,7 +3542,7 @@ def _eval(args) -> int:
         raise SystemExit("no reviewed boards to score -- nothing to report")
 
     base = {"k": args.k, "radius": args.radius, "include_dark": args.include_dark,
-            "merge": args.merge, "scale": args.scale, "kinds": args.kinds}
+            "merge": args.merge, "scale": args.scale}
     truth_total = sum(len(_truth_points(d)) for _, d in labels)
     print(f"{len(labels)} reviewed board(s), {truth_total} ground-truth tsums, "
           f"match tolerance {args.tol:.2f}r\n")
@@ -4595,7 +4002,7 @@ def add_play_args(play, *, merge_default: bool):
                            "the highlight has not rendered and the board is "
                            "still moving, so the reading is noise -- replayed "
                            "over 5,729 collected drags it dropped a mean 3 of 4 "
-                           "members on 43%% of them. See docs/DATASET-FINDINGS.md")
+                           "members on 43% of them. See docs/DATASET-FINDINGS.md")
     play.add_argument("--dataset", default="",
                       help="collect training samples for detection into this "
                            "directory; empty (the default) collects nothing. "
@@ -4663,30 +4070,6 @@ def add_play_args(play, *, merge_default: bool):
     play.add_argument("--block", type=float, default=0.75,
                       help="a tsum within this many radii of the line blocks the link")
     play.add_argument("--scale", type=float, default=1.0)
-    play.add_argument("--bowl-reject", type=float, default=0.0, metavar="LAB",
-                      help="drop detections whose colour is within this many Lab "
-                           "of the board behind them -- they landed on the bowl, "
-                           "not on a tsum. Over the labelled boards 60 takes "
-                           "detection f1 from 0.762 to 0.791 (precision 0.675 -> "
-                           "0.769) for 4%% of real tsums, and cuts the phantom "
-                           "share of what actually gets dragged. 0 = off")
-    play.add_argument("--tsum-mode", choices=sorted(TSUM_MODES), default="normal",
-                      help='how to decide two tsums are the same character. '
-                           '"normal" (default) uses the pixel colour clusters as '
-                           'they fall. "color" re-files every detection into the '
-                           'five characters a board actually holds -- scored '
-                           'against hand-marked groups it takes chains that are '
-                           'genuinely one character from 61%% to 95%%, and finds '
-                           'more of them. No live A/B yet, which is why "normal" '
-                           'is still the default')
-    play.add_argument("--kinds", type=int, default=0, metavar="N",
-                      help="re-file detections into the N characters the board "
-                           "actually holds -- 5 normally, 4 once an item has "
-                           "removed one. Scored against the hand-marked groups "
-                           "it cuts identity errors from 32 to 17 and gives "
-                           "every character its own bucket on 8 boards of 10, "
-                           "but has no live A/B yet, so 0 (the raw "
-                           "pixel-cluster ids) stays the default")
     play.add_argument("--no-dark", dest="include_dark", action="store_false")
     play.add_argument("--no-base", dest="use_base", action="store_false")
     play.add_argument("--base-only", action="store_true")
@@ -4786,19 +4169,6 @@ def main() -> int:
     a.add_argument("-o", "--out", type=Path, default=Path("tsum_path_out.png"))
     a.add_argument("--board", help='"x,y,w,h" in pixels, or "full". Default: play area of a 540x960 grab.')
     a.add_argument("-k", type=int, default=12, help="colour clusters (distinct tsums + board + ink)")
-    a.add_argument("--bowl-reject", type=float, default=0.0, metavar="LAB",
-                   help="drop detections within this many Lab of the board behind "
-                        "them -- they are on the bowl, not on a tsum. 60 is where "
-                        "it measured best; 0 = off")
-    a.add_argument("--tsum-mode", choices=sorted(TSUM_MODES), default="normal",
-                   help='"normal" (default) reads identity off the pixel colour '
-                        'clusters; "color" re-files every detection into the five '
-                        'characters a board holds. Same switch `play` takes')
-    a.add_argument("--kinds", type=int, default=0, metavar="N",
-                   help="re-file the detections into the N characters the board "
-                        "really holds -- 5 without items, 4 with one. The "
-                        "'per kind' line and the overlay colours then show the "
-                        "hand rather than raw colour clusters. 0 = off")
     a.add_argument("--radius", type=float, help="tsum radius in px; auto-estimated if omitted")
     a.add_argument("--link", type=float, default=1.35, help="link distance in tsum diameters (--mode touch only)")
     a.add_argument("--link-px", type=float, default=100.0, help="link distance in PIXELS (stable across frames; from labelled links: p90=95). Set 0 to fall back to --link diameters")
@@ -4813,26 +4183,6 @@ def main() -> int:
     a.add_argument("--base-only", action="store_true", help="ignore chains that are not the equipped tsum")
     a.add_argument("--merge", action="store_true",
                    help="fold two-tone faces into one tsum before detecting")
-    a.add_argument("--flat", type=Path, default=None, metavar="PATH",
-                   help="also write a flattened view: every tsum repainted as one "
-                        "flat colour per character, original beside it. The quick "
-                        "way to see whether --kinds split the board correctly")
-    a.add_argument("--flat-mode", choices=["paint", "disc", "both"], default="paint",
-                   help='"paint" (default) recolours the pixels, so each tsum comes '
-                        'out a solid ball of its nearest character colour with its '
-                        'real outline -- what colour alone can do, detections not '
-                        'involved. "disc" draws a disc per detection, which is what '
-                        'the play loop actually works from. "both" shows the two '
-                        'together, and where they disagree is the interesting part')
-    a.add_argument("--flat-no-chain", action="store_true",
-                   help="leave the drag path off the flattened view. On by "
-                        "default because the path over a flattened board is "
-                        "what shows whether a chain stays on one character")
-    a.add_argument("--flat-distinct", action="store_true",
-                   help="paint the flattened view in high-contrast colours instead "
-                        "of the characters' own. Use it when two characters are too "
-                        "close in colour to tell apart by eye -- which is exactly "
-                        "when you most need to know whether they were separated")
     a.add_argument("--debug-dir", type=Path)
 
     s = sub.add_parser("synth")
@@ -4954,10 +4304,6 @@ def main() -> int:
     lab.add_argument("image", type=Path)
     lab.add_argument("--board")
     lab.add_argument("-k", type=int, default=12)
-    lab.add_argument("--kinds", type=int, default=0, metavar="N",
-                     help="colour the overlay by the N characters the board holds "
-                          "rather than by colour cluster, to eyeball the split "
-                          "before marking groups in mode 4")
     lab.add_argument("--radius", type=float)
     lab.add_argument("--no-dark", dest="include_dark", action="store_false")
     lab.add_argument("--merge", action="store_true")
@@ -4967,10 +4313,6 @@ def main() -> int:
     ev.add_argument("-k", type=int, default=12)
     ev.add_argument("--radius", type=float)
     ev.add_argument("--scale", type=float, default=1.0)
-    ev.add_argument("--kinds", type=int, default=0,
-                    help="re-file detections into exactly this many characters "
-                         "(5 on a normal board, 4 once an item has removed one). "
-                         "0 = keep the raw pixel-cluster ids")
     ev.add_argument("--no-dark", dest="include_dark", action="store_false")
     ev.add_argument("--merge", action="store_true")
     ev.add_argument("--tol", type=float, default=0.6,
@@ -5097,21 +4439,7 @@ def main() -> int:
     t0 = time.perf_counter()
     tsums, radius, centres = detect(crop, k=args.k, radius=args.radius, scale=args.scale,
                                     include_dark=args.include_dark, merge=args.merge,
-                                    bowl_reject=args.bowl_reject,
                                     debug_dir=args.debug_dir)
-    pixel_palette = centres
-    kinds = resolve_kinds(args)
-    if kinds:
-        # `centres` is rebound on purpose: the base icon has to be read against
-        # whatever `kind` now indexes, or it names a different character. The
-        # pixel palette is kept in `pixel_palette` because `posterise` still
-        # needs it -- that is where the bowl and the ink come from.
-        tsums, fitted = fixed_kinds(crop, tsums, radius, kinds, palette=pixel_palette)
-        if fitted is None:
-            print(f"  {describe_mode(args)}: only {len(tsums)} tsums, "
-                  f"need {kinds * 3} to fit -- left as colour clusters")
-        else:
-            centres = fitted
     t_detect = time.perf_counter() - t0
 
     # Read the skill icon off the FULL frame, not the board crop -- the button
@@ -5132,46 +4460,17 @@ def main() -> int:
     canvas[by:by + bh, bx:bx + bw] = overlay
     cv2.imwrite(str(args.out), canvas)
 
-    if args.flat:
-        # imencode + tofile rather than imwrite: imwrite cannot take a
-        # non-ASCII path on Windows, and scratchpads live under user folders.
-        # `centres` is the face centres once --kinds ran, and the pixel palette
-        # otherwise; painting towards the pixel palette is meaningless, so the
-        # paint modes need --kinds and say so rather than drawing nonsense.
-        if args.flat_mode != "disc" and not kinds:
-            print("  --flat-mode paint needs --tsum-mode color (there is nothing "
-                  "to repaint towards) -- writing the disc view instead")
-        view = flatten(crop, tsums, radius,
-                       mode=args.flat_mode if kinds else "disc",
-                       centres=centres if kinds else None,
-                       palette=pixel_palette,
-                       chains=() if args.flat_no_chain else chains,
-                       distinct=args.flat_distinct,
-                       scatter=kind_scatter(crop, tsums, radius))
-        wrote, buf = cv2.imencode(".png", view)
-        if wrote:
-            buf.tofile(str(args.flat))
-            print(f"wrote {args.flat} (flattened view)")
-
     print(f"detected {len(tsums)} tsums, r~{radius:.1f}px  "
           f"({t_detect * 1000:.0f}ms detect, {t_path * 1000:.0f}ms path)")
     counts: dict[int, int] = {}
     for t in tsums:
         counts[t.kind] = counts.get(t.kind, 0) + 1
-    spread = kind_scatter(crop, tsums, radius)
     print("  per kind:", ", ".join(
-        f"#{k}:{v}~{spread.get(k, 0):.0f}"
-        f"{' <- BASE' if k == base else ''}"
-        f"{' TOO WIDE' if spread.get(k, 0) > KIND_SCATTER * 2 else ''}"
-        for k, v in sorted(counts.items())))
-    print(f"  (~N is how far that kind's colours scatter; one character reads "
-          f"about {KIND_SCATTER:.0f})")
+        f"#{k}:{v}{' <- BASE' if k == base else ''}" for k, v in sorted(counts.items())))
     if args.use_base:
         # A big distance means the icon matched nothing on the board; say so
         # rather than silently prioritising a wrong colour.
-        note = ("" if base_dist < BASE_WEAK else
-                "  (WEAK -- check debug base_icon.png / --base. `play` ignores a "
-                "base this far off and ranks by chain length instead)")
+        note = "" if base_dist < 30 else "  (WEAK -- check debug base_icon.png / --base)"
         print(f"  base tsum: cluster #{base}, Lab distance {base_dist:.1f}{note}")
     for c in chains:
         print(f"  chain kind #{c.kind}: {len(c)} tsums{'  [BASE]' if c.is_base else ''}")
