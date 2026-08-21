@@ -1,6 +1,11 @@
 # TODO: decide whether `--mode blob` becomes the default
 
-Status: **on main, opt-in, enabled in `flows/play.yaml`, awaiting a live A/B.**
+Status: **on main, opt-in, switched OFF in `flows/play.yaml`, one live round
+against it.** Played alongside `bowl_reject`, the round showed no improvement
+worth the 60ms, and the line is commented out rather than deleted so the next
+attempt does not start from scratch. Not a verdict: it shared a round with
+another change, which is exactly the confounded comparison this document keeps
+asking not to run.
 `blob_adjacency()` in `ttheart_sender/game/tsum.py`, plus a third `--mode`
 alongside `touch` and `reach`. The code default is still `touch`, so deleting
 `mode: blob` from the flow is the entire revert.

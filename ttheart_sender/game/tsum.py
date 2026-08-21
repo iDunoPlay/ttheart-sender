@@ -34,6 +34,7 @@ import json
 import logging
 import math
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from itertools import product
 from pathlib import Path
@@ -78,6 +79,22 @@ LAYOUTS: dict[tuple[int, int], dict] = {
         "board": (10, 314, 525, 456),
         "fever_board": (22, 291, 502, 451),
         "base": "83,858,26",
+        # EVERY TSUM IS THE SAME SIZE -- the sprite does not change with the
+        # character, so this is a property of the capture geometry and not
+        # something to work out per round. Measured two ways that agree: a
+        # ruler over one face reads ~27px, and over the captured frames whose
+        # detection looks healthy (a realistic 38-48 detections covering a
+        # third of the rect) the estimator reads 24-27.
+        #
+        # Given here, `detect` is told the radius instead of inferring it, and
+        # the whole `--radius-lock` warm-up is skipped. That matters because
+        # the estimator is unreliable: over 151 captured frames it ranges 8-38px
+        # on this same board, and a round that locks low reads the board at
+        # half scale all the way through.
+        #
+        # To re-measure on a new emulator size: `python main.py region`, mark
+        # the two sides of one tsum's face, halve the width.
+        "radius": 25.0,
     },
     (956, 542): {                       # saved screenshot, no emulator chrome
         # Deliberately left at the full play area: it is a different capture
@@ -94,9 +111,40 @@ def _layout(shape) -> dict:
     return LAYOUTS.get((shape[0], shape[1]), {})
 
 
+def _layout_radius(shape) -> Optional[float]:
+    """The measured tsum radius for this capture size, if there is one."""
+    value = _layout(shape).get("radius")
+    return float(value) if value else None
+
+
 #: How long FEVER runs once the meter maxes out. The template only marks the
 #: moment it fills, so the state has to be held open for its duration.
 FEVER_SECONDS = 10.0
+
+#: How well the FEVER BONUS banner's glyph shape has to match. Measured over
+#: 151 captured frames, hand-checked: every frame showing the banner scores
+#: 0.438 or better, every frame without it 0.275 or worse, and the gap between
+#: those two is the largest in the whole sorted list. 0.35 sits in the middle
+#: of it. The few frames that score 0.23-0.25 are the banner fading in or out,
+#: real FEVER with the text half-transparent -- :data:`FEVER_HOLD` covers those
+#: rather than a lower threshold, which would start letting menus through.
+FEVER_BANNER_CONFIDENCE = 0.35
+
+#: How long one banner sighting keeps FEVER open.
+#:
+#: This has to outlast the longest stretch the banner can go unread, and there
+#: are two of those. The banner fades in and out at each end of a run, and
+#: those frames score 0.20-0.28 against a 0.35 threshold. Bigger: **a skill
+#: firing pauses FEVER while its animation plays**, and the animation covers
+#: the screen. 3.0s is sized for the animation, which is the longer of the two
+#: and was not known about when this was first set to 1.0 -- at 1.0 a played
+#: round logged one eleven-second FEVER as three separate ones.
+#:
+#: The cost of it being too long is noticing the END of FEVER late, which is
+#: mild: a few seconds on the FEVER board rect and the FEVER count floor. The
+#: cost of too short is a flip, and a flip discards the palette and re-reads
+#: the base tsum -- the identity of the character being played for.
+FEVER_HOLD = 3.0
 
 #: `max_fever` is the meter at full, gold, an instant before FEVER starts.
 #: Measured over 151 captured frames it scores 0.79-0.82 on the three frames
@@ -455,6 +503,36 @@ def purity_filter(bgr: np.ndarray, tsums: Sequence[Tsum], nodes: Sequence[int],
     centre = np.median(feats, axis=0)
     keep = [n for n, f in zip(nodes, feats) if float(np.linalg.norm(f - centre)) <= tol]
     return keep
+
+
+def _face_coverage(tsums: Sequence[Tsum], radius: float, shape) -> float:
+    """What fraction of the board rect the detected faces add up to.
+
+    The check that a radius reading is self-consistent, and the one thing the
+    detection count cannot tell you on its own. Count and radius are not
+    independent: a rect only holds so much. ~40 faces at 26px cover about a
+    third of it; the same rect read at half scale reports ~60 faces at 12px,
+    which covers a twelfth. So the two failures look identical by count -- both
+    are "a plausible number of tsums" -- and completely different by area.
+
+    Measured over the frames a round would sample, split by whether the radius
+    came out near the truth:
+
+        good reads       coverage p10 0.22, p50 0.30, p90 0.38
+        collapsed reads  coverage p10 0.08, p50 0.18, p90 0.23
+
+    At 0.25 that keeps 39 of 48 good frames and rejects 48 of 51 collapsed
+    ones. It is a floor, not a band: over-reading the radius is what
+    `open_ratio` guards, and a frame cannot cover more than the rect anyway.
+
+    Note the dependence on `--bowl-reject`, which removes detections and so
+    lowers coverage. The figures above are at 40, the shipped setting; turning
+    it off raises coverage and makes this floor looser, never tighter.
+    """
+    if not tsums or radius <= 0:
+        return 0.0
+    area = float(shape[0] * shape[1])
+    return (len(tsums) * math.pi * radius * radius / area) if area else 0.0
 
 
 def _snap_to_mask(solid_dt: np.ndarray, cx: float, cy: float,
@@ -1375,34 +1453,72 @@ class FeverWatch:
     FEVER repaints the board and animates it for about ten seconds, and it is
     the state the detector reads worst -- so it is worth knowing about, and
     worth reading from the game rather than inferred from detection going
-    wrong. The `max_fever` template is the meter at full, gold, an instant
-    before FEVER starts: a *trigger*, visible for a moment, not a state that
-    can be tested for while it lasts. So a match opens a window and the window
-    is what everything else asks about.
+    wrong. There are two ways to know, and they are not equally good.
 
-    Degrades to "never FEVER" when the template is missing, which keeps this
-    optional rather than a new hard dependency for anyone whose `templates/`
-    predates it.
+    `max_fever` is the meter at full, gold, an instant before FEVER starts: a
+    *trigger*, visible for a moment, not a state. One match has to be turned
+    into a ten-second assumption, so a missed trigger means the whole of FEVER
+    is played on the wrong rect and the wrong floor, and a stretched or
+    shortened FEVER is not noticed at all.
+
+    `fever_bonus` is the banner the game shows for as long as FEVER is running.
+    That can be *asked* every frame instead of assumed, which is strictly
+    better, so it leads when it is available. It still opens a short window
+    (:data:`FEVER_HOLD`) rather than being read raw: the banner fades in and
+    out at each end, and those few frames score too low to match. The trigger
+    is kept alongside it, because `max_fever` fires an instant *before* the
+    banner is drawn and covers the first frame or two.
+
+    Degrades in two steps rather than one: banner + trigger, trigger only with
+    its ten-second assumption, then "never FEVER" if `templates/` predates
+    both.
     """
 
     def __init__(self, matcher, templates, *, seconds: float = FEVER_SECONDS,
                  confidence: float = FEVER_CONFIDENCE,
-                 name: str = "max_fever", clock=time.monotonic) -> None:
+                 name: str = "max_fever", banner: str = "fever_bonus",
+                 banner_confidence: float = FEVER_BANNER_CONFIDENCE,
+                 hold: float = FEVER_HOLD, use_banner: bool = True,
+                 board: Optional[str] = None, clock=time.monotonic) -> None:
         self.matcher = matcher
         self.seconds = seconds
         self.confidence = confidence
+        self.banner_confidence = banner_confidence
+        self.hold = hold
+        #: The board rect spec, only so the banner search can be anchored to
+        #: the top of the board. Always the NORMAL rect: which rect is in force
+        #: depends on the answer this class is about to give.
+        self.board = board
         self.clock = clock
         self._until = 0.0
         self._was = False
+        #: When the banner was last seen, to tell a new run from a top-up.
+        self._banner_seen = -1e9
+        self.template = self._load(templates, name)
+        self.banner = self._load(templates, banner) if use_banner else None
+        if self.banner is not None:
+            # Reduced once here, not per frame: it is the same glyph mask every
+            # time and the frame side is the only half that changes.
+            self.banner_ink = _glyph_ink(self.banner.image)
+        else:
+            self.banner_ink = None
+
+    @staticmethod
+    def _load(templates, name):
         try:
-            self.template = templates.get(name)
+            return templates.get(name)
         except Exception:  # noqa: BLE001 - a missing template is not an error here
-            log.debug("no %s template; FEVER tracking disabled", name)
-            self.template = None
+            log.debug("no %s template", name)
+            return None
 
     @property
     def enabled(self) -> bool:
-        return self.template is not None
+        return self.template is not None or self.banner is not None
+
+    @property
+    def reads_state(self) -> bool:
+        """True when FEVER is being asked about rather than assumed."""
+        return self.banner_ink is not None
 
     def update(self, frame) -> bool:
         """Look at one frame; return whether FEVER is running as of now.
@@ -1411,11 +1527,49 @@ class FeverWatch:
         full for several frames as it fills, and each of those pushes the
         deadline out -- which is right, because FEVER has not started counting
         down until the bar actually starts draining.
+
+Every banner sighting opens the same :data:`FEVER_HOLD` window. Two
+        earlier designs are worth recording because both were wrong in ways
+        that are not obvious:
+
+        * **A 1.0s window.** Sized for the banner's fade and nothing else. It
+          makes the state only as reliable as the least readable frame, and a
+          played round showed it at once -- one real eleven-second FEVER logged
+          as three (FEVER :37, NORMAL :40, FEVER :40, NORMAL :43, FEVER :43,
+          NORMAL :48). Every flip discards the palette and re-reads the base
+          tsum, and the base came back a different cluster each time, so a
+          missed frame cost the identity of the character being played for.
+
+        * **A full ten seconds on the first sighting, topped up after.** The
+          idea was that FEVER's length is a game rule and so covers the middle
+          of a run for free. It is not a rule: **a skill firing pauses FEVER
+          until its animation finishes**, and some skills start FEVER outright,
+          so a run has no fixed length to lean on. Worse, it made a single
+          spurious read cost ten seconds of wrong state instead of one.
+
+        So: no assumption about how long FEVER lasts, one window length, and it
+        is sized to outlast a skill animation because that is the longest the
+        banner can go unread mid-run.
         """
-        if self.template is None:
-            return False
-        if self.matcher.find(frame, self.template, confidence=self.confidence):
-            self._until = self.clock() + self.seconds
+        now = self.clock()
+        if self.banner_ink is not None:
+            board_top = _board_rect(frame.shape, self.board)[1]
+            score = fever_banner_score(frame, self.banner_ink, board_top)
+            if score >= self.banner_confidence:
+                self._banner_seen = now
+                self._until = max(self._until, now + self.hold)
+        if self.template is not None and self.matcher is not None:
+            if self.matcher.find(frame, self.template, confidence=self.confidence):
+                # Ten seconds only when the trigger is all there is. With the
+                # banner reading the state, the trigger's job shrinks to
+                # covering the frame or two between the meter filling and the
+                # banner being drawn -- and a ten-second window off a single
+                # match is exactly the assumption the banner exists to remove.
+                # Measured over 151 frames, the two never overlap: the trigger
+                # matches on 3 frames, all immediately before FEVER, and the
+                # banner on the 54 frames of FEVER itself.
+                span = self.hold if self.banner_ink is not None else self.seconds
+                self._until = max(self._until, now + span)
         return self.active
 
     @property
@@ -1433,6 +1587,54 @@ class FeverWatch:
             return None
         self._was = now
         return "fever" if now else "normal"
+
+
+def _glyph_ink(bgr: np.ndarray) -> np.ndarray:
+    """The gold-and-white pixels a FEVER banner is drawn with.
+
+    Bold yellow letters with a white rim, and that pairing is what the game
+    uses for this banner and not for the board behind it.
+    """
+    b, g, r = (bgr[:, :, i].astype(np.int16) for i in range(3))
+    gold = (r > 150) & (g > 120) & (b < 150) & (r - b > 60)
+    white = (r > 200) & (g > 200) & (b > 200)
+    return ((gold | white).astype(np.uint8)) * 255
+
+
+def fever_banner_score(frame: np.ndarray, template: np.ndarray,
+                       board_top: int) -> float:
+    """How much the FEVER BONUS banner is on screen, 0-1.
+
+    Not :class:`TemplateMatcher`, and the reason is worth recording, because
+    the obvious two attempts both fail on this particular template.
+
+    The banner is *text over the live board*: the board shows through between
+    and behind the letters and is different on every frame, so most of the
+    template's box is noise. Straight `TM_CCOEFF_NORMED` reads ~0.61 whether
+    the banner is on screen or not -- it locks onto the right place and cannot
+    tell whether the text is there. Masking the template to the glyphs is the
+    natural repair, but a mask makes `TemplateMatcher` switch to
+    `TM_CCORR_NORMED` (see its `_match`), which has no mean subtraction and
+    reads ~0.966 on everything.
+
+    What is invariant is the *shape*: identical glyphs every time, whatever is
+    behind them. So both sides are reduced to "is this pixel banner-coloured"
+    and those two binary images are correlated. Mean-subtracted correlation of
+    two binary images is a shape match, and it does not care what colour is
+    showing through. Measured over 151 frames: banner present 0.438-0.561,
+    banner absent 0.000-0.275.
+
+    Searched in a band around the top of the board rather than over the whole
+    frame -- same scores to three decimals, 0.7ms instead of 15.8ms.
+    """
+    h = template.shape[0]
+    top = max(0, board_top - 3 * h)
+    bottom = min(frame.shape[0], board_top + 2 * h)
+    band = frame[top:bottom]
+    if band.shape[0] < h or band.shape[1] < template.shape[1]:
+        return 0.0
+    scores = cv2.matchTemplate(_glyph_ink(band), template, cv2.TM_CCOEFF_NORMED)
+    return float(scores.max()) if scores.size else 0.0
 
 
 @dataclass
@@ -1969,16 +2171,46 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
     # tsums in play don't change mid-game, so it's fit once and reused. Same for
     # the radius and the base-tsum lookup.
     palette, radius, base = None, opts.radius, None
-    fever = FeverWatch(drv.matcher, drv.templates)
+
+    # The pile does not change size during a round, so the radius is a physical
+    # constant and re-measuring it every time the fit is thrown away is a
+    # liability rather than a refresh. Measured over 151 captured frames of one
+    # round, the per-frame estimate ranges 8-38px on a board whose faces are
+    # ~26px, and 55% of frames read under 18px.
+    #
+    # Why this matters beyond tidiness: a collapsed radius reads the board at
+    # half scale, which roughly doubles the detection count, and a doubled
+    # count sits comfortably inside `--min-tsums`..`--max-tsums`. The frame is
+    # accepted, phantom chains are found and dragged, and because chains exist
+    # the "nothing playable -> tap shuffle" recovery never runs. It is a
+    # failure with no symptom except that nothing clears.
+    #
+    # Which is also why the count gate cannot be what decides a warm-up sample
+    # is trustworthy: the very failure being screened for is one that inflates
+    # the count. `_face_coverage` is the test that does work -- see there.
+    # With collapsed frames screened out, the samples are no longer skewed one
+    # way, so the summary is the MEDIAN. (Before the coverage gate existed the
+    # lock had to take the max, because half the pool was collapsed and the
+    # median inherited it; that version could still lock under 20px on ~2% of
+    # rounds, and reached 38.6px on 5%.)
+    radius_samples: deque = deque(maxlen=max(1, opts.radius_lock))
+    locked: Optional[float] = None
+    unlocked_frames = 0
+    fever = FeverWatch(drv.matcher, drv.templates,
+                       use_banner=getattr(opts, "fever_banner", True),
+                       hold=getattr(opts, "fever_hold", FEVER_HOLD),
+                       board=opts.board)
     if not fever.enabled:
-        say("no max_fever template -- FEVER will be played on the normal board rect")
+        say("no max_fever or fever_bonus template -- FEVER will be played on "
+            "the normal board rect")
+    elif not fever.reads_state:
+        say("no fever_bonus template -- FEVER will be inferred from the meter "
+            "and a 10s timer rather than read off the screen")
     played = misses = stalls = 0
     samples = _open_dataset(opts, say)
     # Rolling window of "which chain did we just play". A board that keeps
     # offering the same handful of chains is a board nothing is clearing on --
     # see the loop-detection check below.
-    from collections import deque
-
     recent: deque = deque(maxlen=opts.repeat_window)
     lengths: deque = deque(maxlen=max(opts.repeat_len, opts.repeat_window))
     per_step = opts.per_step
@@ -2033,12 +2265,32 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
             if flipped:
                 say(f"    {flipped.upper()} -- board rect now "
                     f"{_board_rect(frame.shape, opts.board, fever=fever.active)}")
-                palette, radius, base = None, opts.radius, None
+                # Palette and base are colour-bound and cluster-id-bound, so
+                # they have to go. The radius is not: FEVER repaints the board,
+                # it does not resize the tsums. Re-estimating here means
+                # re-estimating on the dimmest, most animated frames of the
+                # round -- exactly where the estimator collapses -- and then
+                # living with that number for the whole ten seconds.
+                palette, base = None, None
+                if locked is None:
+                    radius = opts.radius
             bx, by, bw, bh = _board_rect(frame.shape, opts.board, fever=fever.active)
             crop = frame[by:by + bh, bx:bx + bw]
 
+            # A measured layout knows the tsum size outright, so there is
+            # nothing to estimate and nothing to warm up. `--radius` still wins
+            # over it, and an unmeasured capture size falls through to the
+            # estimator and `--radius-lock` as before.
+            if locked is None and opts.radius is None:
+                known = _layout_radius(frame.shape)
+                if known:
+                    locked = known
+                    say(f"    radius {locked:.1f}px, measured for this layout "
+                        f"(not estimated -- every tsum is the same size)")
+
             t0 = time.perf_counter()
-            tsums, radius, palette = detect(crop, k=opts.k, radius=radius, palette=palette,
+            tsums, radius, palette = detect(crop, k=opts.k, radius=locked or radius,
+                                            palette=palette,
                                             scale=opts.scale, include_dark=opts.include_dark,
                                             merge=opts.merge, bowl_reject=opts.bowl_reject)
 
@@ -2052,15 +2304,55 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
             # radius that has drifted small blows the count *up* rather than
             # down, and that reads as a healthy board unless the ceiling is
             # checked too.
-            plausible = opts.min_tsums <= len(tsums) <= opts.max_tsums
+            # `--min-tsums` is there to recognise that a frame is not a board at
+            # all -- the Home screen scores 200+ "tsums" off portraits, the
+            # results screen scores a handful. During FEVER that job is already
+            # done, and done better, by the template `FeverWatch` matched: the
+            # game does not show a FEVER meter over a menu. What FEVER does do
+            # is fade and overlay the board, so a genuine in-play frame reads
+            # ~20 tsums where normal play reads ~50, and the floor throws away
+            # frames that were perfectly playable. Measured over the dim frames
+            # of one round at a correct radius, the median count is 20 -- i.e.
+            # sitting exactly on the default floor, half of them discarded.
+            floor = (opts.fever_min_tsums
+                     if fever.active and opts.fever_min_tsums else opts.min_tsums)
+            plausible = floor <= len(tsums) <= opts.max_tsums
             if not plausible and palette is not None:
+                # A refit re-fits the COLOURS. It must not also re-roll the
+                # radius once that is locked, or the recovery path becomes the
+                # way a collapsed estimate gets in.
                 fresh, fresh_r, fresh_pal = detect(crop, k=opts.k, scale=opts.scale,
+                                                   radius=locked,
                                                    include_dark=opts.include_dark,
                                                    merge=opts.merge,
                                                    bowl_reject=opts.bowl_reject)
-                if abs(len(fresh) - opts.min_tsums) < abs(len(tsums) - opts.min_tsums):
+                if abs(len(fresh) - floor) < abs(len(tsums) - floor):
                     say(f"    recalibrated ({len(tsums)} -> {len(fresh)} tsums)")
                     tsums, radius, palette, base = fresh, fresh_r, fresh_pal, None
+
+            # Sample the radius only from frames that read like a whole board.
+            # A frame that fails the coverage test is not discarded as a frame
+            # -- it is played normally -- it just does not get a vote on how
+            # big a tsum is.
+            if locked is None and opts.radius_lock:
+                if _face_coverage(tsums, radius, crop.shape) >= opts.radius_cover:
+                    radius_samples.append(radius)
+                    if len(radius_samples) == radius_samples.maxlen:
+                        locked = float(np.median(radius_samples))
+                        say(f"    radius locked at {locked:.1f}px "
+                            f"(median of {len(radius_samples)}: "
+                            f"{', '.join(f'{r:.0f}' for r in radius_samples)})")
+                else:
+                    unlocked_frames += 1
+                    # Not an error -- a sparse board or an unusual layout can
+                    # simply never qualify, and then the round runs the way it
+                    # did before any of this existed. Worth saying once, since
+                    # the alternative is wondering why the lock line never
+                    # appears in the log.
+                    if unlocked_frames == opts.radius_lock * 10:
+                        say(f"    no radius lock yet after {unlocked_frames} frames "
+                            f"below {opts.radius_cover:.2f} coverage -- "
+                            f"running unlocked (lower --radius-cover to change that)")
 
             if base is None and opts.use_base:
                 base, base_dist = read_base_kind(frame, palette, spec=opts.base)
@@ -2084,7 +2376,7 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
             # The ceiling matters as much as the floor: the Home screen scores
             # 200+ "tsums" off portraits and panel texture, sails past any
             # minimum, and produces a confident chain every single frame.
-            if not (opts.min_tsums <= len(tsums) <= opts.max_tsums):
+            if not (floor <= len(tsums) <= opts.max_tsums):
                 chains = []
 
             # Chain length is set by detection recall, not by the search: a
@@ -2123,7 +2415,9 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
                     _click_shuffle(drv, opts.shuffle, opts.shuffle_clicks,
                                   opts.shuffle_delay, opts.hold, opts.move_time)
                     _settle(drv, max_wait=max(opts.settle, 1.5))
-                    palette, radius, base = None, opts.radius, None
+                    palette, base = None, None
+                    if locked is None:
+                        radius = opts.radius
                     skip_kinds.clear()
                     misses = 0
                 continue
@@ -2170,7 +2464,9 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
                     _click_shuffle(drv, opts.shuffle, opts.shuffle_clicks,
                                   opts.shuffle_delay, opts.hold, opts.move_time)
                     _settle(drv, max_wait=max(opts.settle, 1.5))
-                    palette, radius, base = None, opts.radius, None
+                    palette, base = None, None
+                    if locked is None:
+                        radius = opts.radius
                     skip_kinds.clear()
                     misses = 0
                 continue
@@ -4318,6 +4614,25 @@ def add_play_args(play, *, merge_default: bool):
     play.add_argument("--mode", choices=["touch", "reach", "blob"], default="touch", help='"touch" (default): only tsums within --link-px of each other, with nothing blocking the line between them, count as linked. "reach": any two same-kind tsums link regardless of distance, which is closer to how the game is actually played -- distance stops mattering and --link-px/--link/--block are ignored. "blob": like "touch" but reads contact off the colour mask instead of inferring it from distance -- accepts more real links, ~45x slower, --link-px/--link/--block are ignored')
     play.add_argument("--block", type=float, default=0.75,
                       help="a tsum within this many radii of the line blocks the link")
+    play.add_argument("--radius-lock", type=int, default=0, help='measure the tsum radius over the first N frames that look like a board, then hold it for the round. 0 = off, which re-measures on every refit and on the FEVER transition. The pile does not change size mid-round, so the radius is a constant; measured over 151 frames of one round the per-frame estimate ranges 8-38px on ~26px faces, and a collapsed estimate reads the board at half scale, doubles the count, and still passes --min-tsums. The lock takes the MAX of the samples, not the median: the estimator only ever collapses, never inflates')
+    play.add_argument("--fever-hold", type=float, default=FEVER_HOLD,
+                      help="seconds one sighting of the FEVER BONUS banner keeps "
+                           "FEVER open. Has to outlast the longest stretch the "
+                           "banner can go unread mid-run, which is a skill "
+                           "animation (a skill pauses FEVER while it plays), not "
+                           "the banner's own fade. Too short and one real FEVER "
+                           "logs as several, each flip refitting the palette and "
+                           "re-reading the base tsum; too long and the end of "
+                           "FEVER is noticed a few seconds late, which is mild")
+    play.add_argument("--no-fever-banner", dest="fever_banner", action="store_false",
+                      help="do not read the FEVER BONUS banner; infer FEVER from the "
+                           "max_fever meter and a 10s timer instead, as before the "
+                           "banner was added. The banner is a state the game shows "
+                           "for the whole of FEVER, so it can be asked every frame "
+                           "rather than assumed from one trigger -- this switch is "
+                           "the way back if that misreads")
+    play.add_argument("--radius-cover", type=float, default=0.25, help='how much of the board rect the detected faces must add up to before a frame gets a vote on the radius, as a fraction of the rect area. Only consulted when --radius-lock is on. The detection count cannot screen a collapsed radius because a collapse INFLATES the count; area can, because a half-scale read covers a quarter of the area. Measured: good reads sit at 0.22-0.38, collapsed reads at 0.08-0.23, and 0.25 keeps 39 of 48 good frames while rejecting 48 of 51 collapsed ones. Lower it if the log says the lock never engages')
+    play.add_argument("--fever-min-tsums", type=int, default=0, help="the --min-tsums floor to use while FEVER is running. 0 = use --min-tsums. FEVER fades and overlays the board, so a genuine in-play frame reads ~20 detections where normal play reads ~50, and the normal floor discards half of them. Safe to lower because the floor's real job -- noticing that a frame is a menu rather than a board -- is already done by the FEVER template, which the game does not draw over a menu")
     play.add_argument("--bowl-reject", type=float, default=0.0, help="drop detections whose face colour sits closer than this (Lab) to the board's own colour -- a detection that landed on the bowl instead of on a tsum carries the bowl's colour. 0 = off (the default). Over the ten labelled boards: off f1 0.762, 40 -> 0.785, 60 -> 0.791, 80 -> 0.766, so 40-60 is a plateau. It buys precision with recall, and only a played round prices that trade")
     play.add_argument("--scale", type=float, default=1.0)
     play.add_argument("--no-dark", dest="include_dark", action="store_false")

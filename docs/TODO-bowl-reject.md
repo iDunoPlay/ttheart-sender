@@ -1,7 +1,10 @@
 # TODO: decide whether `--bowl-reject` becomes the default
 
-Status: **implemented, opt-in, enabled in `flows/play.yaml` at 60, awaiting a
-live A/B.** `board_colours()` plus a filter at the end of `detect()` in
+Status: **implemented, opt-in, enabled in `flows/play.yaml` at 40, live A/B
+done.** A played round preferred 40 clearly over 60 — see
+[The round settled it](#the-round-settled-it).
+
+`board_colours()` plus a filter at the end of `detect()` in
 `ttheart_sender/game/tsum.py`. The code default is `0` — off — so removing
 `bowl_reject:` from the flow is the entire revert.
 
@@ -92,22 +95,33 @@ The knobs that were supposed to reach recall have been swept since and do not:
 | `include_dark=true` | 0.759 → 0.762, i.e. noise |
 | `scale` 0.75 / 1.5 / 2.0 | 0.622 / 0.659 / 0.625 — all worse |
 
-## Before this is the default
+## The round settled it
 
-1. **A full round on the live emulator, against the same round with the line
-   removed.** What to watch is `stalled` and the cleared count, not chain
-   length: this rule shortens chains by design, and the question is whether the
-   members it removes were ones the game was going to refuse anyway.
-2. **Whether 60 or 40 is the right end of the plateau.** They are 0.004 f1
-   apart over ten boards, which `eval` itself flags as noise. If the live run
-   shows chains getting too short, 40 is the same idea with a third less bite.
-3. **Nothing here prices FEVER.** Every number above comes from normal-play
-   boards. FEVER repaints the board in neon, so the bowl's own colour moves and
-   this rule's threshold moves with it; `play_loop` refits the palette on
-   entering FEVER, but the exchange rate has not been measured there.
+Played live, the rule is a clear improvement and **40 is the setting, not 60**.
+
+That is the opposite of what the offline table above prefers, and the gap it
+overturns is small: 0.791 f1 against 0.785, which `eval` itself flags as noise
+over ten boards. So this is not a measurement being contradicted, it is a
+measurement being asked a question it cannot answer. `eval` scores whether a
+detection is a tsum. It cannot score whether the tsum that got dropped was
+holding a chain together, and at 60 enough of them are that the chains get
+shorter without the stalls falling to pay for it.
+
+Worth keeping as a general caution about this repo's offline scores: a
+difference `eval` calls noise is not a difference the round has to agree with,
+and where they disagree the round wins.
+
+## Still open
+
+**Nothing here prices FEVER.** Every number above comes from normal-play
+boards. FEVER repaints the board in neon, so the bowl's own colour moves and
+this rule's threshold moves with it; `play_loop` refits the palette on entering
+FEVER, but the exchange rate has not been measured there. See
+`docs/TODO-fever-detection.md`, which fixes a much larger FEVER problem — a
+collapsing radius estimate — and leaves this one open.
 
 ## Related
 
-`docs/TODO-blob-adjacency.md` is the other opt-in rule enabled in
-`flows/play.yaml`, and it changes the other half of the pipeline. Turn them off
-one at a time.
+`docs/TODO-fever-detection.md` and `docs/TODO-blob-adjacency.md` are the other
+opt-in rules, and they touch different parts of the pipeline. Turn them off one
+at a time.

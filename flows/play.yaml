@@ -88,14 +88,14 @@ steps:
         block: 1.25
 
         # ------------------------------------------------------------------
-        # TWO OPT-IN RULES. TO GO BACK TO NORMAL, DELETE THE TWO LINES AT THE
-        # BOTTOM OF THIS BLOCK (`bowl_reject:` and `mode:`). Nothing else has
-        # to change and nothing has to be rebuilt -- the code defaults are
-        # still the old behaviour, so removing the lines is the whole revert.
+        # FOUR OPT-IN RULES: `bowl_reject`, `mode`, `radius_lock` and
+        # `fever_min_tsums`. TO GO BACK TO NORMAL, DELETE THE LINE. Nothing
+        # else has to change and nothing has to be rebuilt -- the code defaults
+        # are still the old behaviour, so removing a line is the whole revert.
         #
         # They are independent, so turn them off ONE AT A TIME if a round goes
-        # badly: they change different halves of the pipeline and switching
-        # both back at once tells you nothing about which one was at fault.
+        # badly: they change different parts of the pipeline and switching
+        # several back at once tells you nothing about which one was at fault.
         #
         # `bowl_reject` -- THROW AWAY DETECTIONS THAT LANDED ON THE BOWL.
         # About a third of what detection reports is not a tsum at all but a
@@ -105,17 +105,18 @@ steps:
         # whose face colour is closer than N (in Lab) to the board's own.
         # Scored over the ten labelled boards:
         #     off  precision 0.675  recall 0.874  f1 0.762
-        #     40   precision 0.734  recall 0.844  f1 0.785
-        #     60   precision 0.773  recall 0.810  f1 0.791   <- this setting
+        #     40   precision 0.734  recall 0.844  f1 0.785   <- THIS SETTING
+        #     60   precision 0.773  recall 0.810  f1 0.791
         #     80   precision 0.813  recall 0.724  f1 0.766
         #   raise it -> fewer phantoms, but real tsums start going with them,
         #               and a tsum thrown away here splits a run of six into
         #               a three and a two.
         #   lower it -> back towards keeping everything. 0 is off.
-        # 40-60 is a plateau rather than a tuned edge. WHAT TO WATCH LIVE:
-        # `stalled` in the play log should fall. If chains get shorter without
-        # stalls falling, this is costing more than it saves -- drop to 40, or
-        # remove the line.
+        # 40 rather than 60 BECAUSE A PLAYED ROUND SAID SO. Offline f1 puts 60
+        # a fraction ahead (0.791 vs 0.785), which is inside the noise `eval`
+        # itself flags over ten boards, and live it was clearly the worse of
+        # the two -- 60 takes real tsums out of the middle of chains. Where the
+        # two disagree, the round wins.
         bowl_reject: 40
 
         # `mode: blob` -- DECIDE LINKS BY THE PICTURE, NOT BY DISTANCE.
@@ -141,6 +142,55 @@ steps:
         # the board has moved on by the time the drag lands. If chains are
         # good but drags miss a settling board, this is the line to remove.
         #mode: blob
+
+        # `radius_lock` -- MEASURE THE TSUM SIZE ONCE, THEN STOP MEASURING.
+        # This is the FEVER fix, and it is not really about FEVER.
+        # The size of a tsum cannot change during a round, but the estimator
+        # re-runs whenever the colour fit is thrown away -- and it re-ran on
+        # the FEVER transition, which is the dimmest, most animated moment of
+        # the round and exactly where it fails. Measured over 151 captured
+        # frames of one round, the per-frame estimate ranges 8px to 38px on a
+        # board whose faces are ~26px, and 55% of frames read under 18px.
+        #
+        # WHY THAT LOOKED LIKE "THE BOT DOES NOTHING IN FEVER": a radius half
+        # the truth reads the board at half scale, which roughly DOUBLES the
+        # detection count -- and a doubled count is still inside the 20..110
+        # sanity range, so the frame is accepted. Phantom chains get found and
+        # dragged, nothing clears, and because chains WERE found the "nothing
+        # playable -> tap the fan" recovery never runs either. No error, no
+        # skip in the log, ten seconds of FEVER spent busy and useless.
+        #
+        # This measures over the first N frames that look like a board and
+        # then holds that number for the round. It takes the LARGEST of the
+        # samples, not the middle one: the estimator only ever collapses, it
+        # never over-reads, so the biggest sample is the most honest one.
+        #   raise it -> a longer warm-up, more samples, slower to settle.
+        #   lower it -> locks sooner off fewer frames. 3 is the practical floor.
+        #   0 = off, back to re-measuring on every refit.
+        # WHAT TO WATCH LIVE: the log prints `radius locked at NNpx` once per
+        # round. If that number is under ~20 the warm-up caught a bad patch --
+        # raise this, and the round after should read higher.
+        radius_lock: 6
+
+        # `fever_min_tsums` -- LET FEVER BE READ ON FEWER TSUMS.
+        # `--min-tsums` (20) is not a quality bar, it is a "this is not a board"
+        # test: the Home screen scores 200+ fake tsums off portraits, the
+        # results screen scores a handful, and dragging across either would
+        # swipe live buttons. But FEVER fades and overlays the board, so a
+        # perfectly playable in-play frame reads ~20 detections where normal
+        # play reads ~50 -- sitting right on the floor, half of them thrown
+        # away for looking too empty.
+        # Safe to lower ONLY during FEVER, because the floor's real job is
+        # already done there by the FEVER template: the game does not draw a
+        # FEVER meter over a menu, so the frame is known to be a board before
+        # this number is consulted.
+        #   raise it -> closer to the strict floor; more fever frames skipped.
+        #   lower it -> reads dimmer, sparser boards. Too low and a fade to
+        #               black at the start of FEVER becomes a "board".
+        #   0 = off, use --min-tsums during FEVER as well.
+        # WHAT TO WATCH LIVE: chains actually being dragged between the FEVER
+        # and NORMAL lines in the log, instead of a run of `skip` lines.
+        fever_min_tsums: 12
 
   - find_click:
       template: cancel_button

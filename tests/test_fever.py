@@ -31,13 +31,20 @@ class Matcher:
 
 
 class Templates:
+    """Serves `max_fever` only.
+
+    Deliberate: everything in this file is about the trigger-plus-timer path,
+    which is what runs when `templates/` has no FEVER BONUS banner. The banner
+    path has its own file, `test_fever_banner.py`.
+    """
+
     def __init__(self, have=True) -> None:
         self.have = have
         self.asked = []
 
     def get(self, name):
         self.asked.append(name)
-        if not self.have:
+        if not self.have or name != "max_fever":
             raise KeyError(name)
         return "max_fever-template"
 

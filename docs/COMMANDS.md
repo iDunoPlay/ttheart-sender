@@ -143,21 +143,23 @@ Saving writes every detection present at review time into the label file, which
 is what lets `eval` re-run detection with *different* parameters and still know
 which of the new detections were approved.
 
-### The two opt-in rules, and how to switch them off
+### The opt-in rules, and how to switch them off
 
-`flows/play.yaml` turns on two rules that are off in the code's own defaults.
-Each is one line under `options:`, and **deleting the line is the whole
-revert** — no rebuild, nothing else to change:
+`flows/play.yaml` turns on rules that are off in the code's own defaults. Each
+is one line under `options:`, and **deleting the line is the whole revert** —
+no rebuild, nothing else to change:
 
-| line | half of the pipeline | what it does | costs |
+| line | what it does | costs | state |
 |---|---|---|---|
-| `bowl_reject: 60` | detection | drops detections whose colour says they landed on the bowl, not on a tsum (precision 0.675 → 0.769) | recall 0.874 → 0.814 |
-| `mode: blob` | adjacency | decides links by whether the two tsums' colour blobs join, not by centre distance (76.3% → 86.6% of hand-drawn links accepted) | ~60ms a frame against ~1.3ms |
+| `bowl_reject: 40` | drops detections whose colour says they landed on the bowl, not on a tsum (precision 0.675 → 0.734) | recall 0.874 → 0.844 | on; a live round preferred 40 to 60 |
+| `radius_lock: 5` | measures the tsum radius over five frames and holds it for the round, instead of re-measuring on every refit and at the FEVER transition | a bad warm-up gets held too | on; the FEVER fix |
+| `fever_min_tsums: 12` | lowers the "is this even a board" floor while FEVER runs, where the FEVER template already answers that | a fade to black could read as a board | on; the FEVER fix |
+| `mode: blob` | decides links by whether the two tsums' colour blobs join, rather than by centre distance (76.3% → 86.6% of hand-drawn links accepted) | ~60ms a frame against ~1.3ms | **off** — no live improvement yet |
 
-They are independent and change different halves, so **turn them off one at a
-time**: switching both back at once says nothing about which one was at fault.
-`docs/TODO-bowl-reject.md` and `docs/TODO-blob-adjacency.md` carry the full
-measurements and what each one still has to prove in a live round.
+They are independent and touch different parts of the pipeline, so **turn them
+off one at a time**: switching several back at once says nothing about which
+one was at fault. `docs/TODO-bowl-reject.md`, `docs/TODO-fever-detection.md`
+and `docs/TODO-blob-adjacency.md` carry the measurements behind each.
 
 ### What each reader tells you
 
