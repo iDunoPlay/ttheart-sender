@@ -1,8 +1,15 @@
 # TODO: decide whether `--mode blob` becomes the default
 
-Status: **implemented, opt-in, not yet settled.** Added in `ttheart_sender/game/tsum.py`
-as `blob_adjacency()` plus a third `--mode` alongside `touch` and `reach`.
-Nothing changes unless you pass `--mode blob`, so this is safe to leave sitting.
+Status: **on main, opt-in, enabled in `flows/play.yaml`, awaiting a live A/B.**
+`blob_adjacency()` in `ttheart_sender/game/tsum.py`, plus a third `--mode`
+alongside `touch` and `reach`. The code default is still `touch`, so deleting
+`mode: blob` from the flow is the entire revert.
+
+History worth knowing, because this document was on main for months while the
+code was not: it was written against branch `blob-adjacency` (`72b5942`, forked
+at v1.4.0) and only the document was carried over into v1.7.0. The
+implementation landed on main separately, unchanged, and the numbers below were
+re-measured against current detection when it did — they reproduce exactly.
 
 ## What it is
 
@@ -45,6 +52,16 @@ Replayed through the 97 hand-drawn links `score` uses, on identical detections:
 | `adjacency()`, `--link-px 150`      |          83.5% |        387 |                    — |
 | `adjacency()` ceiling, any distance |          84.5% |          — |                    — |
 | **`blob_adjacency()`, grown 0.9r**  |      **86.6%** |    **291** |          **60 ms**   |
+
+Re-run the whole table, including the blob row, with:
+
+```
+python -m ttheart_sender.game.tsum score --dir scratchpad
+```
+
+It is a row in `score` rather than a figure in this file precisely because it
+is a function of detection: anything that moves detection moves this, and a
+number in a document cannot notice that it has gone stale.
 
 It clears what `adjacency()` can reach at *any* distance setting, and does it
 with a sparser graph than the loose setting it beats — more of the human's

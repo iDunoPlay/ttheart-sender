@@ -11,4 +11,4 @@ executing the file, which only works while it stays a plain literal.
 
 from __future__ import annotations
 
-__version__ = "1.7.4"
+__version__ = "1.7.5"

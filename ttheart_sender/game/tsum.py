@@ -175,6 +175,51 @@ def _background_clusters(labels: np.ndarray, centres: np.ndarray) -> set[int]:
     return bg
 
 
+def board_colours(bgr: np.ndarray, palette: np.ndarray) -> np.ndarray:
+    """The Lab colours of the bowl behind the tsums, for a frame already fitted.
+
+    :func:`_background_clusters` answers the same question but wants the whole
+    label image, which only :func:`detect` has. This reads the crop's border
+    ring -- always board, never tsum -- assigns just those few thousand pixels
+    to the palette, and applies the identical rule: whatever dominates the ring
+    is background, plus anything within 18 Lab of it, which catches the lighter
+    rim gradient as one background rather than as a colour of its own.
+
+    Verified to pick the same clusters as `_background_clusters` on all ten
+    labelled boards, for ~2.5ms against a re-quantisation of the full crop.
+    """
+    lab = cv2.cvtColor(cv2.GaussianBlur(bgr, (5, 5), 0), cv2.COLOR_BGR2LAB)
+    mask = np.ones(bgr.shape[:2], bool)
+    mask[8:-8, 8:-8] = False
+    px = lab[mask].reshape(-1, 3).astype(np.float32)
+    if px.size == 0:
+        return palette[:0]
+
+    dist = (palette * palette).sum(axis=1)[None, :] - 2.0 * (px @ palette.T)
+    modal = int(np.bincount(dist.argmin(axis=1), minlength=len(palette)).argmax())
+    bg = [i for i, c in enumerate(palette)
+          if i == modal or np.linalg.norm(c - palette[modal]) < 18]
+    return palette[bg]
+
+
+def _lightness(lab_centre: np.ndarray) -> float:
+    """Lightness of a cluster centre, 0-255.
+
+    Trivial, and that is the point: it names the assumption that a centre's
+    channel 0 is lightness. That is true of Lab and of nothing else. Feed this
+    pipeline BGR centres and channel 0 is *blue*, so every warm tsum -- Pooh,
+    Tigger, Pluto -- reads as dark and gets discarded before it is ever a
+    candidate. Measured: swapping the quantiser to raw BGR without touching
+    this test drops detection f1 from 0.759 to 0.504, and nothing in the
+    failure points at the colourspace.
+
+    So the rule lives behind a name. Changing :func:`_quantise` to work in a
+    different space now means either converting here or seeing this function
+    and knowing it has to change -- rather than silently losing half the board.
+    """
+    return float(lab_centre[0])
+
+
 def _lab_to_bgr(lab_centre: np.ndarray) -> tuple:
     px = np.uint8([[lab_centre]])
     b, g, r = cv2.cvtColor(px, cv2.COLOR_LAB2BGR)[0][0]
@@ -352,6 +397,38 @@ def _recolour(bgr: np.ndarray, tsums: list[Tsum], radius: float,
     return tsums
 
 
+def _face_lab(bgr: np.ndarray, tsums: Sequence["Tsum"], radius: float,
+              *, fill: float = 0.0) -> np.ndarray:
+    """Median Lab colour of each tsum's inner face, one row per tsum.
+
+    The middle 0.45r only. Eyes, outline and the rim gradient all live further
+    out, and a sample that reaches them is a blend no character actually has --
+    the same window :func:`_recolour` and :func:`purity_filter` sample.
+
+    Sampled in a box around each tsum rather than against a full-frame mask:
+    same medians, but the cost stops scaling with board size, which matters
+    because `--bowl-reject` runs this on every frame.
+    """
+    lab = cv2.cvtColor(cv2.GaussianBlur(bgr, (5, 5), 0), cv2.COLOR_BGR2LAB).astype(np.float32)
+    h, w = lab.shape[:2]
+    sample = max(2, int(radius * 0.45))
+    out = np.full((len(tsums), 3), fill, np.float32)
+
+    for i, t in enumerate(tsums):
+        cx, cy = int(t.x), int(t.y)
+        x0, y0 = max(0, cx - sample), max(0, cy - sample)
+        x1, y1 = min(w, cx + sample + 1), min(h, cy + sample + 1)
+        patch = lab[y0:y1, x0:x1]
+        if patch.size == 0:
+            continue
+        yy, xx = np.ogrid[y0:y1, x0:x1]
+        disc = (yy - cy) ** 2 + (xx - cx) ** 2 <= sample * sample
+        px = patch[disc]
+        if px.size:
+            out[i] = np.median(px, axis=0)
+    return out
+
+
 def purity_filter(bgr: np.ndarray, tsums: Sequence[Tsum], nodes: Sequence[int],
                   radius: float, tol: float) -> list[int]:
     """Drop chain members that don't actually look like the rest of the chain.
@@ -409,6 +486,7 @@ def detect(
     heal_frac: float = 0.9,
     open_ratio: float = 2.2,
     recolour: float = 0.0,
+    bowl_reject: float = 0.0,
     floor_frac: float = 0.42,
     hole_frac: float = 0.8,
     palette: Optional[np.ndarray] = None,
@@ -433,7 +511,7 @@ def detect(
     # and shadow, AND the face of a black tsum like classic Mickey. Treating
     # them as one cluster fuses the whole board; discarding them loses Mickey
     # entirely. So they get split off and processed under their own rules below.
-    dark = {i for i, c in enumerate(centres) if c[0] < dark_l} - skip
+    dark = {i for i, c in enumerate(centres) if _lightness(c) < dark_l} - skip
     if not include_dark:
         skip |= dark
         dark = set()
@@ -602,6 +680,27 @@ def detect(
             vis[labels == i] = (0, 0, 255)  # what the dark pass has to work with
         cv2.imwrite(str(debug_dir / "clusters.png"), vis)
 
+    if bowl_reject > 0 and kept:
+        # A detection that landed on the bowl rather than on a tsum carries the
+        # bowl's colour. Measured over the ten labelled boards, real tsums sit a
+        # median 173 Lab from the board's own colour and phantoms 76, with the
+        # real p10 at 74 -- separated enough to act on, overlapping enough that
+        # the cutoff buys phantoms with real tsums rather than for free.
+        #
+        #   off   precision 0.675  recall 0.874  f1 0.762
+        #   40    precision 0.734  recall 0.844  f1 0.785
+        #   60    precision 0.773  recall 0.810  f1 0.791
+        #   80    precision 0.813  recall 0.724  f1 0.766
+        #
+        # 40-60 is a plateau, not a tuned edge. OFF BY DEFAULT: the reading
+        # above is offline f1, and what matters live is whether the drags the
+        # bot loses were ones the game would have cleared. That is the A/B.
+        bowl = board_colours(bgr, centres)
+        if len(bowl):
+            faces = _face_lab(bgr, kept, radius)
+            far = np.linalg.norm(faces[:, None] - bowl[None], axis=2).min(axis=1)
+            kept = [t for t, d in zip(kept, far) if d >= bowl_reject]
+
     if recolour > 0:
         kept = _recolour(bgr, kept, radius, recolour)
 
@@ -736,6 +835,93 @@ def adjacency(tsums: Sequence[Tsum], radius: float, link: float = 1.5,
 
             adj[i].add(j)
             adj[j].add(i)
+    return adj
+
+
+def blob_adjacency(labels: np.ndarray, tsums: Sequence[Tsum], radius: float, *,
+                   grow: float = 0.9, reach: float = 2.2) -> list[set[int]]:
+    """Link two tsums when their colour blobs actually join up, not when their
+    centres are close enough.
+
+    :func:`adjacency` models contact as "near, with nothing on the segment
+    between". That needs the blocking test precisely because distance alone
+    misreads two cases: sprites are not circles, so two tsums can overlap at
+    the ears while the centre line runs through the gap between them; and a
+    third tsum sitting between two others bridges the line, so a real gap reads
+    as contact. Testing the mask directly answers the question the segment test
+    approximates -- is there a continuous run of this colour joining these two
+    specifically -- whatever shape they are and whatever sits nearby.
+
+    `grow` is the part that is not optional. Clusters here are *face* colour,
+    and two touching sprites still have an outline and a body between their
+    faces: measured over the labelled boards, the median gap between the face
+    blobs of two tsums a human chained is 23.4px against a detected radius of
+    ~24, and only 2.2% of those pairs share a connected component at all. So
+    the mask is dilated outward to approximate the sprite's full extent before
+    connectivity is tested. Below ~0.6r almost nothing links; the score
+    saturates at 0.9r and is flat to 1.2r, so 0.9 is the middle of a plateau
+    rather than a tuned edge.
+
+    Replayed through the 97 hand-drawn links in `score`, against the same
+    detections: 86.6% accepted, versus 76.3% for adjacency() at --link-px 105
+    and an 84.5% ceiling for adjacency() at any distance. It does that with a
+    sparser graph than the loose setting it beats -- 291 edges against 387 at
+    --link-px 150 -- so it is accepting more of the links a human drew while
+    inventing fewer of its own.
+
+    Costs ~60ms on a 62-tsum board against ~1.3ms for adjacency(), which is why
+    this is opt-in: it roughly doubles the per-frame think time. Worth it when
+    reaction speed is not the binding constraint, not when it is.
+
+    NOTE ON THE SCORE: the labels record only links a human *did* draw, so
+    acceptance is a positive-only measure and rises for free as a rule accepts
+    more -- the same trap documented on :func:`_recolour`. The edge count above
+    is the control, and this rule wins on both at once, which is real evidence
+    but not the end-to-end A/B. Treat 86.6% as promising, not settled.
+    """
+    n = len(tsums)
+    adj: list[set[int]] = [set() for _ in tsums]
+    if n < 2:
+        return adj
+
+    h, w = labels.shape
+    span = radius * reach
+    g = max(1, int(round(radius * grow)))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * g + 1,) * 2)
+    grown: dict[int, np.ndarray] = {}   # dilate each kind once, not once per pair
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            a, b = tsums[i], tsums[j]
+            if a.kind != b.kind:
+                continue
+            if (a.x - b.x) ** 2 + (a.y - b.y) ** 2 > (2 * span) ** 2:
+                continue
+            if a.kind not in grown:
+                grown[a.kind] = cv2.dilate((labels == a.kind).astype(np.uint8), kernel)
+
+            # The question is local -- these two tsums and the corridor between
+            # them -- so it gets answered in a box around the pair. Running it
+            # over the whole board instead costs ~6x for the same answer.
+            x0, x1 = max(0, int(min(a.x, b.x) - span)), min(w, int(max(a.x, b.x) + span) + 1)
+            y0, y1 = max(0, int(min(a.y, b.y) - span)), min(h, int(max(a.y, b.y) + span) + 1)
+            sub_mask = grown[a.kind][y0:y1, x0:x1]
+            if sub_mask.size == 0:
+                continue
+
+            yy, xx = np.ogrid[y0:y1, x0:x1]
+            disks = ((((xx - a.x) ** 2 + (yy - a.y) ** 2) < span ** 2)
+                     | (((xx - b.x) ** 2 + (yy - b.y) ** 2) < span ** 2))
+            _, comp = cv2.connectedComponents(sub_mask * disks.astype(np.uint8))
+
+            def blobs_at(t: Tsum) -> set:
+                cy, cx = int(t.y) - y0, int(t.x) - x0
+                win = comp[max(0, cy - 6):cy + 7, max(0, cx - 6):cx + 7]
+                return set(np.unique(win)) - {0}
+
+            if blobs_at(a) & blobs_at(b):
+                adj[i].add(j)
+                adj[j].add(i)
     return adj
 
 
@@ -917,6 +1103,7 @@ def find_chains(
     mode: str = "touch",
     max_chain: int = 0,
     first_leg_px: float = 0.0,
+    labels: Optional[np.ndarray] = None,
 ) -> list[Chain]:
     """Every playable chain, best first.
 
@@ -937,6 +1124,11 @@ def find_chains(
         this is arguably the mode that matches how the game is actually played.
         It is not the default because it has not been A/B'd over a full round
         against "touch" -- when it is, this comment should say which won.
+      "blob" -- like "touch", but contact is read off the mask instead of
+        inferred from distance; needs `labels` (the cluster map that produced
+        these tsums). Accepts more of the links a human actually drew and
+        invents fewer of its own, at roughly 45x the cost. See
+        :func:`blob_adjacency`. Falls back to "touch" if `labels` is missing.
     """
     chains: list[Chain] = []
     by_kind: dict[int, list[int]] = {}
@@ -957,7 +1149,10 @@ def find_chains(
         chains.sort(key=lambda c: (c.is_base, len(c)), reverse=True)
         return chains
 
-    adj = adjacency(tsums, radius, link, block, link_px)
+    if mode == "blob" and labels is not None:
+        adj = blob_adjacency(labels, tsums, radius)
+    else:
+        adj = adjacency(tsums, radius, link, block, link_px)
     for kind, members in by_kind.items():
         if base_only and kind != base_kind:
             continue
@@ -1845,7 +2040,7 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
             t0 = time.perf_counter()
             tsums, radius, palette = detect(crop, k=opts.k, radius=radius, palette=palette,
                                             scale=opts.scale, include_dark=opts.include_dark,
-                                            merge=opts.merge)
+                                            merge=opts.merge, bowl_reject=opts.bowl_reject)
 
             # FEVER repaints the whole board in neon, so a palette fit during
             # normal play stops matching anything and the tsum count collapses.
@@ -1861,7 +2056,8 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
             if not plausible and palette is not None:
                 fresh, fresh_r, fresh_pal = detect(crop, k=opts.k, scale=opts.scale,
                                                    include_dark=opts.include_dark,
-                                                   merge=opts.merge)
+                                                   merge=opts.merge,
+                                                   bowl_reject=opts.bowl_reject)
                 if abs(len(fresh) - opts.min_tsums) < abs(len(tsums) - opts.min_tsums):
                     say(f"    recalibrated ({len(tsums)} -> {len(fresh)} tsums)")
                     tsums, radius, palette, base = fresh, fresh_r, fresh_pal, None
@@ -1869,10 +2065,15 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
             if base is None and opts.use_base:
                 base, base_dist = read_base_kind(frame, palette, spec=opts.base)
                 say(f"base tsum: cluster #{base} (Lab distance {base_dist:.1f})")
+            # Only quantise a second time when the rule that needs it is on:
+            # detect() keeps the centres, not the label map, and refitting the
+            # labels costs a GEMM over the crop.
+            cluster_map = (_quantise(crop, opts.k, palette)[0]
+                           if opts.mode == "blob" and palette is not None else None)
             chains = find_chains(tsums, radius, opts.link, block=opts.block,
                                  link_px=opts.link_px, base_kind=base, base_only=opts.base_only,
                                  mode=opts.mode, max_chain=opts.max_chain,
-                                 first_leg_px=opts.first_leg_px)
+                                 first_leg_px=opts.first_leg_px, labels=cluster_map)
             think = (time.perf_counter() - t0) * 1000
 
             # A real board is crowded but bounded. Menus and the results screen
@@ -3369,7 +3570,8 @@ def _score(args) -> int:
 #: Every `detect` keyword `eval --sweep` is allowed to vary. Spelled out rather
 #: than introspected so a typo is an error instead of a silently ignored knob.
 _SWEEPABLE = ("k", "radius", "include_dark", "dark_l", "merge", "heal_frac",
-              "open_ratio", "recolour", "floor_frac", "hole_frac", "scale")
+              "open_ratio", "recolour", "bowl_reject", "floor_frac", "hole_frac",
+              "scale")
 
 #: Not `detect` arguments -- these shrink the board rect before the crop is
 #: taken, so they tune :data:`LAYOUTS` rather than detection. Sweepable because
@@ -3422,7 +3624,8 @@ def _truth_points(data: dict) -> list[list[float]]:
     return keep + [list(p) for p in data.get("missed", [])]
 
 
-def _detect_labelled(data: dict, folder: Path, params: dict) -> tuple[list[Tsum], list[list[float]], float]:
+def _detect_labelled(data: dict, folder: Path,
+                     params: dict) -> tuple[list[Tsum], list[list[float]], float, np.ndarray]:
     """Re-detect a labelled board and return its tsums in full-image pixels.
 
     Ground truth is stored in full-image coordinates precisely so that a
@@ -3442,8 +3645,11 @@ def _detect_labelled(data: dict, folder: Path, params: dict) -> tuple[list[Tsum]
     bw -= trims["trim_left"] + trims["trim_right"]
     bh -= trims["trim_top"] + trims["trim_bottom"]
 
-    tsums, radius, _ = detect(img[by:by + bh, bx:bx + bw], **params)
-    return tsums, [[t.x + bx, t.y + by] for t in tsums], radius
+    tsums, radius, centres = detect(img[by:by + bh, bx:bx + bw], **params)
+    # The palette comes back so a caller can rebuild the label map this fit
+    # produced -- `blob_adjacency` needs it, and refitting would renumber the
+    # clusters and score a different segmentation than the one being tested.
+    return tsums, [[t.x + bx, t.y + by] for t in tsums], radius, centres
 
 
 def _eval_once(labels: Sequence[tuple[Path, dict]], params: dict,
@@ -3455,7 +3661,7 @@ def _eval_once(labels: Sequence[tuple[Path, dict]], params: dict,
 
     for path, data in labels:
         truth = _truth_points(data)
-        tsums, found, _ = _detect_labelled(data, path.parent, params)
+        tsums, found, _, _centres = _detect_labelled(data, path.parent, params)
         tol = tol_frac * float(data["radius"])
         pairs, missed, extra = _match(truth, found, tol)
         tp += len(pairs)
@@ -3542,7 +3748,7 @@ def _eval(args) -> int:
         raise SystemExit("no reviewed boards to score -- nothing to report")
 
     base = {"k": args.k, "radius": args.radius, "include_dark": args.include_dark,
-            "merge": args.merge, "scale": args.scale}
+            "merge": args.merge, "scale": args.scale, "bowl_reject": args.bowl_reject}
     truth_total = sum(len(_truth_points(d)) for _, d in labels)
     print(f"{len(labels)} reviewed board(s), {truth_total} ground-truth tsums, "
           f"match tolerance {args.tol:.2f}r\n")
@@ -3606,13 +3812,14 @@ def _score_adjacency(label_files: Sequence[Path], folder: Path, tol_frac: float)
     delivers, so this replays each hand-drawn link through the real test and
     reports which of the three gates it died at.
     """
-    boards = []   # (tsums, radius, [(i, j), ...]) -- one entry per labelled board
+    boards = []   # (tsums, radius, labels, [(i, j), ...]) -- one per labelled board
     total = 0
     for lf in label_files:
         data = json.loads(lf.read_text())
         if not data.get("paths"):
             continue
-        tsums, found, radius = _detect_labelled(data, folder, {"k": 12, "include_dark": True})
+        params = {"k": 12, "include_dark": True}
+        tsums, found, radius, centres = _detect_labelled(data, folder, params)
         tol = tol_frac * float(data["radius"])
         links = []
         for path in data["paths"]:
@@ -3622,7 +3829,13 @@ def _score_adjacency(label_files: Sequence[Path], folder: Path, tol_frac: float)
             links += [(at[a], at[a + 1]) for a in range(len(nodes) - 1)
                       if a in at and a + 1 in at]
         if links:
-            boards.append((tsums, radius, links))
+            # The same fit detection ran on, so the mask blob_adjacency tests is
+            # the one these tsums came out of.
+            img = cv2.imdecode(np.fromfile(str(folder / data["image"]), np.uint8),
+                               cv2.IMREAD_COLOR)
+            bx, by, bw, bh = data["board"]
+            cluster_map, _ = _quantise(img[by:by + bh, bx:bx + bw], params["k"], centres)
+            boards.append((tsums, radius, cluster_map, links))
             total += len(links)
 
     if not total:
@@ -3634,7 +3847,7 @@ def _score_adjacency(label_files: Sequence[Path], folder: Path, tol_frac: float)
     print(f"  {'link-px':>8}  {'accepted':>8}  {'wrong kind':>10}  {'too far':>8}  {'blocked':>8}")
     for cap in (90, 100, 105, 120, 150, 200, 0):
         ok = kind = far = blocked = 0
-        for tsums, radius, links in boards:
+        for tsums, radius, _labels, links in boards:
             # Once per board per threshold, not once per link: the graph is the
             # same for every pair on it. `link` is set absurdly high so that
             # link_px is the only distance gate in play.
@@ -3655,6 +3868,34 @@ def _score_adjacency(label_files: Sequence[Path], folder: Path, tol_frac: float)
     print("  'wrong kind' is a detection error, not a distance one: two tsums you")
     print("  say are the same character were read as different colours, so no")
     print("  --link-px can ever join them. 'blocked' is the third-tsum test.")
+
+    # `--mode blob` on the same links and the same detections. Reported here
+    # rather than in a note, because the 86.6% it was landed on was measured
+    # against one snapshot of detection: anything that moves detection moves
+    # this, and the point of the row is that it is re-runnable.
+    ok = kind = missed = 0
+    edges_blob = edges_touch = 0
+    t0 = time.perf_counter()
+    for tsums, radius, labels, links in boards:
+        adj = blob_adjacency(labels, tsums, radius)
+        edges_blob += sum(len(a) for a in adj) // 2
+        edges_touch += sum(len(a) for a in adjacency(tsums, radius, link=1e6,
+                                                     link_px=105)) // 2
+        for i, j in links:
+            if tsums[i].kind != tsums[j].kind:
+                kind += 1
+            elif j in adj[i]:
+                ok += 1
+            else:
+                missed += 1
+    ms = (time.perf_counter() - t0) * 1000
+    print(f"\n  --mode blob, same links and detections: {100 * ok / total:.1f}% accepted "
+          f"({kind} wrong kind, {missed} not connected)")
+    print(f"  graph size: {edges_blob} edges against {edges_touch} for touch at "
+          f"--link-px 105; {ms / max(1, len(boards)):.0f}ms per board")
+    print("  Acceptance is positive-only -- the labels hold no 'these two are NOT")
+    print("  linkable' pairs -- so read it beside the edge count, which is the")
+    print("  control: a rule that accepts more by inventing edges shows up there.")
 
 
 def _dataset(args) -> int:
@@ -3949,6 +4190,7 @@ def _live(args) -> int:
         t = time.perf_counter()
         tsums, radius, palette = detect(crop, k=args.k, radius=radius, palette=palette,
                                         scale=args.scale, include_dark=args.include_dark,
+                                        bowl_reject=args.bowl_reject,
                                         debug_dir=args.debug_dir)
         det_ms.append((time.perf_counter() - t) * 1000)
 
@@ -3956,10 +4198,13 @@ def _live(args) -> int:
         base = None
         if args.use_base:
             base, _ = read_base_kind(frame, palette, spec=args.base, debug_dir=args.debug_dir)
+        cluster_map = (_quantise(crop, args.k, palette)[0]
+                       if args.mode == "blob" and palette is not None else None)
         chains = find_chains(tsums, radius, args.link, block=args.block,
-                         link_px=args.link_px, base_kind=base, base_only=args.base_only,
-                                 mode=args.mode, max_chain=args.max_chain,
-                                 first_leg_px=getattr(args, "first_leg_px", 0.0))
+                             link_px=args.link_px, base_kind=base, base_only=args.base_only,
+                             mode=args.mode, max_chain=args.max_chain,
+                             first_leg_px=getattr(args, "first_leg_px", 0.0),
+                             labels=cluster_map)
         path_ms.append((time.perf_counter() - t) * 1000)
 
         overlay = frame.copy()
@@ -4002,7 +4247,11 @@ def add_play_args(play, *, merge_default: bool):
                            "the highlight has not rendered and the board is "
                            "still moving, so the reading is noise -- replayed "
                            "over 5,729 collected drags it dropped a mean 3 of 4 "
-                           "members on 43% of them. See docs/DATASET-FINDINGS.md")
+                           "members on 43%% of them. See docs/DATASET-FINDINGS.md")
+    # The doubled percent above is deliberate: argparse %-formats every help
+    # string, so a lone "%" followed by a space and a letter is read as a
+    # conversion and raises TypeError the moment anyone asks for --help.
+    # `tests/test_optional_rules.py` walks every subparser to keep that fixed.
     play.add_argument("--dataset", default="",
                       help="collect training samples for detection into this "
                            "directory; empty (the default) collects nothing. "
@@ -4066,9 +4315,10 @@ def add_play_args(play, *, merge_default: bool):
                            "drag to start at its tighter end already brings the "
                            "opening hop to ~64px, and capping below that only "
                            "shortens chains")
-    play.add_argument("--mode", choices=["touch", "reach"], default="touch", help='"touch" (default): only tsums within --link-px of each other, with nothing blocking the line between them, count as linked. "reach": any two same-kind tsums link regardless of distance, which is closer to how the game is actually played -- distance stops mattering and --link-px/--link/--block are ignored')
+    play.add_argument("--mode", choices=["touch", "reach", "blob"], default="touch", help='"touch" (default): only tsums within --link-px of each other, with nothing blocking the line between them, count as linked. "reach": any two same-kind tsums link regardless of distance, which is closer to how the game is actually played -- distance stops mattering and --link-px/--link/--block are ignored. "blob": like "touch" but reads contact off the colour mask instead of inferring it from distance -- accepts more real links, ~45x slower, --link-px/--link/--block are ignored')
     play.add_argument("--block", type=float, default=0.75,
                       help="a tsum within this many radii of the line blocks the link")
+    play.add_argument("--bowl-reject", type=float, default=0.0, help="drop detections whose face colour sits closer than this (Lab) to the board's own colour -- a detection that landed on the bowl instead of on a tsum carries the bowl's colour. 0 = off (the default). Over the ten labelled boards: off f1 0.762, 40 -> 0.785, 60 -> 0.791, 80 -> 0.766, so 40-60 is a plateau. It buys precision with recall, and only a played round prices that trade")
     play.add_argument("--scale", type=float, default=1.0)
     play.add_argument("--no-dark", dest="include_dark", action="store_false")
     play.add_argument("--no-base", dest="use_base", action="store_false")
@@ -4173,8 +4423,9 @@ def main() -> int:
     a.add_argument("--link", type=float, default=1.35, help="link distance in tsum diameters (--mode touch only)")
     a.add_argument("--link-px", type=float, default=100.0, help="link distance in PIXELS (stable across frames; from labelled links: p90=95). Set 0 to fall back to --link diameters")
     a.add_argument("--max-chain", type=int, default=8, help="cap chain length; picks the tightest cluster of N rather than truncating a board-wide path. 0 = no cap")
-    a.add_argument("--mode", choices=["touch", "reach"], default="touch", help='"touch" (default): only tsums within --link-px of each other, with nothing blocking the line between them, count as linked. "reach": any two same-kind tsums link regardless of distance, which is closer to how the game is actually played -- distance stops mattering and --link-px/--link/--block are ignored')
+    a.add_argument("--mode", choices=["touch", "reach", "blob"], default="touch", help='"touch" (default): only tsums within --link-px of each other, with nothing blocking the line between them, count as linked. "reach": any two same-kind tsums link regardless of distance, which is closer to how the game is actually played -- distance stops mattering and --link-px/--link/--block are ignored. "blob": like "touch" but reads contact off the colour mask instead of inferring it from distance -- accepts more real links, ~45x slower, --link-px/--link/--block are ignored')
     a.add_argument("--block", type=float, default=0.75, help="occlusion radius for blocking a link")
+    a.add_argument("--bowl-reject", type=float, default=0.0, help="drop detections whose face colour sits closer than this (Lab) to the board's own colour -- a detection that landed on the bowl instead of on a tsum carries the bowl's colour. 0 = off (the default). Over the ten labelled boards: off f1 0.762, 40 -> 0.785, 60 -> 0.791, 80 -> 0.766, so 40-60 is a plateau. It buys precision with recall, and only a played round prices that trade")
     a.add_argument("--scale", type=float, default=1.0, help="run detection on a downscaled copy (0.5 = ~4x faster)")
     a.add_argument("--no-dark", dest="include_dark", action="store_false",
                    help="skip black-faced tsums (Mickey) instead of detecting them")
@@ -4315,6 +4566,9 @@ def main() -> int:
     ev.add_argument("--scale", type=float, default=1.0)
     ev.add_argument("--no-dark", dest="include_dark", action="store_false")
     ev.add_argument("--merge", action="store_true")
+    ev.add_argument("--bowl-reject", type=float, default=0.0,
+                    help="reject detections this close (Lab) to the board colour; "
+                         "0 = off. Sweepable, e.g. --sweep bowl_reject=0,40,60,80")
     ev.add_argument("--tol", type=float, default=0.6,
                     help="a detection counts as the same tsum within this many radii "
                          "of a ground-truth point")
@@ -4369,8 +4623,9 @@ def main() -> int:
     live.add_argument("--link", type=float, default=1.35)
     live.add_argument("--link-px", type=float, default=100.0, help="link distance in PIXELS (stable across frames; from labelled links: p90=95). Set 0 to fall back to --link diameters")
     live.add_argument("--max-chain", type=int, default=8, help="cap chain length; picks the tightest cluster of N rather than truncating a board-wide path. 0 = no cap")
-    live.add_argument("--mode", choices=["touch", "reach"], default="touch", help='"touch" (default): only tsums within --link-px of each other, with nothing blocking the line between them, count as linked. "reach": any two same-kind tsums link regardless of distance, which is closer to how the game is actually played -- distance stops mattering and --link-px/--link/--block are ignored')
+    live.add_argument("--mode", choices=["touch", "reach", "blob"], default="touch", help='"touch" (default): only tsums within --link-px of each other, with nothing blocking the line between them, count as linked. "reach": any two same-kind tsums link regardless of distance, which is closer to how the game is actually played -- distance stops mattering and --link-px/--link/--block are ignored. "blob": like "touch" but reads contact off the colour mask instead of inferring it from distance -- accepts more real links, ~45x slower, --link-px/--link/--block are ignored')
     live.add_argument("--block", type=float, default=0.75)
+    live.add_argument("--bowl-reject", type=float, default=0.0, help="drop detections whose face colour sits closer than this (Lab) to the board's own colour -- a detection that landed on the bowl instead of on a tsum carries the bowl's colour. 0 = off (the default). Over the ten labelled boards: off f1 0.762, 40 -> 0.785, 60 -> 0.791, 80 -> 0.766, so 40-60 is a plateau. It buys precision with recall, and only a played round prices that trade")
     live.add_argument("--scale", type=float, default=1.0)
     live.add_argument("--no-dark", dest="include_dark", action="store_false")
     live.add_argument("--base")
@@ -4439,7 +4694,7 @@ def main() -> int:
     t0 = time.perf_counter()
     tsums, radius, centres = detect(crop, k=args.k, radius=args.radius, scale=args.scale,
                                     include_dark=args.include_dark, merge=args.merge,
-                                    debug_dir=args.debug_dir)
+                                    bowl_reject=args.bowl_reject, debug_dir=args.debug_dir)
     t_detect = time.perf_counter() - t0
 
     # Read the skill icon off the FULL frame, not the board crop -- the button
@@ -4449,10 +4704,12 @@ def main() -> int:
         base, base_dist = read_base_kind(img, centres, spec=args.base, debug_dir=args.debug_dir)
 
     t0 = time.perf_counter()
+    cluster_map = _quantise(crop, args.k, centres)[0] if args.mode == "blob" else None
     chains = find_chains(tsums, radius, args.link, block=args.block,
                          link_px=args.link_px, base_kind=base, base_only=args.base_only,
-                                 mode=args.mode, max_chain=args.max_chain,
-                                 first_leg_px=getattr(args, "first_leg_px", 0.0))
+                         mode=args.mode, max_chain=args.max_chain,
+                         first_leg_px=getattr(args, "first_leg_px", 0.0),
+                         labels=cluster_map)
     t_path = time.perf_counter() - t0
 
     overlay = draw(crop, tsums, chains, radius)

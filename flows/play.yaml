@@ -87,6 +87,61 @@ steps:
         # being in the way. 1.25 stopped those crossings.
         block: 1.25
 
+        # ------------------------------------------------------------------
+        # TWO OPT-IN RULES. TO GO BACK TO NORMAL, DELETE THE TWO LINES AT THE
+        # BOTTOM OF THIS BLOCK (`bowl_reject:` and `mode:`). Nothing else has
+        # to change and nothing has to be rebuilt -- the code defaults are
+        # still the old behaviour, so removing the lines is the whole revert.
+        #
+        # They are independent, so turn them off ONE AT A TIME if a round goes
+        # badly: they change different halves of the pipeline and switching
+        # both back at once tells you nothing about which one was at fault.
+        #
+        # `bowl_reject` -- THROW AWAY DETECTIONS THAT LANDED ON THE BOWL.
+        # About a third of what detection reports is not a tsum at all but a
+        # patch of the water between them, and a chain member that is water is
+        # a stop the cursor walks to and the game does not clear. A detection
+        # sitting on the bowl carries the bowl's colour, so this drops anything
+        # whose face colour is closer than N (in Lab) to the board's own.
+        # Scored over the ten labelled boards:
+        #     off  precision 0.675  recall 0.874  f1 0.762
+        #     40   precision 0.734  recall 0.844  f1 0.785
+        #     60   precision 0.773  recall 0.810  f1 0.791   <- this setting
+        #     80   precision 0.813  recall 0.724  f1 0.766
+        #   raise it -> fewer phantoms, but real tsums start going with them,
+        #               and a tsum thrown away here splits a run of six into
+        #               a three and a two.
+        #   lower it -> back towards keeping everything. 0 is off.
+        # 40-60 is a plateau rather than a tuned edge. WHAT TO WATCH LIVE:
+        # `stalled` in the play log should fall. If chains get shorter without
+        # stalls falling, this is costing more than it saves -- drop to 40, or
+        # remove the line.
+        bowl_reject: 40
+
+        # `mode: blob` -- DECIDE LINKS BY THE PICTURE, NOT BY DISTANCE.
+        # The default rule ("touch") calls two tsums linked when their centres
+        # are within `link_px` and nothing sits on the line between them. That
+        # is an approximation of the real question, which is whether there is
+        # a continuous run of that character joining them; sprites are not
+        # circles, so two tsums can overlap at the ears with a gap between
+        # their centres, and a third tsum lying between two others makes a real
+        # gap look like contact. `blob` tests the mask directly instead.
+        # Replayed through the 97 links marked by hand, on identical
+        # detections (re-runnable: `tsum score --dir scratchpad`):
+        #     touch, link_px 105    76.3% of those links accepted, 246 edges
+        #     touch, any distance   84.5% -- the ceiling for the distance rule
+        #     blob                  86.6% accepted, 291 edges
+        # So it accepts more of the links a human drew while inventing fewer
+        # of its own, which is the pair of numbers that matters -- acceptance
+        # on its own always improves for a rule that links more freely.
+        # `link_px`, `link` and `block` above are IGNORED in this mode.
+        # THE COST IS SPEED: ~60ms a frame against ~1.3ms, which roughly
+        # doubles the time between reading the board and starting the drag.
+        # WHAT TO WATCH LIVE: the `think` figure in the play log, and whether
+        # the board has moved on by the time the drag lands. If chains are
+        # good but drags miss a settling board, this is the line to remove.
+        #mode: blob
+
   - find_click:
       template: cancel_button
       timeout: 6.5

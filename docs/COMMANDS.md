@@ -143,6 +143,22 @@ Saving writes every detection present at review time into the label file, which
 is what lets `eval` re-run detection with *different* parameters and still know
 which of the new detections were approved.
 
+### The two opt-in rules, and how to switch them off
+
+`flows/play.yaml` turns on two rules that are off in the code's own defaults.
+Each is one line under `options:`, and **deleting the line is the whole
+revert** — no rebuild, nothing else to change:
+
+| line | half of the pipeline | what it does | costs |
+|---|---|---|---|
+| `bowl_reject: 60` | detection | drops detections whose colour says they landed on the bowl, not on a tsum (precision 0.675 → 0.769) | recall 0.874 → 0.814 |
+| `mode: blob` | adjacency | decides links by whether the two tsums' colour blobs join, not by centre distance (76.3% → 86.6% of hand-drawn links accepted) | ~60ms a frame against ~1.3ms |
+
+They are independent and change different halves, so **turn them off one at a
+time**: switching both back at once says nothing about which one was at fault.
+`docs/TODO-bowl-reject.md` and `docs/TODO-blob-adjacency.md` carry the full
+measurements and what each one still has to prove in a live round.
+
 ### What each reader tells you
 
 `score` reads the gaps between tsums you chained in `path` mode and reports
