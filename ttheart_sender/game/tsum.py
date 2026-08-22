@@ -2155,6 +2155,34 @@ def _open_dataset(opts, say):
     return writer
 
 
+def _load_palette(path: str, say) -> Optional[np.ndarray]:
+    """Learned colour centres for this round, or None to fit per frame.
+
+    Loud on every outcome. A palette is opt-in, so a round that silently ran
+    without the one it was told to use would look exactly like a round where
+    the palette did not help -- and that is the reading that would get a
+    working palette thrown away.
+
+    A missing or malformed file stops the round rather than falling back:
+    asking for a palette and getting the old behaviour is not a degraded
+    result, it is a different experiment, and it must not be mistaken for the
+    one that was asked for.
+    """
+    if not path:
+        return None
+    from .learn import Palette
+
+    p = Palette.load(Path(path))
+    m = p.metrics or {}
+    note = ""
+    if m.get("agreement") is not None and m.get("baseline") is not None:
+        note = (f", scored {100 * m['agreement']:.0f}% vs {100 * m['baseline']:.0f}% "
+                f"per-frame on {'held-out' if m.get('held_out') else 'its own'} samples")
+    say(f"    palette: k={p.k} learned from {p.meta.get('samples', '?')} sample(s) "
+        f"in {p.meta.get('sessions', '?')} session(s){note}")
+    return p.centres
+
+
 def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "PlayReport":
     """Grab the board, pick the best chain, drag it -- once, or on a loop.
 
@@ -2174,10 +2202,23 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
     deadline = time.perf_counter() + opts.duration if opts.duration > 0 else None
     report = PlayReport()
 
+    # A palette learned offline from collected samples, or None for the
+    # per-frame fit this has always done. Loaded once, here, so a bad path
+    # fails before a round starts rather than in the middle of one.
+    #
+    # What it changes: every `palette = None` below means "throw the colours
+    # away and re-derive them from whatever this one frame shows", and with a
+    # learned palette there is nothing to re-derive -- the colours came from
+    # thousands of frames across many rounds and do not belong to any one of
+    # them. So the resets restore the learned centres instead of clearing
+    # them, and a cluster id keeps meaning the same character for the whole
+    # round. See :mod:`ttheart_sender.game.learn`.
+    learned = _load_palette(getattr(opts, "palette", ""), say)
+
     # Fitting the colour palette is the expensive half of detection, and the
     # tsums in play don't change mid-game, so it's fit once and reused. Same for
     # the radius and the base-tsum lookup.
-    palette, radius, base = None, opts.radius, None
+    palette, radius, base = learned, opts.radius, None
 
     # The pile does not change size during a round, so the radius is a physical
     # constant and re-measuring it every time the fit is thrown away is a
@@ -2278,7 +2319,15 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
                 # re-estimating on the dimmest, most animated frames of the
                 # round -- exactly where the estimator collapses -- and then
                 # living with that number for the whole ten seconds.
-                palette, base = None, None
+                #
+                # A learned palette is exempt from the first half of that: it
+                # was fitted over frames from both sides of the flip, so it
+                # already carries FEVER's neon as well as normal play's
+                # colours. Refitting it here would replace a corpus of
+                # thousands of frames with the single worst frame of the
+                # round. `base` still goes -- the skill icon is re-read
+                # against whatever centres are in force.
+                palette, base = learned, None
                 if locked is None:
                     radius = opts.radius
             bx, by, bw, bh = _board_rect(frame.shape, opts.board, fever=fever.active)
@@ -2324,7 +2373,19 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
             floor = (opts.fever_min_tsums
                      if fever.active and opts.fever_min_tsums else opts.min_tsums)
             plausible = floor <= len(tsums) <= opts.max_tsums
-            if not plausible and palette is not None:
+            if not plausible and palette is not None and learned is None:
+                # Skipped outright on a learned palette, rather than run and
+                # discarded. This branch exists because a per-frame fit goes
+                # stale when the board is repainted, and it repairs that by
+                # replacing the cached centres with fresh ones -- which on a
+                # learned palette would swap a corpus of thousands of frames
+                # for this one implausible frame, permanently, for the rest of
+                # the round. That is the single worst frame to learn colours
+                # from, and it is not a trade worth making: a learned palette
+                # cannot go stale, so an implausible count under one is a
+                # radius problem or a frame that is not a board, and both are
+                # already handled by the count gate below.
+                #
                 # A refit re-fits the COLOURS. It must not also re-roll the
                 # radius once that is locked, or the recovery path becomes the
                 # way a collapsed estimate gets in.
@@ -2422,7 +2483,7 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
                     _click_shuffle(drv, opts.shuffle, opts.shuffle_clicks,
                                   opts.shuffle_delay, opts.hold, opts.move_time)
                     _settle(drv, max_wait=max(opts.settle, 1.5))
-                    palette, base = None, None
+                    palette, base = learned, None
                     if locked is None:
                         radius = opts.radius
                     skip_kinds.clear()
@@ -2471,7 +2532,7 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
                     _click_shuffle(drv, opts.shuffle, opts.shuffle_clicks,
                                   opts.shuffle_delay, opts.hold, opts.move_time)
                     _settle(drv, max_wait=max(opts.settle, 1.5))
-                    palette, base = None, None
+                    palette, base = learned, None
                     if locked is None:
                         radius = opts.radius
                     skip_kinds.clear()
@@ -2503,7 +2564,7 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
                 _click_shuffle(drv, opts.shuffle, opts.shuffle_clicks,
                               opts.shuffle_delay, opts.hold, opts.move_time)
                 _settle(drv, max_wait=max(opts.settle, 1.5))
-                palette, radius, base = None, opts.radius, None
+                palette, radius, base = learned, opts.radius, None
                 skip_kinds.clear()
                 lengths.clear()
                 recent.clear()
@@ -2519,7 +2580,7 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
                 _click_shuffle(drv, opts.shuffle, opts.shuffle_clicks,
                               opts.shuffle_delay, opts.hold, opts.move_time)
                 _settle(drv, max_wait=max(opts.settle, 1.5))
-                palette, radius, base = None, opts.radius, None
+                palette, radius, base = learned, opts.radius, None
                 skip_kinds.clear()
                 recent.clear()
                 continue
@@ -2666,7 +2727,7 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
                         _click_shuffle(drv, opts.shuffle, opts.shuffle_clicks,
                                       opts.shuffle_delay, opts.hold, opts.move_time)
                         _settle(drv, max_wait=max(opts.settle, 1.5))
-                        palette, radius, base = None, opts.radius, None
+                        palette, radius, base = learned, opts.radius, None
                         per_step, stalls = opts.per_step, 0
                         skip_kinds.clear()
                     if deadline is None and stalls >= opts.max_stalls:
@@ -4442,6 +4503,120 @@ def _dataset(args) -> int:
     return 0
 
 
+def _learn(args) -> int:
+    """Fit a persistent palette from a collection, and say whether to use it.
+
+    This is the step that closes the loop. Everything before it writes: the
+    collector saves boards and the game's own answer, `dataset` says whether
+    those answers are real. Nothing read them back, so the only way experience
+    reached the bot was a person reading `docs/` and editing a constant.
+
+    What comes out is one file of colour centres. It is not a strategy and it
+    does not decide anything -- it replaces the per-frame k-means fit, so a
+    cluster id means the same character on every frame of every round instead
+    of being re-invented each time the fit is thrown away.
+
+    The verdict is a straight comparison on samples the fit never saw: how
+    often the game's own "these are the same character" survives the palette,
+    against how often it survived the per-frame clustering that actually ran
+    live on those same frames. Nothing is enabled here either way -- the file
+    is written, the numbers are printed, and turning it on is a line in
+    `play.yaml`.
+    """
+    from . import learn as learn_mod
+
+    root = Path(args.dir)
+    if not root.exists():
+        raise SystemExit(
+            f"{root.resolve()} does not exist.\n"
+            f"Nothing has collected into it yet. Set `dataset.enabled: true` in "
+            f"config.yaml\n(or tick Data collection in the tray), play a few "
+            f"rounds, then run this again.")
+
+    rows = [(f, r) for f, r in learn_mod.iter_rows(root) if learn_mod.usable(r)]
+    sessions = {f for f, _ in rows}
+    labelled = sum(1 for _, r in rows if r.get("marked"))
+    if not rows:
+        raise SystemExit(
+            f"no usable samples under {root.resolve()}.\n"
+            f"Either nothing has been collected, or every row was a screen with "
+            f"fewer than\n{learn_mod.MIN_TSUMS} detections -- which is a menu, "
+            f"not a board. Check with `tsum dataset` first.")
+
+    print(f"{len(rows)} usable sample(s) in {len(sessions)} session(s), "
+          f"{labelled} carrying marks")
+    if len(sessions) < 2:
+        # Said before the fit rather than after, because the fix is to play
+        # another round and the run is otherwise about to print a number that
+        # cannot mean what it looks like.
+        print("  NOTE: one session only, so there is nothing to hold out. The "
+              "score below is\n  measured on the frames it was fitted on and is "
+              "not evidence it generalises.")
+
+    t0 = time.perf_counter()
+    palette = learn_mod.build(root, k=args.k, holdout=args.holdout,
+                              px_per_frame=args.px_per_frame, seed=args.seed,
+                              limit=args.limit,
+                              progress=lambda n: print(f"  ...{n} frames read"))
+    took = time.perf_counter() - t0
+
+    m = palette.metrics
+    if not m.get("pairs"):
+        raise SystemExit(
+            "not one sample carried marks, so there is nothing to score the "
+            "palette against.\nThe palette itself is fine -- the label is what "
+            "is missing. Run `tsum dataset`:\nit reports why samples were "
+            "refused, and a collection with no marks is the fault\nit exists "
+            "to catch.")
+
+    palette.save(Path(args.out))
+    print(f"\nfitted k={palette.k} over {palette.meta['fit_samples']} frame(s) "
+          f"in {took:.1f}s -> {args.out}")
+
+    faces = palette.faces()
+    landed = ", ".join(f"#{i} x{palette.face_counts[i]}" for i in faces[:8])
+    print(f"  ids the game's marks landed on: {landed or 'none'}")
+    print(f"  {palette.k - len(faces)} of {palette.k} centres are board, "
+          f"outline or menu -- expected, and kept")
+
+    where = "held-out session(s)" if m["held_out"] else "the SAME frames it was fitted on"
+    print(f"\nsame-character agreement, scored on {where}")
+    print(f"  {m['pairs']} pair(s) the game confirmed, over {m['samples']} sample(s)")
+    print(f"  learned palette : {100 * m['agreement']:5.1f}%")
+    print(f"  per-frame k-means: {100 * m['baseline']:5.1f}%   <- what runs today")
+    if m.get("split") is not None:
+        print(f"  weak negatives kept apart: {100 * m['split']:.1f}% "
+              f"({m['negatives']} pair(s))")
+
+    lift = m["agreement"] - m["baseline"]
+    print()
+    if not m["held_out"]:
+        print(f"-> UNPROVEN. {lift * 100:+.1f} points, but measured on its own fit "
+              f"set.\n   Play rounds in another session and re-run: two sessions "
+              f"is the minimum\n   for this number to mean anything.")
+        return 0
+    if m.get("split") is not None and m["split"] < 0.5:
+        # Caught before the lift is read out, because a palette that has
+        # collapsed scores brilliantly on agreement and is worthless.
+        print(f"-> COLLAPSED. Only {100 * m['split']:.0f}% of weak negatives got a "
+              f"different id, so\n   this palette is calling most of the board one "
+              f"character. Agreement is high\n   for the wrong reason. Re-fit with "
+              f"a larger -k.")
+        return 1
+    if lift < 0.02:
+        print(f"-> NO BETTER ({lift * 100:+.1f} points). Per-frame clustering is "
+              f"already doing this\n   job as well on your boards. Do not enable "
+              f"it. More sessions, or a different\n   -k, are the two things worth "
+              f"trying.")
+        return 0
+    print(f"-> BETTER by {lift * 100:.1f} points on sessions it never saw.")
+    print(f"   To try it live, add one line under `options:` in flows/play.yaml:")
+    print(f"       palette: {args.out}")
+    print(f"   and delete that line to revert. Watch the per-kind counts in the "
+          f"play log:\n   they should stop reshuffling between rounds.")
+    return 0
+
+
 def _disk_means(diff: np.ndarray, tsums: Sequence[dict]) -> list[float]:
     """Mean change inside each tsum's disk -- the reading `marked_by_game` takes."""
     r = max(2, int(min(t["r"] for t in tsums) * 0.55))
@@ -4555,6 +4730,18 @@ def add_play_args(play, *, merge_default: bool):
     # string, so a lone "%" followed by a space and a letter is read as a
     # conversion and raises TypeError the moment anyone asks for --help.
     # `tests/test_optional_rules.py` walks every subparser to keep that fixed.
+    play.add_argument("--palette", default="",
+                      help="use colour centres learned offline by `tsum learn` "
+                           "instead of re-fitting k-means on every frame; empty "
+                           "(the default) is the per-frame fit. This is the "
+                           "other end of --dataset: a cluster id then means the "
+                           "same character on every frame of every round, "
+                           "rather than being re-invented whenever the fit is "
+                           "thrown away. Fit it and score it against the game's "
+                           "own labels first -- `tsum learn` refuses to "
+                           "recommend one that is no better. A file that will "
+                           "not load stops the round rather than quietly "
+                           "playing without it")
     play.add_argument("--dataset", default="",
                       help="collect training samples for detection into this "
                            "directory; empty (the default) collects nothing. "
@@ -4939,6 +5126,30 @@ def main() -> int:
                          "re-score a schema 2 collection at a different "
                          "threshold")
 
+    ln = sub.add_parser("learn", help="fit a persistent colour palette from a "
+                                      "collection, and score it against the labels")
+    ln.add_argument("--dir", default="dataset",
+                    help="the dataset directory holding the session folders")
+    ln.add_argument("-o", "--out", type=Path, default=Path("models/palette.json"),
+                    help="where to write the fitted palette")
+    ln.add_argument("-k", type=int, default=12,
+                    help="colour clusters, same meaning as `play -k`. It must "
+                         "match what play runs with, because the palette IS "
+                         "play's k-means result")
+    ln.add_argument("--holdout", type=float, default=0.25,
+                    help="share of SESSIONS (not samples) kept back to score "
+                         "on. Samples inside one session are near-duplicates, "
+                         "so a per-sample split would score the fit against "
+                         "frames it effectively saw. 0 = score on everything, "
+                         "which measures nothing")
+    ln.add_argument("--px-per-frame", type=int, default=4000,
+                    help="pixels sampled from each frame. The fit needs the "
+                         "colour distribution, not every pixel; raising this "
+                         "costs memory over a big corpus and changes little")
+    ln.add_argument("--limit", type=int, default=0,
+                    help="stop after this many samples. 0 = all of them")
+    ln.add_argument("--seed", type=int, default=0)
+
     live = sub.add_parser("live", help="grab the emulator N times and report real throughput")
     live.add_argument("-n", "--frames", type=int, default=20)
     live.add_argument("-o", "--out", type=Path, default=Path("live_out.png"))
@@ -4997,6 +5208,9 @@ def main() -> int:
 
     if args.cmd == "dataset":
         return _dataset(args)
+
+    if args.cmd == "learn":
+        return _learn(args)
 
     if args.cmd in ("play", "play2"):
         return _play(args)

@@ -1,0 +1,20 @@
+{
+  "mode": "launch",
+  "always_on_top": true,
+  "auto_play": true,
+  "return_heart": true,
+  "return_heart_minutes": [
+    15,
+    50
+  ],
+  "claim_pattern": "single",
+  "restart_when_stuck": true,
+  "auto_update": true,
+  "collect_data": true,
+  "purchase": {
+    "premium_box_plus": false,
+    "premium_box": true,
+    "pick_up_capsule": true,
+    "happiness_box": true
+  }
+}

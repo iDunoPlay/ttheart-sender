@@ -94,6 +94,7 @@ when detection misbehaves.
 ### Other subcommands
 
 ```powershell
+python -m ttheart_sender.game.tsum learn          # fit a palette from collected samples
 python -m ttheart_sender.game.tsum live -n 20      # time capture+detect+path per frame
 python -m ttheart_sender.game.tsum skillcheck      # watch the skill button's gold reading
 ```
@@ -810,6 +811,84 @@ resume. Drop `per_round` or `quality` to slow the fill rate instead.
 Zip a session folder. The crops are the board rect only — no account name, no
 score, no window chrome — and `samples.jsonl` carries the app version and a
 schema number so an old session stays readable after the format moves on.
+
+### Turning a collection into played rounds
+
+```powershell
+python -m ttheart_sender.game.tsum dataset   # are the labels real?
+python -m ttheart_sender.game.tsum learn     # fit a palette, and score it
+```
+
+Everything above this line writes. `learn` is the only thing that reads a
+collection back into the bot, and what it produces is one file of colour
+centres — `models/palette.json` by default.
+
+**What it fixes.** `Tsum.kind` is a k-means cluster id, and the code says what
+that is worth: *"stable within one frame only"*. The fit is re-derived from one
+crop and thrown away every time the board is repainted — entering FEVER,
+leaving it, a shuffle, a recalibration — so cluster #3 is one character on this
+frame and something else two frames later, and nothing can be remembered about
+#3 in between. `learn` fits one palette over every frame you have collected and
+hands it to `detect`, which has always accepted centres from an earlier frame.
+No detection code changes. The id simply stops moving.
+
+**What it does not fix.** Two characters sharing a dominant colour still merge —
+that is [the ceiling](#the-ceiling-colour-cannot-tell-characters-apart), and a
+stable palette does not add a signal colour never carried. The ~40% drag waste
+is unchanged. What goes away is the *drift*: an id that meant Piglet a moment
+ago and means Pooh now, and a palette re-fitted on the dimmest frame of the
+round.
+
+**The score.** Holding a tsum makes the game mark same-character *and*
+reachable, so `head` and everything in `marked` are one character on the game's
+own word. `learn` counts how often a palette keeps those together, against how
+often the per-frame `kind` recorded live on the identical frames did:
+
+```text
+same-character agreement, scored on held-out session(s)
+  75 pair(s) the game confirmed, over 25 sample(s)
+  learned palette : 100.0%
+  per-frame k-means:  26.7%   <- what runs today
+  weak negatives kept apart: 82.7% (75 pair(s))
+```
+
+The baseline is read off the rows rather than recomputed, so the two numbers
+are the same question on the same frames. It is the figure `dataset` already
+reports as k-means agreement (26–40% on the collections so far).
+
+Three things it refuses to do:
+
+* **Score on frames it was fitted on.** The holdout is by *session*, not by
+  sample — samples inside one session are the same board minutes apart under
+  the same equipped tsum, so a per-sample split would score the fit against
+  frames it effectively saw. One session means no holdout, and the verdict is
+  `UNPROVEN` rather than a number.
+* **Recommend a palette that collapsed.** Merging every character into one id
+  scores 100% on agreement and is worthless. `split` — the share of unmarked
+  tsums given a *different* id — catches it, and a palette below 50% there is
+  rejected however well it agreed. Note `split` is not accuracy and must not be
+  maximised: a same-character tsum out of reach is unmarked, so a correct
+  palette scores well under 100% on it.
+* **Recommend on no lift.** Under two points better than per-frame clustering
+  prints `NO BETTER` and no path.
+
+Only on `BETTER` does it print the line to add, and that line is the whole
+switch — one entry under `options:` in `flows/play.yaml`, deleted to revert:
+
+```yaml
+palette: models/palette.json
+```
+
+Watch the `per kind` counts in the play log. Today they reshuffle each time the
+palette is refit; with this on they should hold steady across FEVER and across
+rounds. A file that will not load stops the round rather than quietly falling
+back — a round that silently ran without the palette it was told to use looks
+exactly like a round where the palette did not help, and that is the reading
+that would get a working one thrown away.
+
+`-k` must match what `play` runs with, because the palette *is* play's k-means
+result. The file is small and worth committing; it is not baked into the `.exe`
+by `build.py`, so it lives beside it like `flows/` and `templates/`.
 
 ---
 

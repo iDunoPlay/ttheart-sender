@@ -98,7 +98,7 @@ update:
 # The first one ran all night and produced nothing usable, because the marks
 # were photographed before the game had drawn them. See docs/DATASET-FINDINGS.md.
 dataset:
-  enabled: false
+  enabled: true
   dir: dataset
   per_round: 20            # cap per round -- boards within one round are alike
   every: 4                 # sample every Nth drag rather than the first N

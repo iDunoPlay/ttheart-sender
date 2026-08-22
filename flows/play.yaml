@@ -200,6 +200,43 @@ steps:
         # and NORMAL lines in the log, instead of a run of `skip` lines.
         fever_min_tsums: 12
 
+        # `palette` -- READ THE BOARD THROUGH COLOURS LEARNED FROM PAST ROUNDS.
+        # This is the one line that turns collected data into played rounds,
+        # and like the four above it is off until you add it.
+        #
+        # Normally the colours are re-derived by k-means on every frame, so a
+        # cluster id means nothing outside the frame it was fitted on -- the
+        # code says as much: "colour-cluster id; stable within one frame only".
+        # Every time the fit is thrown away (FEVER starting, FEVER ending, a
+        # shuffle, a recalibration) the board is re-read through whatever that
+        # one frame happened to show, which on the FEVER transition is the
+        # dimmest and most animated frame of the round.
+        #
+        # `tsum learn` fits ONE palette over every frame you have collected and
+        # scores it against the game's own marks. Point this at the file it
+        # writes and an id means the same character on every frame of every
+        # round instead.
+        #
+        # THE ORDER IS FIXED, and each step refuses to skip ahead:
+        #   1. dataset.enabled: true in config.yaml (or tick it in the tray)
+        #   2. play some rounds -- more than one SESSION, or there is nothing
+        #      to hold out and nothing can be proved
+        #   3. python -m ttheart_sender.game.tsum dataset   -- are the labels real?
+        #   4. python -m ttheart_sender.game.tsum learn     -- fit, and score against them
+        #   5. only if step 4 says BETTER, add the line below
+        # `learn` prints NO BETTER or COLLAPSED instead of a path when the
+        # palette is not worth having, and there is no reason to overrule it:
+        # unlike the settings above there is no live/offline disagreement to
+        # arbitrate, because the score is measured on whole rounds the fit
+        # never saw.
+        #
+        # WHAT TO WATCH LIVE: the `per kind` counts in the play log. Today they
+        # reshuffle every time the palette is refit; with this on they should
+        # hold steady across FEVER and across rounds. If the count collapses
+        # instead, remove the line -- that is the whole revert -- and re-fit
+        # with a different -k.
+        #palette: models/palette.json
+
   - find_click:
       template: cancel_button
       timeout: 6.5
