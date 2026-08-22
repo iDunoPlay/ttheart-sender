@@ -1,0 +1,65 @@
+name: launch_tsum
+description: One attempt at getting from LDPlayer's home screen to the game's main screen
+
+# Split out of launch.yaml so its retry loop can run this again after a restart
+# without the sequence being written twice. One pass, no recovery: it either
+# ends with play_button on screen or it doesn't, and the caller decides what
+# that means.
+
+steps:
+  - find_click:
+      template: tsumtsum
+      timeout: 30
+      save_as: tsumtsum_pos
+
+  # The app shows a "Root Detection" dialog on some launches, not every time
+  # (only when LDPlayer looks rooted to it, which it usually does). Both steps
+  # are optional so a launch that skips the dialog doesn't count as a failure.
+  - wait_for:
+      template: permit_button
+      timeout: 30
+    optional: true
+
+  - find_click:
+      template: permit_button
+      timeout: 8
+    optional: true
+
+  - wait_for:
+      template: animation
+      timeout: 30
+
+  - click: [267, 567]
+
+  # Click tap to start
+  - find_click:
+      template: tap_to_start_button
+      timeout: 8
+
+  # LDPlayer drops an ad over whatever is on screen, and launching the game is
+  # one of the things that sets it off. Placed here, while the game is still on
+  # its loading screen, so the fallback click inside has nothing to hit on a
+  # pass where there was no ad.
+  - run_flow:
+      flow: dismiss_ldplayer_ad
+
+  # The checkpoint: play_button is the only proof the main screen really
+  # loaded. Optional because a miss is what the caller's retry loop exists for,
+  # and it must not abort this flow before the second ad click below.
+  - wait_for:
+      template: play_button
+      timeout: 30
+    optional: true
+
+  # The ad also turns up *after* the game has loaded, which the pass above is
+  # too early to catch. One more go and ten seconds is far cheaper than the
+  # emulator restart the caller reaches for next.
+  - if_found:
+      template: play_button
+      else:
+        - run_flow:
+            flow: dismiss_ldplayer_ad
+        - wait_for:
+            template: play_button
+            timeout: 10
+          optional: true

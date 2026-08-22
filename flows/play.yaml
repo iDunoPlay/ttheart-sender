@@ -10,6 +10,14 @@ description: Start a round from the main screen, play the board, clear the resul
 vars:
   level_cap_found: false
 
+  # Stuck/crash watchdog. Off, per the house rule for new detection rules --
+  # flip this one line to true to arm it, and back to false to revert. When on,
+  # a screen that shows none of the landmarks below *and* has not changed for
+  # thirty seconds is treated as a wedged game and gets the emulator
+  # restarted.
+  # Stillness alone is never enough: a healthy menu measures pixel-identical.
+  stuck_check: false
+
 steps:
   # Clear anything left over from a previous round (the score tally, the High
   # Score popup, a login bonus) before looking for Play. Without this the flow
@@ -240,3 +248,24 @@ steps:
   - wait_for:
       template: play_button
       timeout: 30
+    optional: true
+
+  # The round is over but the main screen never came back. Either the results
+  # are still tapping through -- in which case a landmark is on screen and this
+  # costs milliseconds -- or the game has hung, and nothing further in this
+  # flow or the caller's loop will work until the emulator is restarted.
+  - if:
+      value: "${stuck_check}"
+      then:
+        - screen_stuck:
+            seconds: 30
+            alive: [play_button, scoreboard, gameplay_footer, announcement_close_button]
+            save_as: game_frozen
+        - if:
+            value: "${game_frozen}"
+            then:
+              - run_flow:
+                  flow: restart
+              - run_flow:
+                  flow: launch_tsum
+                optional: true

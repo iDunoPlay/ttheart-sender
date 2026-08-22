@@ -19,45 +19,54 @@ vars:
   # a time, true = one pass through the game's own Claim All dialog.
   claim_all: false
 
+  # Forwarded to resume.yaml like the four above. Off by default; see the
+  # note beside the same switch in resume.yaml for what arming it does.
+  stuck_check: false
+
 steps:
   # `python main.py run` already detects + parks LDPlayer before this flow
   # starts. This step is here too so the flow still works standalone if it's
   # ever called from another flow via run_flow.
   - prepare_window
 
-  - find_click:
-      template: tsumtsum
-      timeout: 30
-      save_as: tsumtsum_pos
-
-  # The app shows a "Root Detection" dialog on some launches, not every time
-  # (only when LDPlayer looks rooted to it, which it usually does). Optional
-  # so a launch that skips the dialog doesn't fail the flow.
-  - wait_for:
-      template: permit_button
-      timeout: 30
-
-  - find_click:
-      template: permit_button
-      timeout: 8
+  # The normal path: one straight run at the game. Optional because a miss here
+  # is not the answer yet -- the loop below is -- and a required step that
+  # failed would mark the whole run failed even after the retry recovered it.
+  - run_flow:
+      flow: launch_tsum
     optional: true
 
-  - wait_for:
-      template: animation
-      timeout: 30
-    
-  - click: [267, 567]
+  # play_button on the main screen is the only proof the game actually came up.
+  # Everything that can stop it -- an LDPlayer ad over the icon, a boot that
+  # hangs on the splash, a game update part way through -- looks identical from
+  # out here and has the same answer: throw the emulator away and try again.
+  #
+  # `until_found` is checked *before* every pass, so a launch that already
+  # worked skips the loop entirely and a restart that worked exits at the top
+  # of the next pass, before spending another one. Three passes = three
+  # restarts.
+  - repeat:
+      until_found: play_button
+      max_iterations: 3
+      steps:
+        - run_flow:
+            flow: restart
+        - run_flow:
+            flow: launch_tsum
+          optional: true
 
-  # Click tap to start
-  - find_click:
-      template: tap_to_start_button
-      timeout: 8
-
-  # Block here until the main screen has actually loaded -- don't touch
-  # anything else until play_button is on screen.
-  - wait_for:
+  # The verdict, and it has to live out here: `until_found` is only tested at
+  # the *top* of a pass, so a game that came up on the third and last restart
+  # is never seen by the loop itself -- it just runs out of passes and reports
+  # nothing. This is the check that decides, and giving up here stops
+  # resume.yaml being let loose on a screen with no game on it.
+  - if_found:
       template: play_button
-      timeout: 30
+      timeout: 10
+      else:
+        - stop:
+            message: play_button never appeared after 3 restarts -- giving up
+            success: false
 
   # Close any announcement(s). No blind wait needed -- find_click's own
   # timeout already polls until the button appears, so each iteration gives
@@ -74,7 +83,7 @@ steps:
             template: announcement_close_button
             timeout: 3
     optional: true
-             
+
 
   # Resume flow. Every override is passed explicitly: run_flow applies the
   # called flow's own `vars:` on entry, so resume.yaml's defaults would
@@ -86,5 +95,4 @@ steps:
         return_heart_timed: "${return_heart_timed}"
         return_heart_minutes: "${return_heart_minutes}"
         claim_all: "${claim_all}"
-
-
+        stuck_check: "${stuck_check}"

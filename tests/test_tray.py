@@ -26,6 +26,7 @@ from ttheart_sender.tray.service import (
     PLAY_CHANCE_VAR,
     RETURN_HEART_MINUTES_VAR,
     RETURN_HEART_VAR,
+    STUCK_CHECK_VAR,
     AutomationService,
     RunState,
 )
@@ -42,13 +43,15 @@ from ttheart_sender.tray.settings import (
 DEFAULT_MARKS = list(RETURN_HEART_MINUTES_DEFAULT)
 
 
-def overrides(chance=PLAY_CHANCE_OFF, timed=False, marks=None, claim_all=False):
+def overrides(chance=PLAY_CHANCE_OFF, timed=False, marks=None, claim_all=False,
+              stuck_check=False):
     """What a run started from the panel should be handed."""
     return {
         PLAY_CHANCE_VAR: chance,
         RETURN_HEART_VAR: timed,
         RETURN_HEART_MINUTES_VAR: DEFAULT_MARKS if marks is None else list(marks),
         CLAIM_ALL_VAR: claim_all,
+        STUCK_CHECK_VAR: stuck_check,
     }
 
 
@@ -190,6 +193,43 @@ def test_return_heart_is_off_by_default_so_every_cycle_sends():
     service.start()
     wait_for(lambda: service.state is RunState.IDLE)
     assert app.variables == [overrides(timed=False)]
+
+
+def test_restart_when_stucked_is_off_until_the_panel_ticks_it():
+    """The watchdog is opt-in: wrong, it costs a needless emulator restart."""
+    app = FakeApp()
+    changes = []
+    service = AutomationService(app, on_change=lambda: changes.append(1))
+
+    assert service.restart_when_stuck is False
+    service.start()
+    wait_for(lambda: service.state is RunState.IDLE)
+    assert app.variables == [overrides(stuck_check=False)]
+
+    # Counted from here: start() fires on_change on each state transition too,
+    # so only the delta across the setter says anything about the setter.
+    before = len(changes)
+    assert service.set_restart_when_stuck(True) is True
+    assert service.set_restart_when_stuck(True) is False, "re-ticking should be a no-op"
+    assert len(changes) - before == 1
+
+    service.start()
+    wait_for(lambda: service.state is RunState.IDLE)
+    assert app.variables[-1] == overrides(stuck_check=True)
+
+
+def test_a_live_run_keeps_the_watchdog_setting_it_started_with():
+    """Ticking mid-run must not arm a restart the run was not started with."""
+    app = FakeApp(block=True)
+    service = AutomationService(app, restart_when_stuck=False)
+
+    service.start()
+    app.entered.wait(5)
+    service.set_restart_when_stuck(True)
+    app.release.set()
+    wait_for(lambda: service.state is RunState.IDLE)
+
+    assert app.variables == [overrides(stuck_check=False)]
 
 
 def test_the_marks_reach_the_flow_and_are_clamped():

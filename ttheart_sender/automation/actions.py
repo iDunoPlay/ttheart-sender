@@ -25,8 +25,9 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 
-from ..exceptions import ActionError, FlowAborted
+from ..exceptions import ActionError, FlowAborted, WindowNotFoundError
 from ..geometry import Point
+from ..window.manager import WindowManager
 from .context import RunContext
 from .params import Params
 from .registry import ActionResult, action
@@ -461,6 +462,67 @@ def act_wait_until_gone(ctx: RunContext, params: Params) -> ActionResult:
     return ActionResult.ok()
 
 
+@action("screen_stuck", primary="seconds",
+        summary="Report whether the screen is frozen and shows nothing we recognise")
+def act_screen_stuck(ctx: RunContext, params: Params) -> ActionResult:
+    """Is the game wedged? Sets ``save_as`` true when it looks like it is.
+
+    Stillness on its own is not evidence of a crash. A healthy menu sits
+    perfectly still -- LDPlayer's own home screen measures pixel-identical over
+    ten seconds, mean difference 0.0000 -- so "unchanged" would condemn a
+    screen that is simply not animating. What separates the two is whether
+    anything we recognise is on it: a landmark template proves the game is
+    alive however still it is, and a screen with no landmark *and* no movement
+    is one nothing can be done with.
+
+    Never fails, whatever it finds -- the verdict is a variable for the flow to
+    branch on, not a step outcome, so a stuck screen doesn't also abort the
+    flow that is trying to recover it.
+    """
+    seconds = params.duration("seconds", 30.0)
+    # Zero, and deliberately so: this is the only tolerance whose error runs in
+    # the safe direction. Anything above it lets a *small* animation -- one
+    # bobbing tsum, a blinking cursor -- average away to nothing across the
+    # whole content area and read as frozen, and the cost of that mistake is
+    # restarting a healthy emulator. At zero, the faintest movement anywhere
+    # proves life, and only a picture that is pixel-for-pixel identical counts
+    # as stuck, which is what a real freeze actually looks like: the idle
+    # measurement that motivated this action came back at exactly 0.0000.
+    # Raise it only if capture noise ever produces a false "alive".
+    tolerance = params.number("tolerance", 0.0)
+    alive = params.string_list("alive", [])
+    poll_interval = params.number("poll_interval", 0.5)
+    save_as = params.optional_string("save_as", None)
+    search = _search_kwargs(params)
+    region = search["region"]
+
+    def verdict(stuck: bool, why: str) -> ActionResult:
+        if save_as:
+            ctx.set_var(save_as, stuck)
+        log.info("%sscreen_stuck -> %s (%s)", ctx.indent, stuck, why)
+        return ActionResult.ok(stuck)
+
+    # Landmarks first, and not only to be quick about it: this is the test that
+    # keeps a still-but-healthy screen out of the restart path. It also answers
+    # in milliseconds where the watch below costs `seconds`.
+    for template in alive:
+        if ctx.find(template, **search) is not None:
+            return verdict(False, f"{template} on screen")
+
+    # Nothing recognised, so now stillness means something. Return the moment
+    # the picture moves -- only a genuinely frozen screen pays the full wait.
+    baseline, _ = ctx.grab(region)
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        ctx.stop.check()
+        ctx.sleep(poll_interval)
+        frame, _ = ctx.grab(region)
+        if not _frames_match(frame, baseline, tolerance):
+            return verdict(False, "screen is still moving")
+
+    return verdict(True, f"nothing recognised and no change in {seconds:.0f}s")
+
+
 @action("screenshot", primary="path", summary="Save a screenshot")
 def act_screenshot(ctx: RunContext, params: Params) -> ActionResult:
     label = params.optional_string("path", None)
@@ -721,11 +783,56 @@ def act_run_flow(ctx: RunContext, params: Params) -> ActionResult:
     return ActionResult(success, flow.name)
 
 
+def _reattach_window(ctx: RunContext, timeout: float) -> bool:
+    """Point ``ctx.window`` at whatever now matches ``window.target``.
+
+    The handle is swapped *inside* the existing controller rather than by
+    handing back a new one: the Application keeps that same object for the
+    cursor stop zone, so replacing it would leave the guard reading a dead
+    handle and quietly never tripping again.
+    """
+    manager = WindowManager()
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        ctx.stop.check()
+        try:
+            found = manager.find_one(ctx.config.window)
+        except WindowNotFoundError:
+            found = None
+        if found is not None:
+            if found.hwnd != ctx.window.hwnd:
+                log.info(
+                    "%sprepare_window re-attached 0x%08X -> 0x%08X",
+                    ctx.indent,
+                    ctx.window.hwnd,
+                    found.hwnd,
+                )
+            ctx.window.hwnd = found.hwnd
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        ctx.sleep(ctx.config.runner.default_poll_interval)
+
+
 @action("prepare_window", summary="Re-detect, reposition and focus the emulator window")
 def act_prepare_window(ctx: RunContext, params: Params) -> ActionResult:
     focus = params.boolean("focus", True)
     if ctx.window is None:
         return ActionResult.fail("no window attached")
+
+    # Restarting the emulator hands it a brand new window handle, so the one
+    # attached at startup is dead by the time a restart flow gets back here.
+    # `redetect: true` waits for a window matching window.target to reappear;
+    # a handle that has *already* gone away is re-detected whether it was asked
+    # for or not, because failing on a window we know how to find again helps
+    # nobody.
+    if params.boolean("redetect", False) or not ctx.window.exists:
+        timeout = params.duration("timeout", 60.0)
+        if not _reattach_window(ctx, timeout):
+            return ActionResult.fail(
+                f"no window matching window.target appeared within {timeout:.0f}s"
+            )
+
     ctx.window.restore()
     if params.boolean("move", ctx.config.window.move_on_prepare):
         size = (ctx.config.window.size.width, ctx.config.window.size.height) if ctx.config.window.size else None

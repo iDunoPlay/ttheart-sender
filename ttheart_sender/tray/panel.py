@@ -47,6 +47,7 @@ ID_COLLECT_DATA = 2009
 ID_RETURN_HEART = 2010
 ID_AUTO_UPDATE = 2011
 ID_UPDATE = 2012
+ID_RESTART_STUCK = 2016
 #: A label rather than a control, but it is rewritten on every refresh, so it
 #: needs an id to be found again.
 ID_UPDATE_STATUS = 2013
@@ -330,6 +331,9 @@ class ControlPanel:
         y += ROW + GAP
 
         y = self._add_check(ID_AUTO_PLAY, "Auto Play", y)
+        # Sits with Auto Play rather than in its own section: both decide what
+        # a running cycle is allowed to do on its own.
+        y = self._add_check(ID_RESTART_STUCK, "Restart when stucked", y)
         y += SECTION_GAP
         y = self._add_line(y)
         y += SECTION_GAP
@@ -610,6 +614,7 @@ class ControlPanel:
 
         self._set_check(ID_ALWAYS_ON_TOP, state.get("always_on_top", True))
         self._set_check(ID_AUTO_PLAY, bool(state.get("auto_play", False)))
+        self._set_check(ID_RESTART_STUCK, bool(state.get("restart_when_stuck", False)))
 
         timed = bool(state.get("return_heart", False))
         self._set_check(ID_RETURN_HEART, timed)
@@ -773,6 +778,8 @@ class ControlPanel:
                 self._on_toggle("always_on_top", self._get_check(ident))
             elif ident == ID_AUTO_PLAY:
                 self._on_toggle("auto_play", self._get_check(ident))
+            elif ident == ID_RESTART_STUCK:
+                self._on_toggle("restart_when_stuck", self._get_check(ident))
             elif ident == ID_COLLECT_DATA:
                 self._on_toggle("collect_data", self._get_check(ident))
             elif ident == ID_RETURN_HEART:

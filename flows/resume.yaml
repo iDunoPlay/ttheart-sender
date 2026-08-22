@@ -26,6 +26,16 @@ vars:
   # patterns live.
   claim_all: false
 
+  # Stuck/crash watchdog. Off, per the house rule for new detection rules --
+  # flip this one line to true to arm it, and back to false to revert. When on,
+  # every cycle starts by asking whether the screen shows any landmark at all;
+  # one that shows none *and* has not changed for thirty seconds is a wedged
+  # game,
+  # and gets the emulator restarted. Stillness alone is never enough -- a
+  # healthy menu sitting idle measures pixel-identical over the same thirty
+  # seconds, so it would condemn a screen that is merely not animating.
+  stuck_check: false
+
 steps:
   
   # Everything below is the repeatable cycle: check mailbox, do the ranking /
@@ -34,6 +44,26 @@ steps:
   - repeat:
       forever: true
       steps:
+        # Before anything is tapped: is the game still alive? A cycle that
+        # blind-taps its way through a frozen screen achieves nothing and
+        # hides the problem until morning, which is the whole reason this
+        # runs here rather than somewhere further in.
+        - if:
+            value: "${stuck_check}"
+            then:
+              - screen_stuck:
+                  seconds: 30
+                  alive: [mailbox, mailbox_with_red, play_button, home_button, rankings_button]
+                  save_as: game_frozen
+              - if:
+                  value: "${game_frozen}"
+                  then:
+                    - run_flow:
+                        flow: restart
+                    - run_flow:
+                        flow: launch_tsum
+                      optional: true
+
         # Open the mailbox whichever state it is in. The badge changes the
         # icon enough that one template cannot cover both (plain mailbox.png
         # only scores ~0.80 against the badged icon, under the 0.85 threshold),
@@ -103,7 +133,11 @@ steps:
         - chance:
             percent: ${play_chance_percent}
             then:
-            - run_flow: {flow: play, isolate: false}
+            - run_flow:
+                flow: play
+                isolate: false
+                vars:
+                  stuck_check: "${stuck_check}"
             - if:
                 value: ${level_cap_found}
                 then:

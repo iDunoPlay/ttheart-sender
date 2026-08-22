@@ -365,6 +365,15 @@ Any step that searches accepts `template`, `timeout`, `poll_interval`,
 `confidence`, `scales`, and `region` (`[x, y, w, h]` relative to the content
 area, or `screen`).
 
+`screen_stuck` answers "has the game wedged?" into a variable for `if` to
+branch on. It checks its `alive:` templates first and reports the game healthy
+the moment it recognises one, because stillness on its own proves nothing -- an
+idle menu measures pixel-identical over ten seconds, the same as a crash. Only
+a screen showing no landmark *and* not moving counts as stuck. `tolerance`
+defaults to 0 so the faintest movement anywhere reads as life; raising it lets
+a small animation average away across the content area and be called frozen,
+which costs a needless restart.
+
 `repeat` also takes `stop_when_still: true`, which ends the loop as soon as an
 iteration leaves `region` unchanged. It is what a scrolling loop wants: a list
 clamped at its top or bottom returns the identical picture every pass, so
@@ -377,7 +386,7 @@ Actions: `find`, `find_click` (`tap`), `click_all`, `wait_for`,
 `wait`, `log`, `set`, `add` (`incr`), `screenshot`, `if` (`when`), `if_found`,
 `chance`, `time_gate`, `repeat`,
 `while_found`,
-`run_flow`, `prepare_window`, `stop`. Run `python main.py actions` for the
+`run_flow`, `prepare_window`, `screen_stuck`, `stop`. Run `python main.py actions` for the
 one-line summary of each, and read [flows/example.yaml](flows/example.yaml) for
 an annotated tour of all of them.
 

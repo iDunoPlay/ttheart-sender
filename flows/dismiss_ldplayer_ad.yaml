@@ -1,0 +1,23 @@
+name: dismiss_ldplayer_ad
+description: Close LDPlayer's ad popup -- by template when it matches, by measured position when it doesn't
+
+# LDPlayer drops an ad over whatever is on screen: once on boot, and again when
+# a game launches. ldplayer_ads_close.png is its X, but at 22x21 it is a small
+# and fairly generic glyph, so the measured position stays as a fallback for an
+# ad that renders at a size or theme the snip doesn't cover.
+#
+# Safe to run when there is no ad at all -- that is the common case. The
+# template misses, and [486, 403] is empty wallpaper on LDPlayer's home screen.
+# Call it while the game is still on its loading screen rather than once the
+# main screen is live, so a fallback click has nothing to hit.
+
+steps:
+  - if_found:
+      template: ldplayer_ads_close
+      timeout: 2
+      then:
+        - find_click:
+            template: ldplayer_ads_close
+            timeout: 2
+      else:
+        - click: [486, 403]

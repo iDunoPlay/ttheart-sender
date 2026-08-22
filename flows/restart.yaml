@@ -1,0 +1,51 @@
+name: restart
+description: Restart the LDPlayer instance and re-attach to its new window
+
+# Recovery flow: when the game is wedged and no template lookup will unstick
+# it, throw the whole emulator away and start again.
+#
+# It stops at LDPlayer's home screen and does *not* relaunch the game --
+# launch.yaml owns that, and calling it from here would leave the two flows
+# calling each other with nothing bounding the depth. Run standalone, this
+# leaves you with a freshly booted emulator sitting on its home screen.
+#
+# The one thing that makes this different from every other flow: LDPlayer's
+# restart destroys its window and builds a fresh one with a *new* handle. The
+# handle attached at startup is dead from the moment the menu item is clicked,
+# so every step between here and `prepare_window: {redetect: true}` is blind --
+# no template lookups, no window-relative clicks that matter.
+
+steps:
+  # Park the window first so the two menu clicks below land where they were
+  # measured. Coordinates are content-relative, and the content area only
+  # matches the measurements while LDPlayer sits at window.position.
+  - prepare_window
+
+  - click: [517, 19]                  # LDPlayer title-bar menu (top right)
+  - wait: {min: 0.4, max: 0.8}
+  - click: [216, 661]                 # "Restart" in that menu
+
+  # Give LDPlayer time to actually tear the old window down. Without this the
+  # re-detect below can find the *dying* window, park that, and then everything
+  # after it fails on a handle that disappears a second later.
+  - wait: 8
+
+  # Detect LDPlayer again from scratch: window.target in config.yaml matches it
+  # by class name / title, and window.position parks it back at (0, 0). This is
+  # the step that turns a new handle into a usable content rect -- from here on
+  # templates and window coordinates mean something again.
+  - prepare_window:
+      redetect: true
+      timeout: 180
+
+  # Android is still booting behind that window; this is the real "is it back"
+  # check, so give it room.
+  - wait_for: {template: ldplayer_homescreen, timeout: 180}
+
+  - wait: 5
+
+  # LDPlayer opens an ad on boot often enough to be part of the routine.
+  - run_flow:
+      flow: dismiss_ldplayer_ad
+
+  - wait: 3

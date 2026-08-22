@@ -50,6 +50,10 @@ RETURN_HEART_MINUTES_VAR = "return_heart_minutes"
 #: branches to take, so the name is boiled down to this flag on the way out.
 CLAIM_ALL_VAR = "claim_all"
 
+#: Flow variable behind the panel's "Restart when stucked" tick box. resume.yaml
+#: and play.yaml declare their own value; the tray always overrides it.
+STUCK_CHECK_VAR = "stuck_check"
+
 
 class RunState(Enum):
     IDLE = "idle"
@@ -69,6 +73,7 @@ class AutomationService:
         return_heart: bool = False,
         return_heart_minutes: Optional[Sequence[int]] = None,
         claim_pattern: str = CLAIM_PATTERN_DEFAULT,
+        restart_when_stuck: bool = False,
         on_change: Optional[Callable[[], None]] = None,
         on_notify: Optional[Callable[[str, str, bool], None]] = None,
     ) -> None:
@@ -80,6 +85,7 @@ class AutomationService:
             RETURN_HEART_MINUTES_DEFAULT if return_heart_minutes is None else return_heart_minutes
         )
         self._claim_pattern = normalize_claim_pattern(claim_pattern)
+        self._restart_when_stuck = bool(restart_when_stuck)
         self._state = RunState.IDLE
         #: What the live run is called -- the mode's label, or "Buy tsum" for
         #: a one-off job, so the panel can say what it is waiting on.
@@ -106,6 +112,12 @@ class AutomationService:
         """Whether hearts go out on the clock rather than every cycle."""
         with self._lock:
             return self._return_heart
+
+    @property
+    def restart_when_stuck(self) -> bool:
+        """Whether a run restarts the emulator when it decides it has wedged."""
+        with self._lock:
+            return self._restart_when_stuck
 
     @property
     def return_heart_minutes(self) -> List[int]:
@@ -182,6 +194,23 @@ class AutomationService:
     def toggle_play(self) -> bool:
         return self.set_play(not self.play)
 
+    def set_restart_when_stuck(self, enabled: bool) -> bool:
+        """Arm or disarm the stuck watchdog for the next Start.
+
+        Like every other switch here this only decides what the *next* run is
+        handed -- a live run keeps the variables it started with, so disarming
+        it cannot call off a restart already under way.
+        """
+        enabled = bool(enabled)
+        with self._lock:
+            if self._restart_when_stuck is enabled:
+                return False
+            self._restart_when_stuck = enabled
+        log.info("Restart when stucked %s (%s=%s)",
+                 "on" if enabled else "off", STUCK_CHECK_VAR, enabled)
+        self._on_change()
+        return True
+
     def set_return_heart(self, enabled: bool) -> bool:
         """Turn timed heart-sending on or off for the next Start."""
         enabled = bool(enabled)
@@ -244,6 +273,7 @@ class AutomationService:
             RETURN_HEART_VAR: self.return_heart,
             RETURN_HEART_MINUTES_VAR: self.return_heart_minutes,
             CLAIM_ALL_VAR: claim_all_flag(self.claim_pattern),
+            STUCK_CHECK_VAR: self.restart_when_stuck,
         }
 
     def start(self) -> bool:

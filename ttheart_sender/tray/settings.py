@@ -128,6 +128,11 @@ class PanelSettings:
     #: Which of :data:`CLAIM_PATTERNS` the mailbox pass uses. "single" by
     #: default, which is what the flow did before the radio existed.
     claim_pattern: str = CLAIM_PATTERN_DEFAULT
+    #: Restart the emulator when a run decides the game has wedged. Off by
+    #: default, like every other detection rule here: it can only ever cost a
+    #: needless restart when it is wrong, so it is opted into rather than out
+    #: of. Drives the `stuck_check` flow variable.
+    restart_when_stuck: bool = False
     #: Install a newer release by itself once one is found. The *check* runs
     #: either way -- this only decides whether the panel acts on the answer.
     #: On by default: a bot left running unattended is exactly the thing that
