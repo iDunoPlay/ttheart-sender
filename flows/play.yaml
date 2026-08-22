@@ -96,8 +96,10 @@ steps:
         block: 1.25
 
         # ------------------------------------------------------------------
-        # FOUR OPT-IN RULES: `bowl_reject`, `mode`, `radius_lock` and
-        # `fever_min_tsums`. TO GO BACK TO NORMAL, DELETE THE LINE. Nothing
+        # SIX OPT-IN RULES: `bowl_reject`, `mode`, `radius_lock`,
+        # `fever_min_tsums`, `palette` and `verify_reach` -- the last two are
+        # further down, after the four that came first.
+        # TO GO BACK TO NORMAL, DELETE THE LINE. Nothing
         # else has to change and nothing has to be rebuilt -- the code defaults
         # are still the old behaviour, so removing a line is the whole revert.
         #
@@ -224,6 +226,16 @@ steps:
         #   3. python -m ttheart_sender.game.tsum dataset   -- are the labels real?
         #   4. python -m ttheart_sender.game.tsum learn     -- fit, and score against them
         #   5. only if step 4 says BETTER, add the line below
+        #
+        # IT SAID NO THE FIRST TIME, on 303 samples over 21 sessions: no k from
+        # 6 to 96 beat the per-frame fit, best +0.1 points, which is noise. The
+        # reason is measured in docs/DATASET-FINDINGS.md and it is not a lack
+        # of data -- the same character's face colours spread 45.6 Lab WITHIN
+        # ONE FRAME, so there is no stable colour for a palette to learn. More
+        # rounds of the same collection will not change that answer. Left here
+        # because the check is worth re-running if detection or the capture
+        # geometry changes, and because it is the harness the next attempt gets
+        # measured in.
         # `learn` prints NO BETTER or COLLAPSED instead of a path when the
         # palette is not worth having, and there is no reason to overrule it:
         # unlike the settings above there is no live/offline disagreement to
@@ -236,6 +248,54 @@ steps:
         # instead, remove the line -- that is the whole revert -- and re-fit
         # with a different -k.
         #palette: models/palette.json
+
+        # `verify_reach` -- ASK THE GAME BEFORE THE DRAGS LIKELY TO BE WRONG.
+        # The most promising of the opt-in rules, and the only one so far
+        # measured against the game's own answers on real played drags rather
+        # than against hand labels.
+        #
+        # THE PROBLEM IT ATTACKS. Over 303 collected drags at the settings
+        # above, the game refused 27% of the chain members the bot proposed,
+        # and on 22% of drags what was left fell under min_chain -- the stroke
+        # runs, walks the board, and clears nothing. Neither `link_px` nor
+        # colour can predict which: leg length separates a good member from a
+        # rejected one by 0.06 standard deviations, i.e. not at all.
+        #
+        # WHAT DOES PREDICT IT is how far the chain reaches from the tsum being
+        # pressed. Share of drags where the game accepted EVERY member:
+        #     under 90px  100%        220-300px    33%
+        #      90-150px    81%        over 300px   11%
+        #     150-220px    65%
+        # `--verify-hold` buys the game's opinion on every drag, and that is
+        # why it loses: the check costs the same each time, the risk does not.
+        # This buys it only past a reach.
+        #
+        # WHAT IT SHOULD BE WORTH, replayed over those 303 drags with the
+        # game's recorded answers, counting a drag as clearing only if every
+        # member was accepted:
+        #     off (today)   688 tsums cleared, 10.6 per second of stroke
+        #     260px         819 cleared (+19%), 12.7/s (+20%), checking 18%
+        #                   of drags
+        #     every drag    906 cleared but 7.9/s (-26%) -- the check swamps
+        #                   the gain, which is `--verify-hold`
+        # 260 was best or near-best under both a one-frame and a three-frame
+        # reading cost, which is why it is the number suggested rather than
+        # the 220 that wins on one of them only.
+        #
+        # WHY IT IS STILL OFF. The replay assumes a drag clears nothing when
+        # any member is refused -- the behaviour the code notes elsewhere
+        # ("a 3-chain it only marks two of pops nothing at all"). If the game
+        # is instead lenient and clears the good members anyway, today already
+        # gets everything and this buys nothing. Offline cannot tell those two
+        # apart. A round can, which is the usual rule here.
+        #
+        # WHAT TO WATCH LIVE: the play log's end-of-round line now reports
+        # `checked N chain(s) before dragging (M% of drags)` next to the
+        # trimmed/rejected counts -- cost and benefit side by side. Expect M
+        # near 20%. If it is near zero the threshold is too high for your
+        # boards; if it is most of them, too low. `cleared` is the number that
+        # decides, and `--verify-clears` is what measures it.
+        verify_reach: 260
 
   - find_click:
       template: cancel_button

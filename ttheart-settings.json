@@ -1,5 +1,5 @@
 {
-  "mode": "launch",
+  "mode": "resume",
   "always_on_top": true,
   "auto_play": true,
   "return_heart": true,
@@ -10,7 +10,7 @@
   "claim_pattern": "single",
   "restart_when_stuck": true,
   "auto_update": true,
-  "collect_data": true,
+  "collect_data": false,
   "purchase": {
     "premium_box_plus": false,
     "premium_box": true,

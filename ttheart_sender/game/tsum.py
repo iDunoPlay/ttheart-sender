@@ -1424,6 +1424,11 @@ class PlayReport:
     #: --verify-hold only: presses released without dragging, because what the
     #: game marked was already below min_chain.
     abandoned: int = 0
+    #: Drags that paid for a check before moving. With `--verify-reach` this is
+    #: the price actually paid, and it is the number the setting is tuned on:
+    #: too high and the check is being bought on chains that did not need it,
+    #: zero and the threshold never triggered.
+    verified: int = 0
     #: Why the loop ended -- shown by the CLI and returned to the flow.
     reason: str = ""
     #: True when the stop key ended it rather than a normal exit condition.
@@ -1444,6 +1449,11 @@ class PlayReport:
         if self.trimmed or self.abandoned:
             out += (f"; the game trimmed {self.trimmed} member(s) and rejected "
                     f"{self.abandoned} chain(s) outright")
+        if self.verified:
+            # The cost side of --verify-reach, next to the trimmed/abandoned
+            # benefit above: the two together are the whole trade.
+            share = f" ({100 * self.verified / self.played:.0f}% of drags)" if self.played else ""
+            out += f"; checked {self.verified} chain(s) before dragging{share}"
         return out
 
 
@@ -2215,6 +2225,20 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
     # round. See :mod:`ttheart_sender.game.learn`.
     learned = _load_palette(getattr(opts, "palette", ""), say)
 
+    # Clamped rather than rejected, the way `DatasetWriter` clamps its own:
+    # a delay under the render floor is asking for a reading of a highlight
+    # the game has not drawn yet, and obeying it silently is how a feature
+    # gets measured in the one condition where it cannot work.
+    if opts.verify_reach > 0:
+        from .dataset import RENDER_FLOOR
+        if opts.verify_delay < RENDER_FLOOR:
+            say(f"    verify-delay {opts.verify_delay:.2f}s is below the "
+                f"{RENDER_FLOOR:.2f}s render floor -- raising it, or the check "
+                f"reads a mark that is not on screen yet")
+            opts.verify_delay = RENDER_FLOOR
+        say(f"    verifying chains that reach past {opts.verify_reach:.0f}px, "
+            f"reading at {opts.verify_delay:.2f}s")
+
     # Fitting the colour palette is the expensive half of detection, and the
     # tsums in play don't change mid-game, so it's fit once and reused. Same for
     # the radius and the base-tsum lookup.
@@ -2603,6 +2627,33 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
             before = crop
             probe: dict = {}
 
+            # HOW FAR THE CHAIN REACHES from the tsum being pressed, and
+            # whether that is far enough to be worth checking before dragging.
+            #
+            # Asking the game costs the same on every drag, but being wrong
+            # does not: measured over 303 collected drags, the share where the
+            # game accepted every proposed member falls away with reach --
+            #     under 90px  100% clean      150-220px   65%
+            #     90-150px     81%            220-300px   33%
+            #                                 over 300px  11%
+            # A chain that stays near the press is almost always right and
+            # paying to verify it is pure loss; one that reaches across the
+            # board is usually wrong. So the check is bought only where it
+            # pays. Off unless `--verify-reach` is set; `--verify-hold` still
+            # means "every drag" and is unaffected.
+            head_t = tsums[best.nodes[0]]
+            reach_px = max(math.hypot(tsums[i].x - head_t.x, tsums[i].y - head_t.y)
+                           for i in best.nodes)
+            verifying = bool(opts.verify_hold) or (
+                opts.verify_reach > 0 and reach_px > opts.verify_reach)
+            # A reach-triggered check reads at its own delay. `--hold-delay`
+            # defaults to 0.10, which is below the 0.15 floor the highlight
+            # needs to have rendered at all -- that is why `--verify-hold` is
+            # documented as measured-and-not-recommended, and re-using the
+            # number here would reproduce the same finding.
+            verify_delay = (opts.verify_delay
+                            if (verifying and not opts.verify_hold) else opts.hold_delay)
+
             def _ask_the_game():
                 """Read what the game marks while the first tsum is held.
 
@@ -2621,7 +2672,7 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
                 collecting = samples is not None and sampling
                 kept = marked_by_game(
                     drv, before, (bx, by, bw, bh), tsums, best.nodes,
-                    delay=samples.delay if collecting else opts.hold_delay,
+                    delay=samples.delay if collecting else verify_delay,
                     threshold=opts.hold_threshold, aura=opts.hold_aura,
                     frames=samples.frames if collecting else 1,
                     gap=samples.gap if collecting else 0.0,
@@ -2646,7 +2697,7 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
                                  "hold_threshold": opts.hold_threshold,
                                  "hold_aura": opts.hold_aura},
                     )
-                if not opts.verify_hold:
+                if not verifying:
                     # Collection must not change how the round is played.
                     return screen
                 probe["dropped"] = len(best.nodes) - len(kept)
@@ -2660,11 +2711,13 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
                                           by + tsums[best.nodes[0]].y)]
                 return [drv.to_screen(bx + tsums[i].x, by + tsums[i].y) for i in kept]
 
+            if verifying:
+                report.verified += 1
             sampling = samples is not None and samples.wants()
             if samples is not None:
                 samples.seen_drag()
             drag_chain(screen, step_px=opts.step_px, per_step=per_step, hold=opts.hold,
-                       after_press=_ask_the_game if (opts.verify_hold or sampling) else None)
+                       after_press=_ask_the_game if (verifying or sampling) else None)
 
             if probe.get("abandoned"):
                 misses += 1
@@ -4451,6 +4504,28 @@ def _dataset(args) -> int:
               f"the game's own marks are all one\n  character, so a real label scores "
               f"well above 1.")
 
+        # Each sample's figure is a RATIO, and a ratio has no upper bound: a
+        # sample whose marked tsums are nearly the pressed tsum's own colour
+        # divides by something close to zero. Those samples are good ones, but
+        # a mean over them describes the tail rather than the collection --
+        # measured on the first 303-sample corpus, the mean read 3.94x while
+        # 13 samples (4.6%) supplied 62% of it and the median sat at 1.30x.
+        # Both are printed because they answer different questions: the mean
+        # says how strong the best samples are, the median says what a typical
+        # one looks like, and it is the typical one that decides whether
+        # anything can be learned from the collection as a whole.
+        med = float(np.median(lifts))
+        share = float(np.sum([v for v in lifts if v > 10]) / np.sum(lifts))
+        print(f"  typical sample (median): {med:.2f}x. "
+              f"{sum(1 for v in lifts if v > 10)} sample(s) above 10x carry "
+              f"{100 * share:.0f}%\n  of the mean -- where these two diverge, "
+              f"trust the median.")
+        if med < 1.6 <= lift:
+            print(f"  NOTE: the mean clears the 1.6x bar below and the median "
+                  f"does not. The colour\n  signal is strong in a minority of "
+                  f"samples and weak in most of them. `learn`\n  scores the "
+                  f"collection as a whole and is the check that prices that.")
+
     if agree:
         print(f"\nagreement with k-means: {np.mean(agree) * 100:.1f}% of marked tsums "
               f"share the pressed\n  tsum's cluster, against {np.mean(base_rate) * 100:.1f}% "
@@ -4580,36 +4655,50 @@ def _learn(args) -> int:
           f"outline or menu -- expected, and kept")
 
     where = "held-out session(s)" if m["held_out"] else "the SAME frames it was fitted on"
-    print(f"\nsame-character agreement, scored on {where}")
-    print(f"  {m['pairs']} pair(s) the game confirmed, over {m['samples']} sample(s)")
-    print(f"  learned palette : {100 * m['agreement']:5.1f}%")
-    print(f"  per-frame k-means: {100 * m['baseline']:5.1f}%   <- what runs today")
-    if m.get("split") is not None:
-        print(f"  weak negatives kept apart: {100 * m['split']:.1f}% "
-              f"({m['negatives']} pair(s))")
+    print(f"\nscored on {where}: {m['pairs']} pair(s) the game confirmed and "
+          f"{m['negatives']}\nweak negative(s), over {m['samples']} sample(s). "
+          f"Marks inside the {learn_mod.AURA:.0f}px glow are\nexcluded -- there a "
+          f"reaction means proximity, not identity.")
+    print(f"\n{'':<18}{'agree':>8}{'split':>8}{'balanced':>10}")
+    print(f"  {'learned palette':<16}{100 * m['agreement']:7.1f}%{100 * m['split']:7.1f}%"
+          f"{100 * m['balanced']:9.1f}%")
+    print(f"  {'per-frame k-means':<16}{100 * m['baseline']:7.1f}%"
+          f"{100 * m['baseline_split']:7.1f}%{100 * m['baseline_balanced']:9.1f}%"
+          f"   <- what runs today")
 
-    lift = m["agreement"] - m["baseline"]
+    # `balanced`, not `agreement`. Merging two characters into one id RAISES
+    # agreement and only costs split, so a verdict read off agreement alone
+    # pays a palette to collapse -- measured on the first real corpus, that
+    # misreading turned a 1.5-point loss at k=6 into an apparent 3.9-point win.
+    lift = m["balanced"] - m["baseline_balanced"]
     print()
     if not m["held_out"]:
         print(f"-> UNPROVEN. {lift * 100:+.1f} points, but measured on its own fit "
               f"set.\n   Play rounds in another session and re-run: two sessions "
               f"is the minimum\n   for this number to mean anything.")
         return 0
-    if m.get("split") is not None and m["split"] < 0.5:
-        # Caught before the lift is read out, because a palette that has
-        # collapsed scores brilliantly on agreement and is worthless.
+    if m["split"] < 0.5:
+        # A palette this merged is not worth reporting a lift for at all.
         print(f"-> COLLAPSED. Only {100 * m['split']:.0f}% of weak negatives got a "
               f"different id, so\n   this palette is calling most of the board one "
-              f"character. Agreement is high\n   for the wrong reason. Re-fit with "
-              f"a larger -k.")
+              f"character. Re-fit with a larger -k.")
         return 1
     if lift < 0.02:
-        print(f"-> NO BETTER ({lift * 100:+.1f} points). Per-frame clustering is "
-              f"already doing this\n   job as well on your boards. Do not enable "
-              f"it. More sessions, or a different\n   -k, are the two things worth "
-              f"trying.")
+        print(f"-> NO BETTER ({lift * 100:+.1f} points balanced). Per-frame "
+              f"clustering is already doing\n   this job as well on your boards. Do "
+              f"not enable it.")
+        if m["agreement"] > m["baseline"]:
+            # The trap this command exists to not fall into, named out loud
+            # whenever the data is shaped to spring it.
+            print(f"   NOTE: it does win on agreement alone "
+                  f"({100 * m['agreement']:.1f}% vs {100 * m['baseline']:.1f}%), and "
+                  f"that is not a\n   result -- it separates fewer tsums "
+                  f"({100 * m['split']:.1f}% vs {100 * m['baseline_split']:.1f}%), "
+                  f"which is what merging\n   characters looks like. Re-fitting to "
+                  f"chase that number makes it worse.")
+        print(f"   More sessions, or a different -k, are the two things worth trying.")
         return 0
-    print(f"-> BETTER by {lift * 100:.1f} points on sessions it never saw.")
+    print(f"-> BETTER by {lift * 100:.1f} points balanced, on sessions it never saw.")
     print(f"   To try it live, add one line under `options:` in flows/play.yaml:")
     print(f"       palette: {args.out}")
     print(f"   and delete that line to revert. Watch the per-kind counts in the "
@@ -4725,11 +4814,34 @@ def add_play_args(play, *, merge_default: bool):
                            "the highlight has not rendered and the board is "
                            "still moving, so the reading is noise -- replayed "
                            "over 5,729 collected drags it dropped a mean 3 of 4 "
-                           "members on 43%% of them. See docs/DATASET-FINDINGS.md")
+                           "members on 43%% of them. See docs/DATASET-FINDINGS.md. "
+                           "--verify-reach is the version of this that pays: "
+                           "same check, bought only on the chains whose reach "
+                           "says they are likely to be refused")
     # The doubled percent above is deliberate: argparse %-formats every help
     # string, so a lone "%" followed by a space and a letter is read as a
     # conversion and raises TypeError the moment anyone asks for --help.
     # `tests/test_optional_rules.py` walks every subparser to keep that fixed.
+    play.add_argument("--verify-reach", type=float, default=0.0,
+                      help="ask the game to check a chain ONLY when it reaches "
+                           "further than this many pixels from the tsum being "
+                           "pressed; 0 (the default) never does. --verify-hold "
+                           "pays that check on every drag, which costs more "
+                           "than the waste it removes; the waste is not spread "
+                           "evenly. Measured over 303 collected drags, the "
+                           "share where the game accepted every proposed "
+                           "member runs 100%% under 90px, 81%% at 90-150, 65%% "
+                           "at 150-220, 33%% at 220-300 and 11%% beyond -- so "
+                           "buying the check only past ~260px caught most of "
+                           "the bad chains for a third of the cost. See "
+                           "docs/DATASET-FINDINGS.md")
+    play.add_argument("--verify-delay", type=float, default=0.25,
+                      help="seconds to wait before reading the marks on a "
+                           "--verify-reach check. Its own setting rather than "
+                           "--hold-delay because that one defaults to 0.10, "
+                           "below the 0.15 floor at which the highlight has "
+                           "rendered at all -- the reason --verify-hold reads "
+                           "noise. Clamped up to that floor")
     play.add_argument("--palette", default="",
                       help="use colour centres learned offline by `tsum learn` "
                            "instead of re-fitting k-means on every frame; empty "

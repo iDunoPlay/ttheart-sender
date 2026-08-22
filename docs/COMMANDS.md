@@ -156,6 +156,8 @@ no rebuild, nothing else to change:
 | `radius_lock: 5` | measures the tsum radius over five frames and holds it for the round, instead of re-measuring on every refit and at the FEVER transition | a bad warm-up gets held too | on; the FEVER fix |
 | `fever_min_tsums: 12` | lowers the "is this even a board" floor while FEVER runs, where the FEVER template already answers that | a fade to black could read as a board | on; the FEVER fix |
 | `mode: blob` | decides links by whether the two tsums' colour blobs join, rather than by centre distance (76.3% → 86.6% of hand-drawn links accepted) | ~60ms a frame against ~1.3ms | **off** — no live improvement yet |
+| `palette: models/…` | reads the board through colours learned offline by `tsum learn` instead of re-fitting k-means per frame | none at runtime | **off** — fitted and refused: no `k` beat the per-frame fit |
+| `verify_reach: 260` | asks the game to check a chain before dragging it, but only when it reaches further than 260px from the press — where 2 drags in 3 are wrong | ~0.25s on the ~18% of drags that qualify | **off** — replay says +19% cleared; needs a live round |
 
 They are independent and touch different parts of the pipeline, so **turn them
 off one at a time**: switching several back at once says nothing about which
@@ -841,54 +843,87 @@ round.
 
 **The score.** Holding a tsum makes the game mark same-character *and*
 reachable, so `head` and everything in `marked` are one character on the game's
-own word. `learn` counts how often a palette keeps those together, against how
-often the per-frame `kind` recorded live on the identical frames did:
+own word. `learn` scores a palette on two halves of that, and scores the
+per-frame `kind` recorded live on the identical frames the same way:
 
-```text
-same-character agreement, scored on held-out session(s)
-  75 pair(s) the game confirmed, over 25 sample(s)
-  learned palette : 100.0%
-  per-frame k-means:  26.7%   <- what runs today
-  weak negatives kept apart: 82.7% (75 pair(s))
-```
+* **agree** — of the pairs the game confirmed, how many share an id.
+* **split** — of the weak negatives, how many are given a *different* id.
+* **balanced** — the mean of the two. This is the verdict.
 
-The baseline is read off the rows rather than recomputed, so the two numbers
-are the same question on the same frames. It is the figure `dataset` already
-reports as k-means agreement (26–40% on the collections so far).
+Marks inside the 90px glow are excluded from both. The glow washes over
+whatever is under it, so a reaction there means proximity, not identity —
+`marked_by_game` says so, and 18% of recorded marks sit inside it.
 
-Three things it refuses to do:
+It refuses to recommend on four grounds:
 
-* **Score on frames it was fitted on.** The holdout is by *session*, not by
+* **Scoring on frames it was fitted on.** The holdout is by *session*, not by
   sample — samples inside one session are the same board minutes apart under
   the same equipped tsum, so a per-sample split would score the fit against
-  frames it effectively saw. One session means no holdout, and the verdict is
-  `UNPROVEN` rather than a number.
-* **Recommend a palette that collapsed.** Merging every character into one id
-  scores 100% on agreement and is worthless. `split` — the share of unmarked
-  tsums given a *different* id — catches it, and a palette below 50% there is
-  rejected however well it agreed. Note `split` is not accuracy and must not be
-  maximised: a same-character tsum out of reach is unmarked, so a correct
-  palette scores well under 100% on it.
-* **Recommend on no lift.** Under two points better than per-frame clustering
-  prints `NO BETTER` and no path.
+  frames it effectively saw. One session means no holdout and the verdict is
+  `UNPROVEN`.
+* **Collapse.** A palette below 50% on `split` is rejected however well it
+  agreed.
+* **Agreement bought with separation.** This is the subtle one, and the reason
+  the verdict is `balanced`. Merging two characters into one id *raises* agree
+  and only costs split, so a verdict read off agree alone pays a palette to
+  collapse — and it arrives gradually, so no threshold on `split` catches it.
+* **No lift.** Under two points of balanced improvement prints `NO BETTER`.
 
-Only on `BETTER` does it print the line to add, and that line is the whole
-switch — one entry under `options:` in `flows/play.yaml`, deleted to revert:
+Only on `BETTER` does it print the line to add — one entry under `options:` in
+`flows/play.yaml`, deleted to revert:
 
 ```yaml
 palette: models/palette.json
 ```
 
-Watch the `per kind` counts in the play log. Today they reshuffle each time the
-palette is refit; with this on they should hold steady across FEVER and across
-rounds. A file that will not load stops the round rather than quietly falling
-back — a round that silently ran without the palette it was told to use looks
-exactly like a round where the palette did not help, and that is the reading
-that would get a working one thrown away.
+A file that will not load stops the round rather than quietly falling back: a
+round that silently ran without the palette it was told to use looks exactly
+like a round where the palette did not help, and that is the reading that would
+get a working one thrown away.
 
-`-k` must match what `play` runs with, because the palette *is* play's k-means
-result. The file is small and worth committing; it is not baked into the `.exe`
-by `build.py`, so it lives beside it like `flows/` and `templates/`.
+`-k` does **not** have to match what `play` runs with. `_quantise` ignores its
+`k` entirely when a palette is supplied, so the corpus fit is free to use as
+many centres as it needs.
+
+### What it said the first time — a global palette did not work
+
+The first real corpus was 303 samples over 21 sessions. Every k from 6 to 96
+was fitted and scored against five held-out sessions:
+
+| k | agree | split | balanced |
+|---|---|---|---|
+| per-frame k-means | 33.7% | 79.3% | **56.5%** |
+| 6 | 37.6% | 72.4% | 55.0% |
+| 12 | 30.7% | 81.5% | 56.1% |
+| 24 | 26.6% | 86.6% | 56.6% |
+| 32 | 24.1% | 85.9% | 55.0% |
+
+**Nothing beat the per-frame fit.** The best is +0.1 at k=24, which is noise.
+
+This is worth reading carefully, because the shape of the table is the finding.
+Agreement falls monotonically as `k` rises and split rises to meet it: the two
+halves trade against each other across the whole range, and *neither one alone
+has a maximum that means anything*. Read off agreement, k=6 looks like a
+3.9-point win — and it is 1.5 points worse than doing nothing.
+
+The reason a global palette loses is that per-frame k-means is *relative*. It
+partitions whatever is on this board into k groups, so the same character lands
+together even when its absolute colour has drifted. A global codebook needs
+absolute Lab to be stable across frames, and it is not. Measured over 275
+labelled groups, the same character's face colours spread 45.6 Lab **within a
+single frame** — wider than the 43.9 spread of group means *between* frames.
+
+So this is the [colour ceiling](#the-ceiling-colour-cannot-tell-characters-apart)
+again, measured from the other side and against the game's own answer rather
+than against a threshold. Colour is not merely exhausted as a way of telling
+two characters apart; it is barely coherent within one character. A stable
+palette cannot fix that, and neither can more sessions of the same data.
+
+The machinery is kept anyway. It fits, scores, refuses, and is the harness the
+next attempt is measured in — and the next attempt should not be another colour
+model. `docs/TODO-blob-adjacency.md` names what is: the marked sets are ground
+truth for **reachability**, which is colour-independent, and every tsum the game
+declines to mark is a negative link example.
 
 ---
 

@@ -39,10 +39,10 @@ def _session(folder: Path, n: int = 6, *, kind_noise: float = 1.0, seed: int = 0
     folder.mkdir(parents=True, exist_ok=True)
     with (folder / "samples.jsonl").open("w", encoding="utf-8") as fh:
         for idx in range(1, n + 1):
-            img = np.full((300, 300, 3), BOWL, np.uint8)
+            img = np.full((450, 450, 3), BOWL, np.uint8)
             tsums, truth = [], []
-            for gy in range(5):
-                for gx in range(5):
+            for gy in range(7):
+                for gx in range(7):
                     c = rng.randrange(len(CHARS))
                     x, y = 30 + gx * 60, 30 + gy * 60
                     cv2.circle(img, (x, y), 25, CHARS[c], -1)
@@ -52,16 +52,22 @@ def _session(folder: Path, n: int = 6, *, kind_noise: float = 1.0, seed: int = 0
             # tsum on the far side stays dark. Reproduced here because it is
             # the reason an unmarked tsum is only a weak negative, and a
             # fixture that marked every match would quietly delete that.
-            head = 12
+            #
+            # The reach has to clear `learn.AURA` or the fixture marks nothing
+            # that counts: measured on a real board the game marks partners at
+            # 109px, 131px and 167px, well outside the 90px glow, and it is
+            # exactly those that are evidence. A 60px grid puts the second ring
+            # out at 120px.
+            head = 24            # the middle of a 7x7 grid, at (210, 210)
             hx, hy = tsums[head]["x"], tsums[head]["y"]
             marked = [i for i, t in enumerate(tsums)
                       if i != head and truth[i] == truth[head]
-                      and abs(t["x"] - hx) <= 60 and abs(t["y"] - hy) <= 60]
+                      and abs(t["x"] - hx) <= 150 and abs(t["y"] - hy) <= 150]
             for i, t in enumerate(tsums):
                 t["kind"] = rng.randrange(12) if rng.random() < kind_noise else truth[i]
             cv2.imwrite(str(folder / f"{idx:04d}_before.jpg"), img)
             fh.write(json.dumps({
-                "schema": 2, "index": idx, "board": [0, 0, 300, 300],
+                "schema": 2, "index": idx, "board": [0, 0, 450, 450],
                 "radius": 25.0, "fever": False, "tsums": tsums, "head": head,
                 "proposed": [head], "kept": [head], "marked": marked,
                 "baseline": 1.0, "bar": 8.0, "marks": [], "options": {},
@@ -166,6 +172,65 @@ def test_a_real_fit_beats_a_reshuffled_per_frame_kind(tmp_path):
     # Six characters were drawn and the marks should have landed on centres
     # that are actually distinct.
     assert len(p.faces()) >= 4
+
+
+def test_agreement_alone_pays_a_palette_to_merge_characters(tmp_path):
+    """Why the verdict is `balanced` and not `agreement`.
+
+    Fewer clusters means more tsums share an id, which lifts agreement on
+    confirmed same-character pairs *and* costs separation on the negatives.
+    Reading only the first number therefore rewards exactly the failure the
+    second one exists to catch -- and it arrives gradually, so no threshold on
+    `split` sees it coming. Measured on the first real corpus: k=6 scored
+    37.6%/72.4% against k=24's 26.6%/86.6%, and the k=6 fit was 1.5 points
+    WORSE than per-frame clustering once both halves were counted.
+    """
+    rows = list(learn.iter_rows(_corpus(tmp_path, sessions=3, n=12)))
+    merged = learn.agreement(rows, learn.fit(rows, k=2, seed=0))
+    split_up = learn.agreement(rows, learn.fit(rows, k=8, seed=0))
+
+    # `>=` not `>`: on a corpus this separable k=8 already agrees on every
+    # pair, so agreement has no room to rise. The cost still shows up.
+    assert merged["agreement"] >= split_up["agreement"]
+    assert merged["split"] < split_up["split"], "and it must cost separation"
+    # The verdict prices both, so it cannot be gamed by turning `-k` down.
+    assert merged["balanced"] == pytest.approx(
+        (merged["agreement"] + merged["split"]) / 2, abs=1e-3)
+
+
+def test_the_baseline_is_scored_on_both_halves_too(tmp_path):
+    # The comparison is only like-for-like if the per-frame `kind` is put
+    # through the identical negatives. Scoring the palette on two numbers and
+    # the baseline on one is how a collapse gets waved through.
+    rows = list(learn.iter_rows(_corpus(tmp_path, sessions=2, kind_noise=0.0)))
+    m = learn.agreement(rows, learn.fit(rows, k=8, seed=0))
+
+    assert m["baseline"] == 1.0, "a truthful recorded kind agrees on every pair"
+    assert m["baseline_split"] > 0.0
+    assert m["baseline_balanced"] == pytest.approx(
+        (m["baseline"] + m["baseline_split"]) / 2, abs=1e-3)
+
+
+def test_marks_inside_the_glow_are_not_counted_as_evidence(tmp_path):
+    # The glow washes over whatever is under it, so a tsum in there clears the
+    # bar for being near the press rather than for being the same character.
+    # `tsum dataset` has always excluded them; this pins that the palette is
+    # scored on the same population.
+    _session(tmp_path / "s0", n=4, seed=0)
+    rows = list(learn.iter_rows(tmp_path))
+    row = rows[0][1]
+    ts, head = row["tsums"], int(row["head"])
+    far = learn._outside_glow(ts, head)
+
+    assert not far[head], "the pressed tsum is inside its own glow"
+    assert far.any() and not far.all(), "the fixture must straddle the aura"
+    marked = [i for i in row["marked"] if far[i]]
+    assert marked and len(marked) < len(row["marked"]), (
+        "the fixture must mark partners both inside and outside the glow, or "
+        "this test cannot tell the filter is applied")
+
+    m = learn.agreement(rows, learn.fit(rows, k=8, seed=0))
+    assert m["pairs"] <= sum(len(r["marked"]) for _, r in rows)
 
 
 def test_unmarked_tsums_are_only_weak_negatives(tmp_path):

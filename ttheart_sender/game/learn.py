@@ -80,6 +80,17 @@ SCHEMA = 1
 #: are worth having.
 MIN_TSUMS = 12
 
+#: Marks this close to the pressed tsum are not evidence and are dropped from
+#: every score below. The glow is about 90px across and washes over whatever
+#: is under it, so a tsum in there clears the bar for being *near the press*
+#: rather than for being the same character -- `marked_by_game` says as much,
+#: and `tsum dataset` has always excluded them from its own appearance test.
+#: Measured over this corpus, 18% of recorded marks sit inside it.
+#:
+#: Same default as ``--hold-aura``. Scoring a palette against glow-washed
+#: marks would credit it for agreeing with the wrong answer.
+AURA = 90.0
+
 
 @dataclass
 class Palette:
@@ -191,6 +202,13 @@ def crop_of(folder, row: dict) -> Optional[np.ndarray]:
     return cv2.imdecode(np.fromfile(str(path), np.uint8), cv2.IMREAD_COLOR)
 
 
+def _outside_glow(tsums: Sequence, head: int, aura: float = AURA) -> np.ndarray:
+    """Boolean mask of detections far enough from the press to be evidence."""
+    hx, hy = float(tsums[head]["x"]), float(tsums[head]["y"])
+    return np.array([(float(t["x"]) - hx) ** 2 + (float(t["y"]) - hy) ** 2 > aura * aura
+                     for t in tsums], bool)
+
+
 def _as_tsums(row: dict) -> list:
     """Recorded detections as objects `_face_lab` will accept."""
     from .tsum import Tsum
@@ -276,21 +294,35 @@ def agreement(rows: Sequence, centres: np.ndarray) -> dict:
     carried live, which is per-frame k-means' answer on the identical frames.
     That is the number to beat, and beating it is the entire claim.
 
-    `split` is the other half, and it is reported rather than optimised: an
-    unmarked tsum is only a *weak* negative, because the game marks
+    `split` is the other half: the share of weak negatives given a *different*
+    id. An unmarked tsum is only a weak negative, because the game marks
     same-character AND reachable, so a same-character tsum on the far side of
     the board is unmarked and counting it as a different character would be
-    wrong. A palette that collapsed everything to one id would score 100% on
-    agreement, and `split` is what catches that.
+    wrong -- which is why a correct palette scores well under 100% here and
+    this must never be maximised on its own.
+
+    **Neither number decides anything alone, and the reason is measured.**
+    Across k on the first real corpus, agreement rose exactly as split fell:
+    k=6 scored 37.6%/72.4% and k=24 scored 26.6%/86.6%. Reading agreement by
+    itself would have called k=6 a 3.9-point win over per-frame clustering,
+    when all it had done was merge characters -- the failure `split` exists to
+    catch, arriving too gradually for a threshold to see. So the verdict is
+    `balanced`, the mean of the two, computed the same way for the learned
+    palette and for the per-frame `kind` that ran live. On that measure no k
+    beat per-frame clustering on that corpus, which is the honest result.
     """
     pairs = same = base_same = 0
-    neg = neg_split = 0
+    neg = neg_split = base_split = 0
     scored = 0
     for folder, row in rows:
         head = int(row["head"])
         tsums = row["tsums"]
+        far = _outside_glow(tsums, head)
         marked = [int(i) for i in (row.get("marked") or [])]
-        marked = [i for i in marked if 0 <= i < len(tsums) and i != head]
+        # `far` is what makes these marks evidence rather than proximity --
+        # see :data:`AURA`. Applied to the negatives too, so both sides of the
+        # score are drawn from the same population.
+        marked = [i for i in marked if 0 <= i < len(tsums) and i != head and far[i]]
         if not marked:
             continue
         colours = face_colours(folder, row)
@@ -307,25 +339,39 @@ def agreement(rows: Sequence, centres: np.ndarray) -> dict:
         # number of positives rather than taken whole, so a board of sixty
         # does not drown the ~5 pairs that carry the real label. Seeded off
         # the sample so the figure is reproducible run to run.
-        lit = set(marked) | {head}
-        dark = [i for i in range(len(tsums)) if i not in lit]
+        # Anything the game lit is excluded whether or not it survived the
+        # `far` filter: a glow-washed mark is not evidence of sameness, but it
+        # is not evidence of difference either, and counting it as a negative
+        # would be the same mistake in the other direction.
+        lit = {int(i) for i in (row.get("marked") or [])} | {head}
+        dark = [i for i in range(len(tsums)) if i not in lit and far[i]]
         for i in random.Random(head).sample(dark, min(len(marked), len(dark))):
             neg += 1
             neg_split += int(ids[i] != ids[head])
+            base_split += int(int(tsums[i]["kind"]) != int(tsums[head]["kind"]))
 
-    if not pairs:
-        return {"pairs": 0}
+    if not pairs or not neg:
+        return {"pairs": pairs, "negatives": neg}
+
+    agree, split = same / pairs, neg_split / neg
+    base_agree, base_sp = base_same / pairs, base_split / neg
     return {
         "samples": scored,
         "pairs": pairs,
-        # Share of game-confirmed same-character pairs the palette agrees on.
-        "agreement": round(same / pairs, 4),
-        # The same share for the per-frame clustering that ran live.
-        "baseline": round(base_same / pairs, 4),
-        # Share of weak negatives kept apart -- a guard against collapse, not
-        # a target to maximise.
-        "split": round(neg_split / neg, 4) if neg else None,
         "negatives": neg,
+        # Share of game-confirmed same-character pairs the palette agrees on.
+        "agreement": round(agree, 4),
+        # Share of weak negatives it keeps apart.
+        "split": round(split, 4),
+        # Both of the above for the per-frame clustering that ran live on the
+        # identical frames. `baseline` keeps its name -- it is what the
+        # verdict used to be read off, and the CLI still prints it.
+        "baseline": round(base_agree, 4),
+        "baseline_split": round(base_sp, 4),
+        # The verdict. Reading agreement alone rewards a palette for merging
+        # characters, because merging lifts agreement and costs only split.
+        "balanced": round((agree + split) / 2, 4),
+        "baseline_balanced": round((base_agree + base_sp) / 2, 4),
     }
 
 

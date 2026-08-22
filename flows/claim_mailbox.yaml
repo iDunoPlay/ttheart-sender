@@ -86,7 +86,7 @@ steps:
         # and an if_found that takes the else branch still counts as a successful
         # iteration. max_iterations caps a screen that never stops offering hearts.
         - if_found:
-            template: get_coin
+            template: check_button
             timeout: 4
             then:
             - repeat:

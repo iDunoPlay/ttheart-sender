@@ -534,3 +534,236 @@ tsums, and one sample in the first session is a pre-round "READY" screen with
 through. Over-detection is a separate problem from this one and is not
 addressed here, but the collection is a good corpus for it -- the images are
 fine even where the labels are not.
+
+## Ninth round: the collection was trained on, and the answer was no
+
+303 samples over 21 sessions, the first corpus put through `tsum learn`. The
+thing being tested was the obvious use of a label that says *these are the same
+character*: fit one colour palette over the whole corpus, hand it to `detect`
+through the `palette=` argument it already accepts, and let a cluster id mean
+the same character on every frame instead of being re-derived per frame and
+thrown away seven times a round.
+
+It does not work, and the way it fails is more useful than the fact that it
+does.
+
+### No k beat the per-frame fit
+
+Fitted on 16 sessions, scored on 5 held out:
+
+| k | agree | split | balanced |
+|---|---|---|---|
+| per-frame k-means | 33.7% | 79.3% | **56.5%** |
+| 6 | 37.6% | 72.4% | 55.0% |
+| 8 | 33.7% | 77.3% | 55.5% |
+| 12 | 30.7% | 81.5% | 56.1% |
+| 24 | 26.6% | 86.6% | 56.6% |
+| 32 | 24.1% | 85.9% | 55.0% |
+
+`agree` is the share of game-confirmed same-character pairs given one id;
+`split` the share of weak negatives given different ids. The best balanced
+score is +0.1 over doing nothing, which is noise.
+
+### The trap in the middle of that table
+
+Agreement falls monotonically as `k` rises, and split rises to meet it. They
+trade against each other across the entire range, so **neither has a maximum
+that means anything**, and a verdict read off either one alone is measuring the
+trade rather than the quality.
+
+Read off agreement, k=6 is a 3.9-point win over per-frame clustering. It is
+actually 1.5 points worse. All it did was merge characters -- which lifts
+agreement, because merged characters agree, and costs only split. This was very
+nearly shipped as a positive result: the first version of `learn` compared
+agreement against a baseline and computed `split` for the palette *but not for
+the baseline*, so the two sides were scored on different questions. The verdict
+is now `balanced`, the mean of both halves, computed identically for both.
+
+Pinned by `tests/test_learn.py::test_agreement_alone_pays_a_palette_to_merge_characters`.
+
+### Why a global palette loses to a per-frame one
+
+Per-frame k-means is *relative*. It partitions whatever is on this board into k
+groups, so one character lands together even when its absolute colour has
+drifted. A global codebook needs absolute Lab to be stable frame to frame.
+
+It is not, and not by a little. Over 275 labelled groups, the same character's
+face colours spread **45.6 Lab within a single frame** -- wider than the 43.9
+spread of group *means between* frames. The variation that a global palette
+would have to model is not between-frame drift at all; it is inside one frame,
+inside one character, where no palette of any size can reach it.
+
+Two controls, same corpus:
+
+* the game's confirmed same-character set is only **1.18x** more
+  colour-coherent than a random group of the same size off the same board;
+* excluding the 18% of marks that sit inside the 90px glow -- where a reaction
+  means proximity, not identity -- moves that to 1.11x rather than fixing it.
+
+This is `## The ceiling: colour cannot tell characters apart` in
+`docs/COMMANDS.md`, measured from the other side. That section priced colour as
+a way of separating two characters. This prices it as a way of recognising
+*one*, against the game's own answer instead of against a hand label, and it
+comes out barely above chance.
+
+### The appearance test's headline is a mean of ratios
+
+Chasing the above turned up a measurement fault in `tsum dataset` itself. Its
+verdict number is the mean of a per-sample ratio, and a ratio has no upper
+bound: a sample whose marked tsums are nearly the pressed tsum's own colour
+divides by something near zero.
+
+On this corpus:
+
+```text
+mean of per-sample ratios   :  3.94   <- what it reported
+median of per-sample ratios :  1.30
+ratio of pooled means       :  1.28
+p90 / p99 / max             :  3.38 / 70.87 / 122.29
+```
+
+**13 samples of 280 (4.6%) supply 62% of the headline**, on denominators as
+small as 0.46. Those are not bad samples -- a tiny denominator is a very strong
+label -- but a mean over them describes the tail, not the collection, and the
+1.6x bar the verdict is read against was never meant to be cleared that way.
+The 2.23x reported for the 11,537-sample collection in the eighth round is the
+same statistic and carries the same caveat.
+
+`dataset` now prints the median beside the mean, says what share of the mean
+the outliers carry, and warns when the two land on opposite sides of the bar.
+The thresholds are unchanged: they were calibrated against the mean, and moving
+the statistic under them would invalidate every earlier round in this document.
+
+### What this does and does not settle
+
+Settled: a global colour palette is not the way to use this collection, and no
+amount of more of the same data changes that. `learn` is kept -- it fits,
+scores, refuses, and is the harness the next attempt gets measured in.
+
+Not settled, and now the obvious next thing: **reachability, which is
+colour-independent**. The marked set is the game stating which tsums are
+chainable from the pressed one, and that is the question `adjacency` guesses
+at. The `TODO-blob-adjacency.md` item unblocked in the eighth round is still
+the best-priced piece of work in this corpus, and nothing measured here
+weakens it -- everything above is about identity, and none of it is about
+reach.
+
+## Tenth round: what the collection was actually good for
+
+The ninth round used the collection to try to fix *identity* and failed. This
+round used it to price *decisions*, and that is what it turned out to be for.
+
+Every collected row carries `proposed` (the chain the bot chose) beside `kept`
+(the subset the game marked while the first tsum was held). That pair is a
+recording of the bot being right and wrong, drag by drag, with the game as the
+judge -- and nothing had ever read it.
+
+### The waste, measured
+
+Over 303 drags at the live settings (`link_px 105`, `block 1.25`, `min_chain 3`):
+
+```text
+chain the bot proposed : mean 4.69  median 4
+what the game accepted : mean 3.41  median 3
+-> 27.3% of proposed members the game would not take
+-> 22.4% of drags end up under min_chain: the stroke runs and clears nothing
+```
+
+### `link_px` cannot fix it, and that is the surprising part
+
+Taking the 788 proposed members that sit outside the 90px glow -- where being
+marked is evidence rather than proximity -- 49.2% were refused. Standardised
+mean difference between kept and refused members:
+
+| feature | kept | refused | separation |
+|---|---|---|---|
+| position in chain | 3.1 | 4.7 | **+0.70** |
+| distance to the pressed tsum | 169px | 215px | **+0.62** |
+| Lab distance to the pressed tsum | 10.4 | 18.5 | +0.57 |
+| **leg length to the previous member** | **81.2px** | **82.5px** | **+0.06** |
+
+`link_px` is the most carefully tuned number in `flows/play.yaml` and it
+**separates a good chain member from a refused one by 0.06 standard
+deviations**, which is to say not at all. Leg length decides which links the
+graph offers; it says nothing about which of them the game will honour. Two
+things follow: the p90-of-labelled-gaps method that set 105 was answering a
+different question than the one that matters, and no amount of re-tuning it
+addresses the 27%.
+
+What does predict refusal is how far the chain gets from the press. Share of
+drags where the game accepted *every* member:
+
+| reach of chain | drags | clean |
+|---|---|---|
+| under 90px | 16 | 100% |
+| 90-150px | 99 | 81% |
+| 150-220px | 96 | 65% |
+| 220-300px | 57 | 33% |
+| over 300px | 35 | 11% |
+
+### Two rules tried and rejected before the one that worked
+
+**Head-anchored colour truncation** -- cut the chain at the first member whose
+face colour is too far from the pressed tsum's. Colour carries real signal here
+(+0.57, better than it manages anywhere in the ninth round), but truncation
+loses good members to catch bad ones and every threshold from 60 down to 15
+cleared *less* than doing nothing. Rejected.
+
+**A lower `max_chain`** -- errors concentrate in the tail, so capping the chain
+mechanically avoids them. It does: clears per second of stroke run 18.8 at
+`max_chain 3` against 10.6 at 12. Not shipped, because `PlayReport` already
+notes that fifteen 3-chains and eight 6-chains "are not close, and the second
+scores far better" -- the metric this optimises is not the metric that wins,
+and nothing here prices the scoring curve. Left alone deliberately.
+
+### `--verify-hold` was condemned for the wrong reason
+
+It is documented as measured-and-not-recommended because at `--hold-delay 0.10`
+-- below the 0.15 render floor -- the highlight has not been drawn and the
+reading is noise. True, but not the whole story: replaying it at the collector's
+working delay, where the marks are real,
+
+```text
+                    cleared   stroke+hold
+today (blind)           688         64.6s
+verify every drag       906        115.0s
+```
+
+it clears 32% more and takes 78% longer. **The check is not too noisy; it is
+too evenly spread.** It costs the same on every drag while the risk it buys
+against is concentrated in a fifth of them.
+
+### `--verify-reach`, which is the same check bought where it pays
+
+Replayed over the same 303 drags, counting a drag as clearing only when every
+member was accepted:
+
+| verify when reach > | holds paid | cleared | time | clears/s |
+|---|---|---|---|---|
+| never (today) | 0 | 688 | 64.6s | 10.6 |
+| 220px | 92 (30%) | 853 | 69.0s | 12.4 |
+| **260px** | **56 (18%)** | **819** | **64.3s** | **12.7** |
+| 300px | 35 (12%) | 787 | 62.5s | 12.6 |
+| every drag | 303 | 906 | 115.0s | 7.9 |
+
+260 is the recommendation because it is best or near-best under both a
+one-frame and a three-frame reading cost; 220 wins only under the cheaper one.
+The ordering survives any fixed per-drag overhead -- adding a constant to every
+row compresses the differences without reversing them, and at a generous 1.0s
+of settle and detection per drag the 260 row is still 22% ahead.
+
+Shipped **off**, as `verify_reach` in `flows/play.yaml`, with its own
+`--verify-delay` defaulting to 0.25 and clamped up to the render floor so this
+version cannot repeat the mistake that sank the last one. `PlayReport` gained
+`verified`, printed at the end of a round as `checked N chain(s) before
+dragging (M% of drags)`, so the cost sits in the log beside the trimmed and
+rejected counts it bought.
+
+### What would falsify it
+
+The replay assumes a drag clears nothing when any member is refused -- the
+behaviour named elsewhere in the code as *"a 3-chain it only marks two of pops
+nothing at all"*. If the game is in fact lenient and pops the accepted members
+anyway, today already collects 906 and this rule buys nothing but delay. The
+collection cannot distinguish those two, because it never recorded what
+actually cleared. A round with `--verify-clears` on can, and that is the test.
