@@ -26,6 +26,7 @@ from .icon import MenuItem, TrayIcon
 from .modes import DEFAULT_MODE, MODES
 from .panel import ControlPanel
 from .service import AutomationService, RunState
+from ..housekeeping import clear_dataset, clear_logs
 from .settings import PanelSettings, settings_path
 from .updater import UpdateService
 
@@ -104,6 +105,8 @@ class TrayApp:
             on_buy=self._buy_tsum,
             on_update=self._updater.activate,
             on_logs=self._open_logs,
+            on_clear_logs=self._clear_logs,
+            on_clear_data=self._clear_dataset,
             on_exit=self._exit,
         )
         self._icon = TrayIcon(
@@ -287,6 +290,23 @@ class TrayApp:
         log_dir = self._app.config.log_dir
         log_dir.mkdir(parents=True, exist_ok=True)
         os.startfile(str(log_dir))  # noqa: S606 - opening a folder in Explorer
+
+    def _clear_logs(self) -> None:
+        """Empty the log directory. The panel has already asked."""
+        self._report_clear("Clear logs", clear_logs(self._app.config))
+
+    def _clear_dataset(self) -> None:
+        """Empty the dataset directory. The panel has already asked."""
+        self._report_clear("Clear data collection", clear_dataset(self._app.config))
+
+    def _report_clear(self, title: str, result) -> None:
+        """Say what was removed, through the tray balloon the rest of the app uses.
+
+        A file left behind is reported as an error rather than swallowed: it
+        means something still has it open, and the user asked for it to be gone.
+        """
+        self._on_notify(title, result.describe(), not result.ok)
+        self._on_change()
 
     def _exit(self) -> None:
         # Ask the run to stop, then let the message loop unwind; run() joins the

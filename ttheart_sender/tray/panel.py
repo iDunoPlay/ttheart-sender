@@ -48,6 +48,8 @@ ID_RETURN_HEART = 2010
 ID_AUTO_UPDATE = 2011
 ID_UPDATE = 2012
 ID_RESTART_STUCK = 2016
+ID_CLEAR_LOGS = 2017
+ID_CLEAR_DATA = 2018
 #: A label rather than a control, but it is rewritten on every refresh, so it
 #: needs an id to be found again.
 ID_UPDATE_STATUS = 2013
@@ -184,6 +186,8 @@ class ControlPanel:
         on_buy: Callable[[], None],
         on_update: Callable[[], None],
         on_logs: Callable[[], None],
+        on_clear_logs: Callable[[], None],
+        on_clear_data: Callable[[], None],
         on_exit: Callable[[], None],
     ) -> None:
         #: The version lives in the caption bar, so a screenshot of the panel
@@ -200,6 +204,8 @@ class ControlPanel:
         self._on_buy = on_buy
         self._on_update = on_update
         self._on_logs = on_logs
+        self._on_clear_logs = on_clear_logs
+        self._on_clear_data = on_clear_data
         self._on_exit = on_exit
 
         self._hwnd: Optional[int] = None
@@ -389,6 +395,15 @@ class ControlPanel:
                           MARGIN, y, half, ROW + 4)
         self._add_control(ID_EXIT, "BUTTON", "Exit", BS_PUSHBUTTON,
                           MARGIN + half + GAP, y, half, ROW + 4)
+        y += ROW + 4 + GAP
+
+        # The two destructive buttons share a row of their own, below the ones
+        # that only open or stop things. Both delete files for good, so both
+        # ask first -- see _confirm.
+        self._add_control(ID_CLEAR_LOGS, "BUTTON", "Clear logs", BS_PUSHBUTTON,
+                          MARGIN, y, half, ROW + 4)
+        self._add_control(ID_CLEAR_DATA, "BUTTON", "Clear data", BS_PUSHBUTTON,
+                          MARGIN + half + GAP, y, half, ROW + 4)
         y += ROW + 4 + SECTION_GAP
 
         # Housekeeping, so it sits under the buttons rather than between the
@@ -500,6 +515,14 @@ class ControlPanel:
         self._add_control(ID_BUY, "BUTTON", "Buy tsum", BS_PUSHBUTTON,
                           buy_x, y, BUY_WIDTH, HEADER_HEIGHT)
         return y + HEADER_HEIGHT
+
+    def _confirm(self, title: str, message: str) -> bool:
+        """Ask before deleting. Owned by the panel so it cannot open behind it."""
+        answer = win32gui.MessageBox(
+            self._hwnd or 0, message, title,
+            win32con.MB_YESNO | win32con.MB_ICONWARNING | win32con.MB_DEFBUTTON2,
+        )
+        return answer == win32con.IDYES
 
     def _add_control(self, ident: int, cls: str, text: str, style: int,
                      x: int, y: int, width: int, height: int) -> int:
@@ -672,6 +695,11 @@ class ControlPanel:
         # run -- the panel deliberately has no button for it.
         self._enable(ID_RUN, not (running or stopping))
         self._enable(ID_BUY, not (running or stopping))
+        # Both write into directories a live run is using -- the log file it is
+        # still appending to, the session folder it is still filling -- so they
+        # wait for it to finish rather than pulling the floor out from under it.
+        self._enable(ID_CLEAR_LOGS, not (running or stopping))
+        self._enable(ID_CLEAR_DATA, not (running or stopping))
 
         self._set_check(ID_AUTO_UPDATE, bool(state.get("auto_update", False)))
         self._set_text(ID_UPDATE_STATUS, str(state.get("update_status", "")))
@@ -794,6 +822,21 @@ class ControlPanel:
                 self._on_run()
             elif ident == ID_LOGS:
                 self._on_logs()
+            elif ident == ID_CLEAR_LOGS:
+                if self._confirm(
+                    "Clear logs",
+                    "Delete every log file, including this session's?\n\n"
+                    "This cannot be undone.",
+                ):
+                    self._on_clear_logs()
+            elif ident == ID_CLEAR_DATA:
+                if self._confirm(
+                    "Clear data collection",
+                    "Delete every collected training session?\n\n"
+                    "This cannot be undone. Zip anything you still want to "
+                    "send on before clearing.",
+                ):
+                    self._on_clear_data()
             elif ident == ID_EXIT:
                 self._on_exit()
             elif ID_MODE_BASE <= ident < ID_MODE_BASE + len(self._modes):
