@@ -109,6 +109,9 @@ dataset:
   delay: 0.25              # wait before reading the marks; below 0.15 they have not rendered
   frames: 3                # only what changed in ALL of them counts as a mark
   gap: 0.05                # seconds between those frames
+  floor_mult: 8.0          # a mark must beat the board's own noise floor by this much.
+                           # Under 8x, the tsums that react are no more the pressed
+                           # character than the board average is. 0 = fixed threshold
   max_motion: 12.0         # drop samples taken while the board was still falling. 0 = keep all
 
   # Budgets over the whole dataset directory, not one session. There is no

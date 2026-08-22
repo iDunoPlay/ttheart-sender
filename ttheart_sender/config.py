@@ -207,8 +207,12 @@ class DatasetConfig:
     gap: float = 0.05
     #: A mark has to beat the board's own noise floor by this much. Measured
     #: with ``hold``, real marks sit 8x-25x above it; the fixed 8.0 threshold
-    #: sits inside that floor on a live board. 0 = use the fixed threshold.
-    floor_mult: float = 5.0
+    #: sits inside that floor on a live board. Swept over the 11,537-sample
+    #: collection: under 8x the tsums that react are no more the pressed
+    #: character than the board average is, so the first tuned value of 5
+    #: spent about a third of every label on noise. 0 = use the fixed
+    #: threshold.
+    floor_mult: float = 8.0
     #: Refuse a sample whose board was already jiggling this hard at press
     #: time; the reading would be motion rather than marks. 0 = keep all.
     max_motion: float = 12.0

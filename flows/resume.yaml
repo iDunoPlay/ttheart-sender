@@ -59,7 +59,7 @@ steps:
                   value: "${game_frozen}"
                   then:
                     - run_flow:
-                        flow: restart
+                        flow: recover_to_home
                     - run_flow:
                         flow: launch_tsum
                       optional: true

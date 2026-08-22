@@ -11,19 +11,41 @@ description: Restart the LDPlayer instance and re-attach to its new window
 #
 # The one thing that makes this different from every other flow: LDPlayer's
 # restart destroys its window and builds a fresh one with a *new* handle. The
-# handle attached at startup is dead from the moment the menu item is clicked,
-# so every step between here and `prepare_window: {redetect: true}` is blind --
-# no template lookups, no window-relative clicks that matter.
+# handle attached at startup dies the moment the Restart item is clicked, so
+# every step from there down to `prepare_window: {redetect: true}` is blind --
+# no template lookups, no window-relative clicks that matter. Opening the menu
+# and finding Restart inside it happen while the window is still alive, which
+# is why those two can use the screen and nothing after them can.
 
 steps:
-  # Park the window first so the two menu clicks below land where they were
-  # measured. Coordinates are content-relative, and the content area only
-  # matches the measurements while LDPlayer sits at window.position.
+  # Park the window first so the menu click below lands where it was measured.
+  # Coordinates are content-relative, and the content area only matches the
+  # measurements while LDPlayer sits at window.position.
   - prepare_window
 
   - click: [517, 19]                  # LDPlayer title-bar menu (top right)
   - wait: {min: 0.4, max: 0.8}
-  - click: [216, 661]                 # "Restart" in that menu
+
+  # Restart does not sit at a fixed height in that menu. LDPlayer sometimes
+  # packs an ad banner into it, and everything below the banner shifts down --
+  # so a measured coordinate lands on whichever item happens to be in that slot
+  # instead, which is how a "restart" ends up doing something else entirely.
+  # Find the item and click where it actually is.
+  #
+  # The measured position stays as the fallback, same arrangement as
+  # dismiss_ldplayer_ad.yaml: at 88x20 of mostly flat background this is a
+  # thin template, and a menu that has already been opened is worse to walk
+  # away from than to guess at. [180, 535] is Restart with no banner above it.
+  - if_found:
+      template: ldplayer_restart
+      timeout: 5
+      then:
+        - find_click:
+            template: ldplayer_restart
+            timeout: 2
+      else:
+        - log: ldplayer_restart not found -- clicking the measured position
+        - click: [180, 535]
 
   # Give LDPlayer time to actually tear the old window down. Without this the
   # re-detect below can find the *dying* window, park that, and then everything

@@ -49,6 +49,21 @@ measured in ``docs/DATASET-FINDINGS.md``.
 Every sample now carries the reading it was judged on (``baseline``,
 ``marks``), so the next dataset can be scored by `tsum dataset` without
 re-decoding a byte of JPEG.
+
+What the next 1.5GB settled
+---------------------------
+
+Schema 2 works. 11,537 samples collected 2026-08-20 to 08-22 score 1.95x on
+the appearance test against a 1.3 bar, with k-means agreeing on 37.1% of
+marked tsums against a 26.1% base rate -- a label that is real and that
+disagrees with the clustering often enough to be worth having.
+
+It also settled ``floor_mult``, which had been guessed at 5 from 19 samples.
+Swept over the corpus, a tsum reacting at less than **8x its own board's
+noise floor** is no more the pressed character than the board average is
+(lift 1.00, same-kind at the 25% base rate); above 8x the reading turns into
+a label. 5 was spending about a third of every label on noise, so the default
+here is 8.0. Measured in ``docs/DATASET-FINDINGS.md``.
 """
 
 from __future__ import annotations
@@ -130,7 +145,7 @@ class DatasetWriter:
 
     def __init__(self, root: Path, *, per_round: int = 20, every: int = 4,
                  quality: int = 85, delay: float = 0.25, frames: int = 3,
-                 gap: float = 0.05, floor_mult: float = 5.0,
+                 gap: float = 0.05, floor_mult: float = 8.0,
                  max_motion: float = 12.0,
                  max_marked: float = 0.5, max_mb: float = 2048.0,
                  max_total: int = 0) -> None:

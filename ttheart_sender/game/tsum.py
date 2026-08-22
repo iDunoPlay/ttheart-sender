@@ -1827,9 +1827,16 @@ def marked_by_game(drv, before_crop: np.ndarray, board: tuple, tsums: Sequence[T
     # above the median untouched tsum -- 61-65 against a floor of 7.5, 95
     # against 3.8, 167 against 6.8. The fixed 8.0 sits *inside* that floor's
     # noise on a live board and admitted 23 to 35 tsums per press, which is
-    # why every reading looked like half the board. `floor_mult` of 0 keeps
-    # the old fixed behaviour for `--verify-hold`, whose A/B was measured
-    # under it.
+    # why every reading looked like half the board. Confirmed at scale on
+    # 11,537 samples: below 8x the floor the tsums that react are no more
+    # this character than the board average is (lift 1.00, same-kind 25%
+    # against a 25% base rate), and above it the reading turns into a label.
+    #
+    # This is the bar the *label* is read at. The trim below deliberately
+    # keeps the fixed threshold: `--verify-hold` is the only caller that
+    # trims, its A/B was measured under 8.0, and re-scoring it here would
+    # invalidate that measurement -- silently, and only in the combination
+    # where collection happened to be on at the same time.
     bar = max(threshold, floor_mult * baseline) if floor_mult else threshold
 
     keep = [nodes[0]]
@@ -1838,7 +1845,7 @@ def marked_by_game(drv, before_crop: np.ndarray, board: tuple, tsums: Sequence[T
         if math.hypot(t.x - head.x, t.y - head.y) <= aura:
             keep.append(n)
             continue
-        if values[n] > bar:
+        if values[n] > threshold:
             keep.append(n)
 
     # The marked frame is the only record of the game's answer, and it is gone
@@ -2137,7 +2144,7 @@ def _open_dataset(opts, say):
                            delay=getattr(opts, "dataset_delay", 0.25),
                            frames=getattr(opts, "dataset_frames", 3),
                            gap=getattr(opts, "dataset_gap", 0.05),
-                           floor_mult=getattr(opts, "dataset_floor_mult", 5.0),
+                           floor_mult=getattr(opts, "dataset_floor_mult", 8.0),
                            max_motion=getattr(opts, "dataset_max_motion", 12.0),
                            max_mb=getattr(opts, "dataset_max_mb", 2048.0),
                            max_total=getattr(opts, "dataset_total", 0))
@@ -4576,12 +4583,15 @@ def add_play_args(play, *, merge_default: bool):
                            "and it read motion")
     play.add_argument("--dataset-gap", type=float, default=0.05,
                       help="seconds between those frames")
-    play.add_argument("--dataset-floor-mult", type=float, default=5.0,
+    play.add_argument("--dataset-floor-mult", type=float, default=8.0,
                       help="a mark must beat the board's own noise floor by "
                            "this multiple. Measured with `hold`, real marks sit "
                            "8x-25x above it, while the fixed --hold-threshold "
-                           "sits inside that floor on a live board. 0 = use the "
-                           "fixed threshold")
+                           "sits inside that floor on a live board. Swept over "
+                           "11,537 collected samples: everything under 8x is "
+                           "indistinguishable from the board average, so 5 "
+                           "spent about a third of each label on noise. 0 = use "
+                           "the fixed threshold")
     play.add_argument("--dataset-max-motion", type=float, default=12.0,
                       help="refuse to keep a sample whose board was already "
                            "jiggling this hard at press time -- the reading is "

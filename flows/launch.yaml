@@ -42,15 +42,19 @@ steps:
   # out here and has the same answer: throw the emulator away and try again.
   #
   # `until_found` is checked *before* every pass, so a launch that already
-  # worked skips the loop entirely and a restart that worked exits at the top
-  # of the next pass, before spending another one. Three passes = three
-  # restarts.
+  # worked skips the loop entirely and a recovery that worked exits at the
+  # top of the next pass, before spending another one. Three passes = three
+  # goes at getting back to the home screen.
   - repeat:
       until_found: play_button
       max_iterations: 3
       steps:
+        # Not always a reboot: recover_to_home.yaml closes Android's crash
+        # dialog when that is all that is wrong -- seconds instead of three
+        # minutes -- and falls through to restart.yaml for everything else,
+        # including a dialog it could not close.
         - run_flow:
-            flow: restart
+            flow: recover_to_home
         - run_flow:
             flow: launch_tsum
           optional: true

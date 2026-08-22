@@ -34,8 +34,9 @@ class Templates:
     """Serves `max_fever` only.
 
     Deliberate: everything in this file is about the trigger-plus-timer path,
-    which is what runs when `templates/` has no FEVER BONUS banner. The banner
-    path has its own file, `test_fever_banner.py`.
+    which is what runs when `templates/` has no FEVER BONUS banner. With a
+    banner served, `FeverWatch` reads FEVER off the screen every frame instead
+    and the timer under test here never decides anything.
     """
 
     def __init__(self, have=True) -> None:
@@ -111,10 +112,23 @@ def test_it_reports_each_transition_once():
     assert watch.took_effect() is None
 
 
-def test_it_asks_for_the_max_fever_template():
+def test_it_asks_for_both_templates_and_runs_on_either():
+    """`max_fever` is the trigger, `fever_bonus` is the state -- both optional.
+
+    Asking for both is what lets the same class cover three installs: a
+    `templates/` with the banner reads FEVER off the screen, one with only the
+    meter infers it from a ten-second timer, and one with neither leaves FEVER
+    unhandled rather than failing. Only the middle case is this file's
+    subject, which is why its `Templates` serves the meter alone.
+    """
     templates = Templates()
-    FeverWatch(Matcher(), templates)
-    assert templates.asked == ["max_fever"]
+    watch = FeverWatch(Matcher(), templates)
+
+    assert templates.asked == ["max_fever", "fever_bonus"]
+    assert watch.enabled, "the meter alone is enough to run"
+    assert not watch.reads_state, "but without the banner it is a timer, not a read"
+
+    assert not FeverWatch(Matcher(), Templates(have=False)).enabled
 
 
 @pytest.mark.parametrize("seconds", [1.0, 10.0])

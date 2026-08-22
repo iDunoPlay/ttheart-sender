@@ -26,7 +26,18 @@ from ttheart_sender.game import tsum
 
 
 class Templates:
+    """Serves `max_fever` only, which is what makes this file about the radius.
+
+    Handing over a `fever_bonus` banner as well changes what `FeverWatch` is:
+    with a banner it reads FEVER off the screen every frame, without one it
+    infers it from the meter and a ten-second timer. The `Matcher` below
+    cannot tell the two templates apart, so serving both would leave these
+    tests arming a path they do not describe.
+    """
+
     def get(self, name):
+        if name != "max_fever":
+            raise KeyError(name)
         return f"{name}-template"
 
 
@@ -70,10 +81,19 @@ def _options(**over):
     return opts
 
 
+#: A capture size the LAYOUTS table has never seen, so the radius has to be
+#: estimated and `--radius-lock` has something to do. The real one (994x578)
+#: is measured, and `play_loop` takes the measured number outright -- which is
+#: its own test at the bottom of this section.
+UNMEASURED = (800, 480, 3)
+
+#: The live LDPlayer capture size, which LAYOUTS measures at 25px.
+MEASURED = (994, 578, 3)
+
+
 @pytest.fixture
 def rig(monkeypatch):
     """Drive the loop and record the radius `detect` is handed on each frame."""
-    frame = np.zeros((994, 578, 3), np.uint8)
     matcher = Matcher()
     palette = np.zeros((12, 3), np.float32)
     state = {"asked": [], "returns": [], "counts": []}
@@ -98,15 +118,16 @@ def rig(monkeypatch):
                  for i in range(n)]
         return tsums, r, palette
 
-    monkeypatch.setattr(tsum, "_settle", lambda drv, max_wait=0.0: frame)
     monkeypatch.setattr(tsum, "detect", fake_detect)
     monkeypatch.setattr(tsum, "find_chains", lambda *a, **kw: [])
     monkeypatch.setattr(tsum, "_click_shuffle",
                         lambda *a, **kw: state.setdefault("taps", []).append(1))
 
-    def run(opts, frames, arm_at=None):
+    def run(opts, frames, arm_at=None, shape=UNMEASURED):
         """Play `frames` frames, turning FEVER on before frame `arm_at`."""
         seen = {"n": 0}
+        frame = np.zeros(shape, np.uint8)
+        monkeypatch.setattr(tsum, "_settle", lambda drv, max_wait=0.0: frame)
 
         def stop_when(_frame):
             seen["n"] += 1
@@ -123,18 +144,31 @@ def rig(monkeypatch):
 # --------------------------------------------------------------------------
 # the lock
 # --------------------------------------------------------------------------
-def test_the_lock_takes_the_max_because_the_estimator_only_collapses(rig):
-    """Median would inherit the collapse; max survives it.
+def test_a_collapsed_read_never_gets_a_vote_on_the_lock(rig):
+    """The coverage gate screens the warm-up, so the summary can be the median.
 
     Over the captured round, 44% of three-frame medians land under 20px on a
-    board with ~26px faces, against 9% of maxima.
+    board with ~26px faces, against 9% of maxima -- which is why the lock took
+    the max before `_face_coverage` existed. The max is a workaround for a
+    dirty pool: it survives collapsed samples by ignoring them, but it also
+    inherits any over-read. Screening the pool instead is the fix, and once
+    the pool is clean the median is the honest summary.
+
+    Here 10px and 12px cover 6-9% of the board rect where 25-26px cover 35-40%,
+    so the two collapsed reads never reach the deque and the lock is the
+    median of the three that did.
     """
     rig.state["returns"] = [10.0, 26.0, 12.0, 25.0, 25.0, 25.0]
     rig.run(_options(radius_lock=3), frames=6)
 
-    # First three frames measure freely, then every later frame is handed 26.
+    # The first three frames measure freely, each handed what the last returned.
     assert rig.state["asked"][:3] == [None, 10.0, 26.0]
-    assert set(rig.state["asked"][3:]) == {26.0}, "the max of the warm-up, held"
+
+    locked = [line for line in rig.said if "radius locked" in line]
+    assert len(locked) == 1, rig.said
+    assert "25.0px" in locked[0], "median of the qualifying 26, 25, 25"
+    assert "median of 3: 26, 25, 25" in locked[0], "the collapsed reads never voted"
+    assert rig.state["asked"][-1] == 25.0, "and every later frame is handed it"
 
 
 def test_the_radius_survives_the_fever_transition(rig):
@@ -156,6 +190,25 @@ def test_with_the_lock_off_the_old_behaviour_is_exactly_preserved(rig):
     # the FEVER flip re-opens it -- which is the behaviour being replaced.
     assert rig.state["asked"][0] is None
     assert None in rig.state["asked"][1:], "the flip should still re-measure"
+
+
+def test_a_measured_layout_skips_the_estimator_altogether(rig):
+    """On the real capture size there is nothing to warm up.
+
+    Every tsum is the same size, so for a capture geometry the LAYOUTS table
+    has measured, the radius is a known constant rather than something to
+    estimate three times and vote on. That short-circuit is what runs in
+    practice -- the estimator path above only applies to a window size nobody
+    has measured -- and it protects the FEVER bug in the strongest possible
+    way: there is no free estimate for the flip to re-open.
+    """
+    rig.state["returns"] = [9.0] * 6           # a collapsing estimator...
+    rig.run(_options(radius_lock=3), frames=6, arm_at=3, shape=MEASURED)
+
+    assert rig.state["asked"] == [25.0] * 6, "...that is never asked, FEVER or not"
+    assert any("measured for this layout" in line for line in rig.said)
+    assert not any("radius locked" in line for line in rig.said), \
+        "nothing to lock -- it was never estimated"
 
 
 def test_a_refit_cannot_smuggle_a_collapsed_radius_past_the_lock(rig):

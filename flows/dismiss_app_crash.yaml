@@ -1,0 +1,37 @@
+name: dismiss_app_crash
+description: Clear Android's "TsumTsum isn't responding" dialog by tapping Close app
+
+# The cheap crash. When the game hangs hard enough, Android puts its own ANR
+# dialog over it -- the title plus two rows, "Close app" and "Wait". That is
+# good news compared to everything else that stops a launch: the emulator is
+# healthy, only the app is dead. Close app kills it and drops straight back to
+# LDPlayer's home screen, which is exactly where launch_tsum.yaml starts, so
+# recovery costs seconds instead of the three-minute emulator reboot in
+# restart.yaml.
+#
+# app_crashed.png is the whole dialog, title and both rows -- a wall of text,
+# which is what makes matching it safe. Clicking it is the fiddly part: a
+# match reports its centre, and on this crop that lands at (179, 99), just
+# inside the right edge of the "Close app" label. Close enough to work, close
+# enough to stop working if the crop ever shifts, so the offset below aims at
+# the middle of that label instead -- (148, 102) on the template. Re-snip the
+# template and both numbers have to be re-measured with it:
+#     python main.py snip app_crashed
+#
+# Not safe to call blind on a screen with no dialog -- find_click below is
+# required, so the flow fails and says so. Callers go through
+# recover_to_home.yaml, which gates it on the dialog actually being there and
+# owns the fallback when closing it does not work.
+
+steps:
+  - find_click:
+      template: app_crashed
+      offset: [-30, 3]
+      timeout: 2
+
+  # Proof the tap landed on the row and not the gap between them. Whether
+  # what is behind it is really LDPlayer's home screen is the caller's
+  # question -- recover_to_home.yaml is the one that asks it.
+  - wait_until_gone:
+      template: app_crashed
+      timeout: 10

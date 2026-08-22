@@ -723,6 +723,7 @@ dataset:
   delay: 0.25             # wait for the mark to render before photographing it
   frames: 3               # only what changed in ALL of them counts as a mark
   gap: 0.05
+  floor_mult: 8.0         # a mark must beat the board's own noise floor by this much
   max_motion: 12.0        # drop samples taken while the board was still falling
 
   max_mb: 2048            # stop once the whole dataset folder reaches this
@@ -772,7 +773,14 @@ look like one character — and exits non-zero when the answer is no.
 collection ran all night and produced 5,729 samples with no usable label in
 any of them, because the highlight was photographed 0.10s after the press,
 before the game had drawn it. The defaults above fix that; this command is how
-you confirm it. Full write-up in [DATASET-FINDINGS.md](DATASET-FINDINGS.md).
+you confirm it.
+
+They do work: the third collection, 11,537 samples, reads 1.95x on the
+appearance test against a 1.3 bar and is worth training on. It also moved
+`floor_mult` from 5 to 8 — a tsum reacting at less than 8x its own board's
+noise floor turns out to be indistinguishable from the board average, so the
+old default spent about a third of every label on noise. Full write-up in
+[DATASET-FINDINGS.md](DATASET-FINDINGS.md).
 
 ### What it costs
 

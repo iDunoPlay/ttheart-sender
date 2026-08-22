@@ -1,9 +1,10 @@
-# The first collection carried no labels
+# Getting a label out of the game
 
-Status: **premise confirmed, one number left to measure.**
-The game does mark matches and the mark is clean (round four). Board motion is
-fixed. What remains is *when* the mark arrives: run `hold --hold 3.0`, which
-now reports onset, and set `dataset.delay` from what it says.
+Status: **settled -- the third collection is labelled and worth training on.**
+11,537 samples score 1.95x on the appearance test against a 1.3 bar, and the
+delay was never the blocker: the threshold was. The remaining tuning question
+(`floor_mult` 5, 6, or something else) is answered below, at 8. Rounds one to
+seven, which is how that was arrived at, follow.
 
 `dataset.enabled: true` ran overnight on 2026-08-19 and produced **5,729
 samples across 296 sessions, 803MB**, between 19:46 and 08:59. None of it is
@@ -393,43 +394,143 @@ because a first-frame peak has two readings a single hold cannot separate: the
 mark renders faster than a press can be photographed, or the baseline already
 differed. The message names both and still recommends no number.
 
+## Eighth round: the collection is labelled
+
+`dataset.enabled: true` ran from 2026-08-20 to 2026-08-22 on the schema 2
+defaults and produced **11,537 samples across 743 sessions, 1,479MB** -- every
+row schema 2, every row captured at the same settings (0.25s, 3 frames, 0.05s
+gap, 5x floor). 2,132 of them are fever boards.
+
+```
+python -m ttheart_sender.game.tsum dataset --dir H:/Tsum/dataset --appearance 1500
+```
+
+| measure | schema 1 | 19 samples | **11,537 samples** | bar |
+|---|---:|---:|---:|---|
+| board motion p50 | 7.8 | 3.0 | **3.1** | under 8 |
+| samples past the 8.0 threshold | 48.8% | 0.0% | **9.5%** | near zero |
+| share of board read as marked | 48.7% | 23.3% | **14.9%** | one character's worth |
+| appearance lift | 1.15x | 1.22x | **1.95x** | over 1.3, ideally 1.6 |
+| k-means agreement vs. base rate | 22.9 / 21.9 | 23.0 / 18.8 | **37.1 / 26.1** | above base |
+
+**The marks are in the frames.** The lift clears both the 1.3 bar and the 1.6
+"cleanly" bar, on 75x the samples the MARGINAL verdict was issued on, and
+k-means now agrees with the label half again as often as random marking does
+-- which is the shape a useful label has: agreeing more often than chance,
+disagreeing often enough to be worth collecting.
+
+Open question 1 (whether `dataset.delay` was ever the blocker) resolves as
+**no**. Nothing about the delay changed between the 19-sample run at 1.22x and
+this one at 1.95x. Open question 2 (why a mid-round board reads worse than an
+idle one) resolves as **it does not** -- it read worse because 19 samples
+cannot measure a 2x effect, which is what the MARGINAL band exists to say.
+
+### The threshold was the whole story, and 5x was still too low
+
+Open question 3 -- whether `floor_mult` should be 5, 6 or something else --
+was a 19-sample guess. Re-swept on this corpus, scoring every tsum outside the
+90px glow by its Lab distance to the pressed tsum against the board average:
+
+| band, as a multiple of the board's own floor | tsums per board | appearance lift | same kind as pressed |
+|---|---:|---:|---:|
+| 0-1 | 22.4 | 0.97x | 22.6% |
+| 1-2 | 9.5 | 1.00x | 23.8% |
+| 2-3 | 3.9 | 0.99x | 24.1% |
+| 3-4 | 1.8 | 0.98x | 24.7% |
+| 4-6 | 2.1 | 0.99x | 25.0% |
+| 6-8 | 1.0 | 0.99x | 26.0% |
+| **8-12** | **1.4** | **1.14x** | **34.3%** |
+| **12-20** | **1.5** | **1.14x** | **36.1%** |
+| **20+** | **2.8** | **1.22x** | **40.0%** |
+
+Base rate over all far tsums: 25.1% same kind, 1.00x by construction. 800
+samples, 37,066 tsums.
+
+Nothing below **8x the floor carries any signal at all** -- lift 1.00 and
+same-kind indistinguishable from marking at random, in every band. The signal
+switches on between 6-8x and 8-12x and does not fade above it. So
+`floor_mult: 5` was admitting about 3 noise tsums per board on top of ~5.7
+real ones, and roughly a third of every collected label was noise.
+
+The break holds when the corpus is split by fever (1.14x above 8x either way),
+by detection count (over-split boards included), and by board stillness in two
+of three terciles. It fails on the stillest third, where the floor is under
+2.2 and 8x lands at ~17 absolute -- inside the render and JPEG noise. So the
+fixed 8.0 stays underneath the multiple as a floor, as it already did.
+
+**The multiple, not the absolute change, is what discriminates.** Tested the
+other way round, with an absolute bar and no floor relative to it:
+
+| bar | marks per board | lift | same kind | boards labelled with nothing |
+|---|---:|---:|---:|---:|
+| abs 8 (schema 1) | 12.3 | 1.06x | 29.5% | 30 / 800 |
+| abs 8, **5x floor** (old default) | 6.8 | 1.13x | 35.0% | 40 / 800 |
+| abs 8, **8x floor** (new default) | 5.4 | 1.18x | 37.8% | 69 / 800 |
+| abs 40, no floor | 5.3 | 1.19x | 37.7% | 119 / 800 |
+| abs 40, 8x floor | 4.6 | 1.22x | 39.1% | 128 / 800 |
+| abs 80, 8x floor | 3.2 | 1.26x | 40.5% | 201 / 800 |
+
+8x floor dominates abs 40: the same label quality for 50 more boards kept. And
+a large absolute change that does *not* clear the floor multiple is noise --
+tsums over 40 absolute but between 4x and 8x their own board's floor read
+0.99x lift and 27.2% same-kind, which is a busy board moving, not a mark.
+Above 80 the gains are bought purely with recall, which a corpus this size has
+no reason to spend.
+
+**`floor_mult` default is now 8.0** (`config.yaml`, `DatasetConfig`,
+`--dataset-floor-mult`). Re-scored at it, this collection reads **2.23x** with
+39.8% k-means agreement against a 26.0% base rate, at 11.6% of the board
+marked.
+
+### A bug this found: the label's bar was silently re-scoring `--verify-hold`
+
+`marked_by_game` computed one bar and used it for two jobs -- the label it
+hands the collector, and the trim `--verify-hold` applies to the stroke. The
+comment said `floor_mult` of 0 "keeps the old fixed behaviour for
+`--verify-hold`, whose A/B was measured under it", and the call site passes 0
+when not collecting, so the intent was right. But with both features on, the
+collector's `floor_mult` re-scored the trim as well -- a stricter bar dropping
+more chain members, in the one combination nobody would think to look at, and
+it would have got stricter again with this change.
+
+Split: the trim always runs at the fixed `threshold`, and `floor_mult` only
+ever raises the bar the *label* is scored at. Pinned by a test.
+
 ## What has not been settled
 
-1. **Whether the delay matters at all.** Three attempts, no onset. With the
-   clock now starting at `mouseDown`, a first-frame peak increasingly reads as
-   "the mark is up before it can be photographed" rather than a broken
-   baseline — in which case `dataset.delay` was never the blocker and the
-   threshold was. One more `hold` on a frame with a clean `hold_diff.png`
-   settles which.
-2. **Why a mid-round board reads worse than an idle one.** The collector at
-   6x floor reaches 1.35x where `hold` is unambiguous, and restricting to
-   landed presses does not close the gap. Score popups and the previous
-   chain's residue are the obvious suspects — both are always present in play
-   and absent under `hold` — but 19 samples cannot show it. This is the
-   question the next collection has to answer.
-3. **Whether `floor_mult` should be 5, 6, or something else.** Chosen from a
-   19-sample sweep where 6 read best and the differences were small. Re-sweep
-   with `--floor-mult` once a real collection exists.
-3. **Whether the `before` crop needs to be clean.** The previous press's glow
-   survives into it. If collection continues, the crop should be taken from a
-   frame with no active glow, or the reading will keep charging that
-   disappearance to the wrong tsum.
-4. **Whether the board can be still enough in fast play.** `max_motion`
-   refused nothing in this 19-sample run, but that round was not a fast one.
-   The refusal counts in the round summary are the measurement.
+1. **Whether `floor_mult` should go higher still.** 8 is where the signal
+   switches on, not where it peaks -- quality keeps creeping up to 80
+   absolute, bought with boards that end up labelled with nothing. Worth
+   re-sweeping once something is actually trained on this, since that is the
+   only test that prices recall against purity properly.
+2. **Whether the `before` crop needs to be clean.** The previous press's glow
+   survives into it, and the reading charges that disappearance to the wrong
+   tsum. Unchanged from before, and now the cheapest remaining source of
+   noise in an otherwise usable label.
+3. **Over-detection.** Boards in this collection run to 110 detections at a
+   median radius of 19.8px against a real board of ~50-60 tsums; p90 is 85.
+   The label is now good enough to measure this against rather than guess at
+   -- a tsum the game marks that detection split in two is visible in the
+   data.
+4. **Whether the board can be still enough in fast play.** 9.5% of samples
+   sit past the 8.0 motion threshold, against 0% in the 19-sample run, which
+   is the first honest measurement of this. `max_motion` at 12.0 is what
+   keeps the worst of them out; nothing yet says whether 12 is the right
+   number.
 
 ## Related, from the same pass
 
 `docs/TODO-blob-adjacency.md` item 2 names the missing ingredient for settling
 `--mode blob`: *"negative link examples (pairs a human marks as not chainable),
 which the `label` flow does not currently collect."* A working collection is
-exactly that ingredient — every tsum the game declines to mark is a negative
-example, free and in bulk. That item stays blocked until item 1 above clears.
+exactly that ingredient -- every tsum the game declines to mark is a negative
+example, free and in bulk. **That item is now unblocked**: 11,537 labelled
+boards at ~5.4 marks per board leave roughly 40 negatives each.
 
 Also confirmed while measuring: schema 1 recorded boards with up to **110**
 detections at a median radius of **19.8px**, against a real board of ~50-60
 tsums, and one sample in the first session is a pre-round "READY" screen with
 23 phantom detections on empty water. The play loop's plausibility gate let it
 through. Over-detection is a separate problem from this one and is not
-addressed here, but the collection is a good corpus for it — the images are
+addressed here, but the collection is a good corpus for it -- the images are
 fine even where the labels are not.

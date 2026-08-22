@@ -378,3 +378,63 @@ def test_an_onset_in_the_very_first_frame_is_refused(tmp_path):
 def test_a_hold_with_no_mark_reports_no_onset(tmp_path):
     """Nothing to time, so nothing is said -- the verdict above already spoke."""
     assert _onset([0, 0, 0, 0]) == ""
+
+
+# -- the label bar and the trim bar are not the same number -----------------
+
+def test_the_floor_relative_bar_labels_but_never_trims(monkeypatch):
+    """`floor_mult` raises the label's bar and leaves `--verify-hold`'s alone.
+
+    Only one caller trims: `--verify-hold`, whose A/B was measured against the
+    fixed `--hold-threshold` and lost decisively under it. `floor_mult` exists
+    because that fixed number sits inside a live board's own noise and made
+    every collected label read like half the board -- but applying it to the
+    trim as well would quietly re-score `--verify-hold` in exactly the
+    combination where collection happens to be on too, which is the one place
+    nobody would look for it.
+
+    So: a chain member that clears the fixed threshold but not the
+    floor-relative bar is dragged, and is not in the label.
+    """
+    import numpy as np
+
+    size = 60
+    before = np.zeros((size, size, 3), np.uint8)
+    # A board with a lively floor: 12.0 of change everywhere, so a 5x bar
+    # lands at 60 and the fixed 8.0 admits anything at all.
+    frame = np.full((size, size, 3), 12, np.uint8)
+    import cv2
+    cv2.circle(frame, (45, 15), 5, (200, 200, 200), -1)   # a real mark
+    monkeypatch.setattr(tsum.time, "sleep", lambda s: None)
+    drv = SimpleNamespace(grab=lambda: frame)
+
+    tsums = [tsum.Tsum(x=15.0, y=15.0, r=8.0, kind=1, colour=(0, 0, 0)),
+             tsum.Tsum(x=45.0, y=15.0, r=8.0, kind=1, colour=(0, 0, 0)),
+             tsum.Tsum(x=15.0, y=45.0, r=8.0, kind=1, colour=(0, 0, 0)),
+             tsum.Tsum(x=45.0, y=45.0, r=8.0, kind=1, colour=(0, 0, 0))]
+    seen: dict = {}
+    kept = tsum.marked_by_game(drv, before, (0, 0, size, size), tsums, [0, 1, 2],
+                               delay=0.0, threshold=8.0, aura=0.0,
+                               floor_mult=5.0, out=seen)
+
+    assert seen["bar"] > 8.0, "the label is scored against the board's own floor"
+    assert kept == [0, 1, 2], "the trim still runs at the fixed threshold"
+    assert 2 not in seen["marked"], "but the floor-level change is not a label"
+
+
+def test_the_collector_scores_marks_at_eight_times_the_floor():
+    """The default that the 11,537-sample collection settled.
+
+    Swept over that corpus, tsums reacting between 2x and 8x the board's own
+    floor are no more the pressed character than the board average is -- lift
+    1.00 against a 25% same-kind base rate -- and everything above 8x carries
+    the signal. The first tuned value, 5, came from 19 samples and spent about
+    a third of every label on noise.
+    """
+    from pathlib import Path
+
+    from ttheart_sender.config import DatasetConfig
+
+    assert DatasetWriter(Path("x")).floor_mult == 8.0
+    assert DatasetConfig().floor_mult == 8.0
+    assert tsum.play_defaults().dataset_floor_mult == 8.0

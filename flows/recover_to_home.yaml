@@ -1,0 +1,43 @@
+name: recover_to_home
+description: Get back to LDPlayer's home screen -- the cheap way when it works, the reboot when it doesn't
+
+# Same contract as restart.yaml, and the same place to hand back to
+# launch_tsum.yaml: LDPlayer sitting on its home screen with the game not
+# running. The difference is that this one checks first whether the emulator
+# actually needs throwing away.
+#
+# Often it does not. When the game hangs hard enough Android puts its own
+# "TsumTsum isn't responding" dialog over it, and that dialog is good news:
+# the app is dead but the emulator is fine, so Close app alone gets us where
+# restart.yaml would -- in seconds, not the three minutes a reboot costs.
+#
+# Everything else -- a boot stuck on the splash, an ad no click will shift, a
+# game part way through an update -- looks the same from out here and has the
+# same answer, so it falls through to restart.yaml. So does a crash dialog
+# that would not close: only ldplayer_homescreen proves the tap worked, and
+# without that proof this reboots rather than hand launch_tsum a covered
+# screen. That makes the flow safe to call again and again -- a dialog that
+# survives one pass gets a reboot on the next.
+
+steps:
+  - if_found:
+      template: app_crashed
+      timeout: 2
+      then:
+        - run_flow:
+            flow: dismiss_app_crash
+          optional: true
+
+        # The verdict. Close app leaves LDPlayer's wallpaper behind it, so
+        # finding that is proof the app is gone; anything else means the
+        # dialog is still up and the cheap path failed.
+        - if_found:
+            template: ldplayer_homescreen
+            timeout: 20
+            else:
+              - log: crash dialog would not close -- restarting LDPlayer
+              - run_flow:
+                  flow: restart
+      else:
+        - run_flow:
+            flow: restart
