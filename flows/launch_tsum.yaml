@@ -51,22 +51,41 @@ steps:
       timeout: 30
     optional: true
 
-  # The ad also turns up *after* the game has loaded, which the pass above is
-  # too early to catch. One more go and ten seconds is far cheaper than the
-  # emulator restart the caller reaches for next.
+  # Nothing on the main screen yet. Two different things keep it away and they
+  # want opposite answers, so ask about the update first: an Extra Download
+  # prompt means this machine's copy of the game has a version to pull, and no
+  # amount of ad-closing gets past it.
+  #
+  # No timeout on that check, on purpose. Whether the prompt appears at all
+  # depends on the installed version, so it is never something to wait for --
+  # by the time the 30s above has run out it is either on screen or this launch
+  # has no update to do. An up-to-date game therefore pays nothing for the
+  # check and cannot fail on it: it drops straight through to the ad path,
+  # which is what this step did before the check existed.
   - if_found:
       template: play_button
-      then:
+      else:
         - if_found:
             template: extra_download
-            timeout: 10
             then:
-                - run_flow:
-                    flow: game_update
-      else:
-        - run_flow:
-            flow: dismiss_ldplayer_ad
-        - wait_for:
-            template: play_button
-            timeout: 10
-          optional: true
+              - run_flow:
+                  flow: game_update
+              # game_update hands back on the main screen with the
+              # announcements closed, so this is just the checkpoint again --
+              # optional for the same reason as the one above, and 60s because
+              # the game reloads itself once the download is in.
+              - wait_for:
+                  template: play_button
+                  timeout: 60
+                optional: true
+
+            # The ad also turns up *after* the game has loaded, which the pass
+            # above is too early to catch. One more go and ten seconds is far
+            # cheaper than the emulator restart the caller reaches for next.
+            else:
+              - run_flow:
+                  flow: dismiss_ldplayer_ad
+              - wait_for:
+                  template: play_button
+                  timeout: 10
+                optional: true

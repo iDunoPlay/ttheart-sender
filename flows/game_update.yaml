@@ -2,13 +2,14 @@ name: game_update
 description: Take the game through its "Extra Download" update, or restart when that is not what is on screen
 
 # The game stops on an Extra Download prompt when it has an update to pull
-# before it will let anyone in. Tapping OK starts the download and then there
-# is nothing to do but sit out a transfer that takes minutes, not seconds.
+# before it will let anyone in. Whether that prompt ever appears depends on the
+# version installed on the machine, so this flow is only ever reached from
+# launch_tsum.yaml *after* the prompt has actually been seen -- it is not a
+# step every launch goes through.
 #
-# Ends where launch_tsum.yaml's caller expects to be handed back: the game
-# drawing its own screens again. announcement_close_button is the first thing
-# it puts up after an update, so that is the proof the download finished --
-# closing the announcements is launch.yaml's job, not this flow's.
+# Tapping OK starts the download and then there is nothing to do but sit out a
+# transfer that takes minutes, not seconds. Hands back where launch_tsum.yaml
+# does: the game's main screen with nothing on top of it.
 #
 # Anything other than the prompt is not an update and nothing in here can fix
 # it, so that path hands over to restart.yaml -- same arrangement as
@@ -29,12 +30,30 @@ steps:
         # The download. if_found's own timeout polls until the template shows
         # up, so this *is* the "loop until found" -- a repeat around it would
         # only re-scan a screen that is already being scanned. Ten minutes is
-        # sized for the transfer, not the render; the else branch is the
-        # verdict, so a download that never lands gets the emulator thrown
-        # away rather than handing the caller a stuck progress bar.
+        # sized for the transfer, not the render. announcement_close_button is
+        # the first thing the game draws once it is back, which makes it both
+        # the proof the update finished and the thing to clear next.
         - if_found:
             template: announcement_close_button
             timeout: 600
+            then:
+              # Same loop as launch.yaml's: each pass gives the next
+              # announcement 3s to render, and the first pass where nothing
+              # shows up ends it -- find_click fails, stop_on_failure breaks
+              # out, and `optional` keeps that expected failure off the run's
+              # tally. times caps a stuck screen at 20 clicks.
+              - repeat:
+                  times: 20
+                  stop_on_failure: true
+                  delay: {min: 0.4, max: 0.7}
+                  steps:
+                    - find_click:
+                        template: announcement_close_button
+                        timeout: 3
+                optional: true
+
+            # The verdict: a download that never lands gets the emulator thrown
+            # away rather than handing the caller a stuck progress bar.
             else:
               - log: update never finished -- restarting LDPlayer
               - run_flow:
