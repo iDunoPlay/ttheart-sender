@@ -1,0 +1,45 @@
+name: game_update
+description: Take the game through its "Extra Download" update, or restart when that is not what is on screen
+
+# The game stops on an Extra Download prompt when it has an update to pull
+# before it will let anyone in. Tapping OK starts the download and then there
+# is nothing to do but sit out a transfer that takes minutes, not seconds.
+#
+# Ends where launch_tsum.yaml's caller expects to be handed back: the game
+# drawing its own screens again. announcement_close_button is the first thing
+# it puts up after an update, so that is the proof the download finished --
+# closing the announcements is launch.yaml's job, not this flow's.
+#
+# Anything other than the prompt is not an update and nothing in here can fix
+# it, so that path hands over to restart.yaml -- same arrangement as
+# recover_to_home.yaml, and it is what makes this safe to call speculatively.
+
+steps:
+  # `then`/`else` line up with `template`, one level in from if_found. Indent
+  # them any further left and YAML hands them to the step instead, which drops
+  # the branch silently -- no error, the flow just does nothing.
+  - if_found:
+      template: extra_download
+      timeout: 5
+      then:
+        - find_click:
+            template: ok_button
+            timeout: 5
+
+        # The download. if_found's own timeout polls until the template shows
+        # up, so this *is* the "loop until found" -- a repeat around it would
+        # only re-scan a screen that is already being scanned. Ten minutes is
+        # sized for the transfer, not the render; the else branch is the
+        # verdict, so a download that never lands gets the emulator thrown
+        # away rather than handing the caller a stuck progress bar.
+        - if_found:
+            template: announcement_close_button
+            timeout: 600
+            else:
+              - log: update never finished -- restarting LDPlayer
+              - run_flow:
+                  flow: restart
+      else:
+        - log: no extra_download prompt -- restarting LDPlayer
+        - run_flow:
+            flow: restart

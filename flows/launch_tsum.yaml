@@ -56,6 +56,13 @@ steps:
   # emulator restart the caller reaches for next.
   - if_found:
       template: play_button
+      then:
+        - if_found:
+            template: extra_download
+            timeout: 10
+            then:
+                - run_flow:
+                    flow: game_update
       else:
         - run_flow:
             flow: dismiss_ldplayer_ad
