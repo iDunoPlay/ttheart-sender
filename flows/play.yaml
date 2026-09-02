@@ -18,6 +18,19 @@ vars:
   # Stillness alone is never enough: a healthy menu measures pixel-identical.
   stuck_check: false
 
+  # The two experiments the panel ticks, and their off values. Both are wired
+  # into `play_tsum`'s options below, so these lines are the revert as well as
+  # the default: set them here and the panel's tick boxes are the same switch
+  # from the other end.
+  #
+  # `fit_effort` -- how many restarts the per-frame colour fit gets. 1 is what
+  # every measurement in docs/DATASET-FINDINGS.md was taken under; 3 is the
+  # steadiest measured. See the option below for what each buys.
+  fit_effort: 1
+  # `verify_clears` -- re-read the board after each drag and count what left
+  # it. A measurement, not a play rule: it costs a capture per drag.
+  verify_clears: false
+
 steps:
   # Clear anything left over from a previous round (the score tally, the High
   # Score popup, a login bonus) before looking for Play. Without this the flow
@@ -202,9 +215,53 @@ steps:
         # and NORMAL lines in the log, instead of a run of `skip` lines.
         fever_min_tsums: 12
 
+        # `fit_effort` -- READ THE SAME BOARD THE SAME WAY TWICE.
+        # Colour, detection and the chain all rest on one k-means fit, and
+        # that fit is a coin flip more often than anyone had measured.
+        #
+        # THE PROBLEM IT ATTACKS. `detect` clusters the crop's colours with
+        # k-means, which starts from seeded random centres. Re-fitting ONE
+        # collected frame at three seeds -- same board, same `k`, same locked
+        # radius, nothing else changed -- the two reads agree on only 73% of
+        # the tsums they find, and the count swings by a mean of 9 tsums
+        # between them. A quarter of the board is decided by the seed. Every
+        # number downstream is built on whichever roll came up: which tsums
+        # exist, what colour they are, which chain is best.
+        #
+        # WHAT IT COSTS AND BUYS, over 60 collected boards:
+        #     level  two reads agree  count spread  per fit
+        #       1          73.1%        9.1 tsums     51ms   <- today
+        #       2          83.3%        6.2 tsums    138ms
+        #       3          91.4%        3.0 tsums    349ms
+        # Sampling more of the board does not help -- 160k pixels instead of
+        # 40k reads 82.3%, no better than level 2 at four times the price. It
+        # is the number of restarts that matters.
+        #
+        # WHY THE COST IS SMALL. The loop caches its centres and only fits
+        # when there is nothing to reuse: the first frame, a fever transition,
+        # a shuffle, a recalibration. Measured in this log, about five fits in
+        # a round -- so level 3 costs ~1.5s of a round that runs for minutes,
+        # and it spends it exactly on the frames that are hardest to read.
+        #
+        # WHY IT IS STILL OFF. Stability is not the same as correctness. A
+        # steadier fit reads the same board the same way twice; nothing
+        # offline says the way it settles on is the better one, and the
+        # collection cannot say either, because every sample in it was taken
+        # at level 1. A round can.
+        #
+        # WHAT TO WATCH LIVE: the `recalibrated (N -> M tsums)` lines. Today
+        # they swing wildly; with this on the two counts should sit closer
+        # together, and there should be fewer of them. Then the count that
+        # matters, `dragged`, over a whole round against a level 1 round.
+        #
+        # HOW TO TURN IT ON: tick "Steady colour fit" in the panel, or set
+        # `fit_effort: 3` in this flow's `vars:` at the top. The panel wins
+        # while the tray is driving, because it passes the variable in.
+        fit_effort: "${fit_effort}"
+
         # `palette` -- READ THE BOARD THROUGH COLOURS LEARNED FROM PAST ROUNDS.
         # This is the one line that turns collected data into played rounds,
-        # and like the four above it is off until you add it.
+        # and like the others above it is off until you add it.
         #
         # Normally the colours are re-derived by k-means on every frame, so a
         # cluster id means nothing outside the frame it was fitted on -- the
@@ -296,6 +353,26 @@ steps:
         # boards; if it is most of them, too low. `cleared` is the number that
         # decides, and `--verify-clears` is what measures it.
         verify_reach: 260
+
+        # `verify_clears` -- MEASURE WHAT ACTUALLY LEFT THE BOARD.
+        # Not a play rule: a measurement, and the one this project owes
+        # itself. Everything `verify_reach` claims rests on the assumption
+        # that a drag with one refused member clears NOTHING -- the behaviour
+        # the code notes elsewhere as "a 3-chain it only marks two of pops
+        # nothing at all". If the game is lenient and pops the accepted
+        # members anyway, today already gets those tsums and the check above
+        # buys delay and nothing else. No collection can tell those apart,
+        # because none of them ever recorded what cleared.
+        #
+        # Turning this on makes the loop re-read the board after each drag and
+        # count what left it, which is exactly that missing number. It costs a
+        # capture per drag, so it is for a measuring round, not for playing.
+        # `PlayReport.cleared` and the `tsum_tsums_cleared` variable carry the
+        # answer.
+        #
+        # HOW TO TURN IT ON: tick "Measure tsums cleared" in the panel, or set
+        # `verify_clears: true` in this flow's `vars:` at the top.
+        verify_clears: "${verify_clears}"
 
   - find_click:
       template: cancel_button

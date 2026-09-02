@@ -143,6 +143,19 @@ class PanelSettings:
     #: `dataset.enabled` the first time the panel runs, and the panel's own
     #: switch after that -- see :meth:`..tray.app.TrayApp._seed_collection`.
     collect_data: bool = False
+    #: Spend more restarts on the per-frame colour fit (`fit_effort` 3 rather
+    #: than 1). Measured over 60 collected boards, two reads of ONE frame at
+    #: level 1 agree on 73% of the tsums they find and their counts differ by
+    #: nine; at level 3 that is 91% and three. Off by default like every other
+    #: detection rule here: a steadier read is not the same as a better one,
+    #: and only a played round can say which this is.
+    steady_fit: bool = False
+    #: Re-read the board after each drag and count what actually left it
+    #: (`verify_clears`). A measurement, not a play rule -- it costs a capture
+    #: per drag and answers the one question no collection can: whether the
+    #: game clears a chain it only partly accepted. Off unless a measuring
+    #: round is being played.
+    measure_clears: bool = False
     purchase: Dict[str, bool] = field(default_factory=_default_purchase)
 
     # -- conversion ------------------------------------------------------

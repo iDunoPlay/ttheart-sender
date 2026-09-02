@@ -178,24 +178,67 @@ class Chain:
         return len(self.nodes)
 
 
+#: How hard the per-frame fit tries, as (attempts, iterations, epsilon).
+#:
+#: The fit is k-means with a seed, so the same frame can be read twice and
+#: come back different -- and how different is measured. Over 60 collected
+#: boards, re-fitting one frame at three seeds and comparing which tsums each
+#: read found:
+#:
+#: ===== ================== ========== ============= ==========
+#: level criteria           two reads  count spread  cost / fit
+#: ===== ================== ========== ============= ==========
+#: 1     4, 20, 1.0         73.1%      9.1 tsums     51ms
+#: 2     8, 40, 0.5         83.3%      6.2 tsums     138ms
+#: 3     16, 60, 0.25       91.4%      3.0 tsums     349ms
+#: ===== ================== ========== ============= ==========
+#:
+#: At level 1 a quarter of the board is decided by the seed, and the count
+#: swings by nine tsums between two reads of one frame. Sampling more pixels
+#: does not help -- 160k instead of 40k reads 82.3%, no better than level 2 at
+#: four times the cost -- so it is the fit's own restarts that matter, not how
+#: much of the board it looks at.
+#:
+#: Level 1 is the default because it is what every measurement in
+#: `docs/DATASET-FINDINGS.md` was taken under. Raising it costs nothing per
+#: *frame*: the loop caches its centres and only refits on a fever transition,
+#: a shuffle or a recalibration -- about five times in a round, so level 3
+#: costs ~1.5s of a round that runs for minutes. See `fit_effort` in
+#: `flows/play.yaml`.
+FIT_EFFORT = {1: (4, 20, 1.0), 2: (8, 40, 0.5), 3: (16, 60, 0.25)}
+
+
 def _quantise(bgr: np.ndarray, k: int, palette: Optional[np.ndarray] = None,
-              seed: int = 0) -> tuple[np.ndarray, np.ndarray]:
+              seed: int = 0, effort: int = 1) -> tuple[np.ndarray, np.ndarray]:
     """k-means the image in Lab space. Returns (label image, cluster centres).
 
     Pass `palette` to reuse centres from an earlier frame. Worth doing in a live
     loop: the fit is most of the cost here and the colours on the board don't
     change mid-run, so refitting every frame buys nothing.
+
+    `effort` picks how many restarts the fit gets when there is no palette to
+    reuse -- see :data:`FIT_EFFORT`, which measures what each level buys.
     """
     lab = cv2.cvtColor(cv2.GaussianBlur(bgr, (5, 5), 0), cv2.COLOR_BGR2LAB)
     flat = lab.reshape(-1, 3).astype(np.float32)
 
     if palette is None:
         # Fitting on every pixel is pointless -- 40k samples pins the centres
-        # just as well.
+        # just as well, and measured against 160k it is not the sampling that
+        # limits the fit.
         step = max(1, flat.shape[0] // 40_000)
-        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0)
+        # A level that is not one of the three plays at today's, rather than
+        # raising: this value can arrive from a flow's `options:` mapping, and
+        # a typo there must not end a round in the middle of a board.
+        try:
+            level = int(effort)
+        except (TypeError, ValueError):
+            level = 1
+        attempts, iters, eps = FIT_EFFORT.get(level, FIT_EFFORT[1])
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, iters, eps)
         cv2.setRNGSeed(seed)
-        _, _, palette = cv2.kmeans(flat[::step], k, None, criteria, 4, cv2.KMEANS_PP_CENTERS)
+        _, _, palette = cv2.kmeans(flat[::step], k, None, criteria, attempts,
+                                   cv2.KMEANS_PP_CENTERS)
 
     # ||x-c||^2 = ||x||^2 - 2x.c + ||c||^2, and ||x||^2 is constant per pixel so
     # it drops out of the argmin. Leaves one N*k GEMM instead of materialising an
@@ -569,6 +612,7 @@ def detect(
     hole_frac: float = 0.8,
     palette: Optional[np.ndarray] = None,
     scale: float = 1.0,
+    fit_effort: int = 1,
     debug_dir: Optional[Path] = None,
 ) -> tuple[list[Tsum], float, np.ndarray]:
     """Locate every tsum. Coordinates and radius come back in `bgr` pixels.
@@ -577,13 +621,16 @@ def detect(
     quadratic in resolution, and tsums are big enough that half-size still
     separates them. Measured on a 523x542 board: 49ms at 1.0 -> 13ms at 0.5,
     same chain, a couple of deeply buried tsums lost.
+
+    `fit_effort` only matters when there is no `palette` to reuse, and decides
+    how repeatable that fit is -- see :data:`FIT_EFFORT`.
     """
     if scale != 1.0:
         bgr = cv2.resize(bgr, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
         if radius is not None:
             radius *= scale
 
-    labels, centres = _quantise(bgr, k, palette)
+    labels, centres = _quantise(bgr, k, palette, effort=fit_effort)
     skip = _background_clusters(labels, centres)
     # Dark pixels are two different things at once: every tsum's outline, ears
     # and shadow, AND the face of a black tsum like classic Mickey. Treating
@@ -1429,6 +1476,13 @@ class PlayReport:
     #: too high and the check is being bought on chains that did not need it,
     #: zero and the threshold never triggered.
     verified: int = 0
+    #: Checks whose frame showed no mark anywhere on the board. The chain is
+    #: dragged as proposed rather than trimmed on a reading that failed -- a
+    #: blank frame is the game saying nothing, not the game saying no. Worth
+    #: printing: it is the share of the `verified` cost that bought nothing,
+    #: and a run where it is most of them is a capture problem, not a chain
+    #: problem.
+    unreadable: int = 0
     #: Why the loop ended -- shown by the CLI and returned to the flow.
     reason: str = ""
     #: True when the stop key ended it rather than a normal exit condition.
@@ -1454,6 +1508,9 @@ class PlayReport:
             # benefit above: the two together are the whole trade.
             share = f" ({100 * self.verified / self.played:.0f}% of drags)" if self.played else ""
             out += f"; checked {self.verified} chain(s) before dragging{share}"
+            if self.unreadable:
+                out += (f", {self.unreadable} of which read nothing and were "
+                        f"dragged as proposed")
         return out
 
 
@@ -2372,7 +2429,8 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
             tsums, radius, palette = detect(crop, k=opts.k, radius=locked or radius,
                                             palette=palette,
                                             scale=opts.scale, include_dark=opts.include_dark,
-                                            merge=opts.merge, bowl_reject=opts.bowl_reject)
+                                            merge=opts.merge, bowl_reject=opts.bowl_reject,
+                                            fit_effort=opts.fit_effort)
 
             # FEVER repaints the whole board in neon, so a palette fit during
             # normal play stops matching anything and the tsum count collapses.
@@ -2417,7 +2475,8 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
                                                    radius=locked,
                                                    include_dark=opts.include_dark,
                                                    merge=opts.merge,
-                                                   bowl_reject=opts.bowl_reject)
+                                                   bowl_reject=opts.bowl_reject,
+                                                   fit_effort=opts.fit_effort)
                 if abs(len(fresh) - floor) < abs(len(tsums) - floor):
                     say(f"    recalibrated ({len(tsums)} -> {len(fresh)} tsums)")
                     tsums, radius, palette, base = fresh, fresh_r, fresh_pal, None
@@ -2695,10 +2754,30 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
                                  # mark on the collector's terms, not these.
                                  "hold_delay": opts.hold_delay,
                                  "hold_threshold": opts.hold_threshold,
-                                 "hold_aura": opts.hold_aura},
+                                 "hold_aura": opts.hold_aura,
+                                 # Whether the reach check was live while this
+                                 # was collected. It does not change `proposed`
+                                 # -- that is written before any trim -- but a
+                                 # replay cannot state the conditions it is
+                                 # replaying without it, and the eleventh round
+                                 # could not.
+                                 "verify_reach": opts.verify_reach,
+                                 "verify_delay": opts.verify_delay,
+                                 "fit_effort": opts.fit_effort},
                     )
                 if not verifying:
                     # Collection must not change how the round is played.
+                    return screen
+                if not seen.get("marked"):
+                    # The frame showed nothing at all -- not one tsum on the
+                    # whole board cleared the bar, the pressed one included.
+                    # That is not the game saying "refused", it is the game
+                    # saying nothing, and trimming on it throws away a chain
+                    # on the strength of a reading that failed. Measured over
+                    # 726 collected drags it happens on 4.4% of them, and on 6
+                    # of the 121 a `verify_reach 260` check would fire on --
+                    # two of which are chains the trim cancelled outright.
+                    probe["unreadable"] = True
                     return screen
                 probe["dropped"] = len(best.nodes) - len(kept)
                 probe["kept"] = len(kept)
@@ -2718,6 +2797,9 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
                 samples.seen_drag()
             drag_chain(screen, step_px=opts.step_px, per_step=per_step, hold=opts.hold,
                        after_press=_ask_the_game if (verifying or sampling) else None)
+
+            if probe.get("unreadable"):
+                report.unreadable += 1
 
             if probe.get("abandoned"):
                 misses += 1
@@ -4944,6 +5026,19 @@ def add_play_args(play, *, merge_default: bool):
     play.add_argument("--fever-min-tsums", type=int, default=0, help="the --min-tsums floor to use while FEVER is running. 0 = use --min-tsums. FEVER fades and overlays the board, so a genuine in-play frame reads ~20 detections where normal play reads ~50, and the normal floor discards half of them. Safe to lower because the floor's real job -- noticing that a frame is a menu rather than a board -- is already done by the FEVER template, which the game does not draw over a menu")
     play.add_argument("--bowl-reject", type=float, default=0.0, help="drop detections whose face colour sits closer than this (Lab) to the board's own colour -- a detection that landed on the bowl instead of on a tsum carries the bowl's colour. 0 = off (the default). Over the ten labelled boards: off f1 0.762, 40 -> 0.785, 60 -> 0.791, 80 -> 0.766, so 40-60 is a plateau. It buys precision with recall, and only a played round prices that trade")
     play.add_argument("--scale", type=float, default=1.0)
+    play.add_argument("--fit-effort", type=int, default=1, choices=(1, 2, 3),
+                      help="how hard the per-frame colour fit tries when there "
+                           "is no cached palette to reuse. The fit is k-means "
+                           "with a seed, so the same frame read twice can come "
+                           "back different: measured over 60 collected boards, "
+                           "two reads agree on 73%% of tsums at level 1, 83%% at "
+                           "2 and 91%% at 3, and the count swings by 9 tsums "
+                           "between reads at level 1 against 3 at level 3. "
+                           "Costs 51/138/349ms per fit, and a round fits about "
+                           "five times -- on the fever transition, a shuffle "
+                           "and a recalibration, which are the worst frames to "
+                           "read badly. Default 1: it is what every measurement "
+                           "in docs/DATASET-FINDINGS.md was taken under")
     play.add_argument("--no-dark", dest="include_dark", action="store_false")
     play.add_argument("--no-base", dest="use_base", action="store_false")
     play.add_argument("--base-only", action="store_true")

@@ -36,6 +36,16 @@ vars:
   # seconds, so it would condemn a screen that is merely not animating.
   stuck_check: false
 
+  # Forwarded to play.yaml, which declares the same two and would otherwise
+  # overwrite whatever the tray set. `fit_effort` is how many restarts the
+  # per-frame colour fit gets (1 = today, 3 = the steadiest measured);
+  # `verify_clears` re-reads the board after each drag to count what actually
+  # left it, and costs a capture every time. Both are the panel's "Steady
+  # colour fit" and "Measure tsums cleared" boxes, and both are off here so a
+  # standalone run behaves as it always did.
+  fit_effort: 1
+  verify_clears: false
+
 steps:
   
   # Everything below is the repeatable cycle: check mailbox, do the ranking /
@@ -138,6 +148,8 @@ steps:
                 isolate: false
                 vars:
                   stuck_check: "${stuck_check}"
+                  fit_effort: "${fit_effort}"
+                  verify_clears: "${verify_clears}"
             - if:
                 value: ${level_cap_found}
                 then:

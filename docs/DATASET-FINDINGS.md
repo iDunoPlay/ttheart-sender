@@ -767,3 +767,303 @@ nothing at all"*. If the game is in fact lenient and pops the accepted members
 anyway, today already collects 906 and this rule buys nothing but delay. The
 collection cannot distinguish those two, because it never recorded what
 actually cleared. A round with `--verify-clears` on can, and that is the test.
+
+## Eleventh round: the tenth round replicated, on a corpus it never saw
+
+726 drags over 51 sessions, collected 2026-09-02 on v1.8.4 at the schema 2
+defaults with `floor_mult` at its new 8.0 — the first corpus collected after
+the eighth round changed that default. 101MB. It passes the label check:
+
+```
+python -m ttheart_sender.game.tsum dataset --dir dataset --appearance 700
+```
+
+| measure | 11,537 samples (8th) | **726 samples (11th)** | bar |
+|---|---:|---:|---|
+| board motion p50 | 3.1 | **3.8** | under 8 |
+| samples past the 8.0 motion threshold | 9.5% | **12.1%** | near zero |
+| share of the board read as marked | 14.9% (11.6% at 8x) | **13.3%** | one character's worth |
+| appearance lift, mean | 1.95x (2.23x at 8x) | **3.12x** | over 1.3 |
+| appearance lift, median | — | **1.17x** | — |
+| k-means agreement vs. base rate | 37.1 / 26.1 | **37.7 / 25.4** | above base |
+
+The mean/median split is the ninth round's caveat firing as designed: 31
+samples of 663 carry 53% of the mean. The verdict passes on the mean, says so,
+and says to trust the median — 1.17x is a thin per-sample signal on a corpus
+this size, and it is the k-means line (37.7% against a 25.4% base rate) that
+carries the verdict, not the headline ratio.
+
+### The tenth round's numbers came back, from different rounds on a different day
+
+The point of this round was replication. The tenth round priced the bot's
+decisions on 303 drags; nothing about that analysis had ever been re-run on
+data it had not been derived from. Same measurements, new corpus, using
+`scripts/replay_decisions.py`:
+
+| measure | tenth (303 drags) | **eleventh (726 drags)** |
+|---|---:|---:|
+| chain the bot proposed | 4.69 | **4.55** |
+| what the game accepted | 3.41 | **3.23** |
+| proposed members refused | 27.3% | **29.0%** |
+| drags left under `min_chain` | 22.4% | **29.3%** |
+| leg length, kept vs refused (SMD) | 0.06 | **0.07** |
+| position in chain (SMD) | 0.70 | **0.61** |
+| distance to the pressed tsum (SMD) | 0.62 | **0.47** |
+
+Share of drags where the game accepted *every* member, by how far the chain
+reaches from the press:
+
+| reach | tenth | **eleventh** |
+|---|---:|---:|
+| under 90px | 100% (16 drags) | **100%** (43) |
+| 90-150px | 81% | **65%** (259) |
+| 150-220px | 65% | **54%** (244) |
+| 220-300px | 33% | **39%** (104) |
+| over 300px | 11% | **7%** (76) |
+
+The ladder is the same shape and the same conclusion: **reach predicts refusal
+and nothing else does.** `link_px` is now measured at 0.06 and 0.07 standard
+deviations of separation on two independent corpora, which is as close to
+settled as anything in this document. The middle bands read a few points worse
+here, and this corpus is 41.2% fever against 18% in the eighth-round
+collection, which is the likeliest reason — fever boards refuse less (24.6%
+against 31.7%) but the normal boards in between are busier.
+
+### `verify_reach 260` re-priced, and it holds
+
+Replayed over the 726 drags, counting a drag as clearing only when every member
+was accepted, at three costs for one check:
+
+| verify past | holds | cleared | clears/s @0.17 | @0.28 | @0.41 |
+|---|---:|---:|---:|---:|---:|
+| never | 0 | 1436 | 8.59 | 8.59 | 8.59 |
+| 300px | 76 | 1640 | 10.08 | 9.59 | **9.07** |
+| **260px** | **121** | **1692** | 10.39 | **9.60** | 8.82 |
+| 220px | 180 | 1759 | **10.47** | 9.37 | 8.33 |
+| 180px | 288 | 1844 | 10.43 | 8.84 | 7.50 |
+| every drag | 726 | 1931 | 8.46 | 6.27 | 4.80 |
+
+260 is best or within a point of best in every column — +21% at a cheap read,
++12% at a realistic one, +3% at the most pessimistic — and `every drag` loses
+at every cost, which is `--verify-hold` again. **No change: 260 stays.** The
+one thing the sweep says that is new is that 300 wins the most expensive
+column, so if the check ever gets slower the threshold should move up, not
+down.
+
+### Truncation is not the free version of the check
+
+The obvious cheap alternative — cut the chain at the first member too far from
+the press, pay no hold at all:
+
+| rule | drags | mean length | cleared | time | chains of 6+ |
+|---|---:|---:|---:|---:|---:|
+| today | 726 | 4.55 | 1436 | 167.1s | 20.8% |
+| truncate past 300px | 725 | 4.26 | 1449 | 158.8s | 18.6% |
+| truncate past 260px | 723 | 4.08 | 1452 | 153.0s | 13.0% |
+| truncate past 220px | 720 | 3.84 | 1451 | 145.6s | 8.1% |
+| truncate past 180px | 698 | 3.46 | 1400 | 130.5s | 2.1% |
+
+It looks free — the same tsums cleared for 5-13% less stroke time — and it is
+the tenth round's `max_chain` trap wearing a different hat. What it actually
+does is trade long chains for short ones: at 260px the share of 6+ chains falls
+by a third, and `PlayReport` already records that fifteen 3-chains and eight
+6-chains are not close. Nothing offline prices the scoring curve, so a rule
+whose entire effect is to shorten chains cannot be justified from this corpus.
+**Not shipped, deliberately**, and for the same reason as last time. The 300px
+row is the only one that barely moves the length distribution, and it buys 5%
+of stroke time — not enough to be worth a switch.
+
+### Two things this corpus says that the last one could not
+
+**Over-detection has gone away.** The eighth round measured boards running to
+110 detections at a median radius of 19.8px, p90 of 85, against a real board of
+50-70 tsums — and a `hold` run that pressed bare water because of it. Here:
+
+| | eighth round | **eleventh** |
+|---|---:|---:|
+| detections per board, p90 | 85 | **52** |
+| maximum | 110 | **60** |
+| boards past the over-split flag (>75) | many | **0** |
+
+Not one board in 726 is over-split. Whatever changed in detection between
+v1.8.2 and v1.8.4 fixed the failure mode round three was written about, and the
+`hold` guards added for it have had nothing to catch since. Item 3 of "what has
+not been settled" in the eighth round is closed by measurement rather than by
+work.
+
+**A fifth of readings are not as legible as the trim assumes.** On 20.1% of
+drags the pressed tsum itself does not clear its own bar, and on 4.4% the whole
+board shows no mark at all. The first number is not evidence that the press
+missed — 89.7% of those drags still show marks elsewhere, so the game did
+respond and it is the reading of the pressed tsum's own disk that is
+unreliable. The second is: a frame with nothing on it has not said "refused",
+it has said nothing, and the trim reads the two identically.
+
+The size of the problem is small and the fix is cheap: of the 121 drags a
+`verify_reach 260` check fires on, 6 read nothing, and 2 of those are chains
+the trim cancels outright on the strength of a frame that said nothing. Worth a
+guard — *reading unusable, drag as proposed* — but not worth claiming a gain
+for: 6 drags in 726 is the honest size of it, and the same guard keyed on the
+silent-head signal instead would fire on 24 drags, 23 of which show marks
+elsewhere on the board and are read perfectly well — the shape of a guard that
+misfires.
+
+### The recall gap is still the biggest thing in the corpus
+
+Per press, the game marks a mean of **5.95** tsums. The chain the bot proposes
+contains **1.42** of the ones outside the glow, and there are **3.98** marked
+tsums per drag that it never proposes at all — tsums the game has just stated
+are the same character *and* reachable from the one being held, sitting unused
+while the chain reaches 200px in the other direction for a member that gets
+refused.
+
+This is the same finding as the tenth round's, from the other side: the bot
+both over-reaches (29% refused) and under-collects (4 free partners ignored),
+and neither is a threshold problem. It is the adjacency question in
+`docs/TODO-blob-adjacency.md`, and this corpus supplies both halves of what it
+needs — every marked tsum is a positive reachability example and every unmarked
+one is a negative. **It remains the best-priced piece of work available.**
+
+### A provenance gap, closed for next time
+
+This collection arrived without a log beside it, and the row's `options` record
+the chain-building settings but never recorded `verify_reach` or
+`verify_delay`. So whether the reach check was live while these 726 drags were
+played cannot be established from the corpus itself. It does not affect
+anything above — `proposed` is written before any trim, so the replay is
+answering the same question either way — but it is exactly the kind of
+"the settings it was taken at were not recorded" gap that cost a full re-decode
+of 803MB in the first round. `dataset.py` now records both, so the next corpus
+can say.
+
+### What is still open
+
+Unchanged and untouched by this round: **whether the game is lenient.** Every
+number above assumes a drag with one refused member clears nothing. A round
+with `--verify-clears` records what actually left the board and settles it, and
+until it is run, `verify_reach`'s +12% is a well-replicated estimate of
+something that might be zero.
+
+## Twelfth round: the colour fit is a coin flip on a quarter of the board
+
+The eleventh round priced decisions. This one went after the three things the
+project actually wants to improve -- colour, detection, gameplay -- and found
+that the first two are one problem, measured for the first time.
+
+### The measurement
+
+Take one collected frame. Fit its colours three times with nothing different
+between the runs but the k-means seed, detect at the same `k` and the same
+locked radius each time, and ask how much the three reads agree about which
+tsums exist. Over 60 boards:
+
+| fit | two reads agree | count spread | cost per fit |
+|---|---:|---:|---:|
+| **4 restarts, 20 iterations, eps 1.0 (today)** | **73.1%** | **9.1 tsums** | **51ms** |
+| 8, 40, 0.5 | 83.3% | 6.2 | 138ms |
+| 16, 60, 0.25 | 91.4% | 3.0 | 349ms |
+| 8, 40, 0.5, on 160k pixels instead of 40k | 82.3% | 6.6 | 541ms |
+
+**A quarter of the board is decided by the seed.** On the worst frame two
+reads of the same image shared 36% of their detections; the count of tsums on
+one board swings by nine between two reads of the same pixels. Everything
+downstream inherits that roll: which tsums exist, what colour each is, which
+chain is best, and every number the previous eleven rounds measured.
+
+The last row is the one that says what the problem is not. Sampling four times
+as much of the board buys nothing -- 82.3% against 83.3% at four times the
+cost. It is the number of restarts the fit gets, not how much of the board it
+looks at.
+
+### Why the cost objection does not apply
+
+The obvious reason nobody had turned the fit up is that it runs live. It does
+not, much: `play_loop` caches its centres and only fits when there is nothing
+to reuse -- the first frame, a fever transition, a shuffle, a recalibration.
+Counted in this repo's own log, **about five fits in a round**. At the
+strictest setting that is ~1.5s added to a round that runs for minutes, and it
+is spent precisely on the frames that are hardest to read: `learn`'s docstring
+already names the fever transition as "the dimmest and most animated frame of
+the round", and that is a frame currently read with four restarts.
+
+Shipped as `fit_effort` (1, 2, 3 -> the first three rows above), default **1**,
+opt-in through the tray panel's "Steady colour fit" box or `flows/play.yaml`'s
+`vars:` block. Default 1 because every
+measurement in this document was taken under it, and moving the default would
+re-price the lot.
+
+**What it does not claim.** Stability is not correctness. A steadier fit reads
+the same board the same way twice; nothing here says the reading it settles on
+is the better one. The collection cannot say either -- every sample in it was
+taken at level 1. A round can, and that is the test: `recalibrated (N -> M
+tsums)` lines that sit closer together, fewer of them, and `dragged` over a
+whole round against a level 1 round.
+
+### What this does to the ninth round's verdict
+
+It does not overturn it, and it is worth being precise about why. The ninth
+round asked whether a learned global palette gets *identity* right more often
+than the per-frame fit, and the answer was no. Re-fitted on this corpus, the
+answer is still no:
+
+```
+                     agree   split  balanced
+  learned palette    37.8%   79.5%     58.6%
+  per-frame k-means  38.9%   80.2%     59.5%   <- what runs today
+-> NO BETTER (-0.9 points balanced)
+```
+
+But identity was never the palette's only possible use. A fixed palette does
+not fit anything, so it cannot be unstable -- it reads the same board the same
+way every time, by construction. That is a different claim from the one the
+ninth round refused, and it is the claim `fit_effort` now buys most of without
+the palette's drawbacks. Whether the remaining gap is worth a palette is an
+open question, and one this corpus cannot settle: a palette-based detection
+was measured here at 53% of confirmed tsums kept against the per-frame fit's
+63%, and both numbers are biased by the fact that the confirmed positions
+come from a per-frame fit that was played.
+
+### The bias, stated plainly
+
+`scripts/sweep_detect.py` scores a candidate setting on the tsums the game
+confirmed are real. It is the biggest ground truth this project has -- 3,470
+confirmed tsums in this collection against ten hand-labelled boards -- and it
+has one flaw that cannot be designed out: **the confirmed positions come from
+the run that was played**, so the live setting scores 100% for free and every
+candidate is measured on tsums the live setting already found. It can catch a
+regression. It cannot prove an improvement. The script says so where it prints
+the number, and ranks nothing on it.
+
+### Gameplay: the guard the eleventh round asked for
+
+`verify_reach` trims a chain to what the game marked. When that reading comes
+back blank -- not one tsum on the whole board over the bar, the pressed one
+included -- the loop now drags the chain as proposed instead of trimming on a
+reading that failed. Measured over the 726 collected drags: 4.4% of readings
+are blank, 6 of the 121 a `verify_reach 260` check fires on, and 2 of those are
+chains the trim cancelled outright.
+
+Small, and deliberately shipped without a switch: a blank frame is the game
+saying nothing, not the game saying no, and acting on it was never a tuning
+choice. `PlayReport` reports the count so the log says how much of the check's
+cost bought nothing, and a run where most checks read blank is a capture
+problem rather than a chain problem.
+
+### And the measurement the next round owes itself
+
+`verify_clears` is now the panel's "Measure tsums cleared" box, wired through
+`flows/play.yaml`, rather than a CLI-only flag. It is not a play rule; it is the one measurement that settles
+whether the game clears a partly-refused chain, which is the assumption every
+`verify_reach` number rests on.
+
+### Keeping score
+
+`scripts/scorecard.py` prints one row per collection -- colour lift, detection
+plausibility, refusal rate -- and appends it to `docs/SCORECARD.md`. The point
+is not the numbers, which are all in this document already; it is that they
+are computed the same way every time, so two collections can be put beside
+each other. The baseline row:
+
+| collected | samples | settings | colour lift | plausible | found | refused | dead drags |
+|---|---:|---|---:|---:|---:|---:|---:|
+| 2026-09-02 | 726 | k12 link105 fit1 floor8.0 | 1.47x | 98% | 42 | 29% | 29% |

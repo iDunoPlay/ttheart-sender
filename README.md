@@ -226,6 +226,14 @@ adding one is a single `Mode(...)` entry naming a flow in `flows/`.
 A fuller command-by-command walkthrough — including the Tsum Tsum board reader
 and its calibration loop — lives in [`docs/COMMANDS.md`](docs/COMMANDS.md).
 
+Turning played rounds into better play is its own loop: collect, check the
+labels, replay the decisions against the game's own answers, ship the rule off
+by default, and let a round decide. The steps are in
+[`docs/IMPROVEMENT-LOOP.md`](docs/IMPROVEMENT-LOOP.md); what twelve rounds of it
+settled is in [`docs/DATASET-FINDINGS.md`](docs/DATASET-FINDINGS.md), and
+[`docs/SCORECARD.md`](docs/SCORECARD.md) is one row per collection for the
+three things being improved over time — colour, detection, gameplay.
+
 ## Version
 
 The number lives in one file,

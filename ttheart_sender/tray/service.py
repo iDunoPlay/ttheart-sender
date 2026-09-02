@@ -54,6 +54,22 @@ CLAIM_ALL_VAR = "claim_all"
 #: and play.yaml declare their own value; the tray always overrides it.
 STUCK_CHECK_VAR = "stuck_check"
 
+#: Flow variable behind "Steady colour fit". play.yaml passes it straight to
+#: `play_tsum`'s `fit_effort` option, so the two values here are the levels of
+#: :data:`~ttheart_sender.game.tsum.FIT_EFFORT` -- 1 is what every measurement
+#: in docs/DATASET-FINDINGS.md was taken under, 3 is the steadiest fit
+#: measured. Nothing in between is offered: the panel is a switch, and the
+#: middle level exists for the CLI.
+FIT_EFFORT_VAR = "fit_effort"
+FIT_EFFORT_OFF = 1
+FIT_EFFORT_ON = 3
+
+#: Flow variable behind "Measure tsums cleared" -- `play_tsum`'s
+#: `verify_clears`. Not a play rule: it re-reads the board after every drag,
+#: which costs a capture each time and is why it is off unless a round is
+#: being played to measure with.
+VERIFY_CLEARS_VAR = "verify_clears"
+
 
 class RunState(Enum):
     IDLE = "idle"
@@ -74,6 +90,8 @@ class AutomationService:
         return_heart_minutes: Optional[Sequence[int]] = None,
         claim_pattern: str = CLAIM_PATTERN_DEFAULT,
         restart_when_stuck: bool = False,
+        steady_fit: bool = False,
+        measure_clears: bool = False,
         on_change: Optional[Callable[[], None]] = None,
         on_notify: Optional[Callable[[str, str, bool], None]] = None,
     ) -> None:
@@ -86,6 +104,8 @@ class AutomationService:
         )
         self._claim_pattern = normalize_claim_pattern(claim_pattern)
         self._restart_when_stuck = bool(restart_when_stuck)
+        self._steady_fit = bool(steady_fit)
+        self._measure_clears = bool(measure_clears)
         self._state = RunState.IDLE
         #: What the live run is called -- the mode's label, or "Buy tsum" for
         #: a one-off job, so the panel can say what it is waiting on.
@@ -118,6 +138,18 @@ class AutomationService:
         """Whether a run restarts the emulator when it decides it has wedged."""
         with self._lock:
             return self._restart_when_stuck
+
+    @property
+    def steady_fit(self) -> bool:
+        """Whether the next run re-fits its colours the steadier way."""
+        with self._lock:
+            return self._steady_fit
+
+    @property
+    def measure_clears(self) -> bool:
+        """Whether the next run counts what actually leaves the board."""
+        with self._lock:
+            return self._measure_clears
 
     @property
     def return_heart_minutes(self) -> List[int]:
@@ -211,6 +243,39 @@ class AutomationService:
         self._on_change()
         return True
 
+    def set_steady_fit(self, enabled: bool) -> bool:
+        """Pick the colour fit the next Start runs with.
+
+        Like every other switch here, this only decides what the *next* run is
+        handed: the fit level is read once per detection and a live run keeps
+        the variables it started with.
+        """
+        enabled = bool(enabled)
+        with self._lock:
+            if self._steady_fit is enabled:
+                return False
+            self._steady_fit = enabled
+        log.info("Steady colour fit %s (%s=%s)", "on" if enabled else "off",
+                 FIT_EFFORT_VAR, FIT_EFFORT_ON if enabled else FIT_EFFORT_OFF)
+        self._on_change()
+        return True
+
+    def set_measure_clears(self, enabled: bool) -> bool:
+        """Arm or disarm the clear check for the next Start.
+
+        Costs a capture per drag, so it belongs to a measuring round rather
+        than to normal play -- and like the rest, a live run is unaffected.
+        """
+        enabled = bool(enabled)
+        with self._lock:
+            if self._measure_clears is enabled:
+                return False
+            self._measure_clears = enabled
+        log.info("Measure tsums cleared %s (%s=%s)", "on" if enabled else "off",
+                 VERIFY_CLEARS_VAR, enabled)
+        self._on_change()
+        return True
+
     def set_return_heart(self, enabled: bool) -> bool:
         """Turn timed heart-sending on or off for the next Start."""
         enabled = bool(enabled)
@@ -274,6 +339,8 @@ class AutomationService:
             RETURN_HEART_MINUTES_VAR: self.return_heart_minutes,
             CLAIM_ALL_VAR: claim_all_flag(self.claim_pattern),
             STUCK_CHECK_VAR: self.restart_when_stuck,
+            FIT_EFFORT_VAR: FIT_EFFORT_ON if self.steady_fit else FIT_EFFORT_OFF,
+            VERIFY_CLEARS_VAR: self.measure_clears,
         }
 
     def start(self) -> bool:
