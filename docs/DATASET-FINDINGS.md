@@ -1444,3 +1444,146 @@ its kind -- which is a thing to A/B, not a cost to avoid.
 * **Whether `verify_extend`'s added members are really partners.** Same
   answer, same round, and it now wants that round more than anything else
   does.
+
+## Fifteenth round: the assumption underneath `verify_reach` was wrong
+
+Ten rounds, 863 drags, 3,687 tsums dragged, Beast equipped, played on
+**v1.10.3** with `verify_clears` and `verify_extend` both ON. This is the
+round the third one owed and the fourteenth could not take, and it answers
+both of its open questions. It also unseats a modelling assumption that four
+earlier rounds were priced on.
+
+### The instrument, again -- but caught before the round was spent
+
+The first three rounds of this batch were played on v1.10.2 and are not in the
+corpus. `note_outcome` attaches a drag's result to the sample staged by the
+last `record`, and the guard was only "is a row staged" -- but `verify_clears`
+reports after **every** drag while one drag in `every` is sampled. So a staged
+row sat through the three unsampled drags that followed it and took each of
+their outcomes in turn, the last one winning. Every sample was written with
+another drag's `dragged`/`cleared` beside its own `proposed`.
+
+The tell was visible without reading a line of code: chains rebuilt on drags
+whose reach was 72-107px, when `verify_reach 260` cannot fire below 260. A
+row that describes an impossible event is describing two different drags.
+
+Fixed at the cause -- a staged row takes the first outcome offered and refuses
+the rest, which is always its own, because `record` runs inside `after_press`
+of the very drag whose outcome arrives moments later. Pinned by
+`tests/test_dataset.py::test_an_outcome_belongs_to_the_drag_that_earned_it`.
+
+Worth stating plainly, because it is now twice: **the fourteenth round lost to
+an instrument that could not write the answer down, and the fifteenth nearly
+lost to one that wrote the wrong answer down.** The play loop itself was
+correct both times -- `report.cleared` and the `popped N/M` log line were never
+affected -- which is exactly why it survived: the rounds were played on the
+same machine, so the log carried the full per-drag record and the batch was
+recoverable. Open item 5 of `docs/IMPROVEMENT-LOOP.md` is not housekeeping.
+
+### The clears, measured
+
+Over all 863 drags of the batch, from the log:
+
+```
+dragged 3687, cleared 3011  (81.7%)
+drags that cleared NOTHING:  15 (1.74%)
+drags that cleared everything: 506 (59%)
+drags that did not register:   0
+```
+
+Replicated against the three discarded v1.10.2 rounds, whose log was equally
+valid: 260 drags, 84.2% cleared, 1.2% cleared nothing.
+
+Absolute clears rise with length even as the rate falls, which is the
+"shortening chains is not an improvement" finding measured from the other
+side and against clears rather than against a proxy:
+
+| dragged | drags | cleared | mean cleared per drag |
+|---|---:|---:|---:|
+| 3  | 401 | 86.6% | 2.60 |
+| 4  | 227 | 80.9% | 3.24 |
+| 6  |  53 | 78.6% | 4.72 |
+| 8  |  18 | 74.3% | 5.94 |
+| 12 |  16 | 83.3% | 10.00 |
+
+### A refused member costs its own clear, not the drag
+
+This is the round's real result. Everything `verify_reach` has been priced on
+assumes a drag with a refused member clears nothing -- `replay_decisions.py`
+says so where it prints: *"an unchecked one clears only if every member was
+accepted."* That assumption has never been measured, and it is false.
+
+A sampled drag reads the game's marks whether or not the chain was checked,
+and an unchecked chain is dragged exactly as proposed. So the 111 samples
+dragged as proposed are a direct test -- the game named the refusals, the bot
+ignored them, and `cleared` says what happened:
+
+| members the game refused | drags | dragged | cleared | cleared nothing |
+|---|---:|---:|---:|---:|
+| 0  | 61 | 205 | **93.2%** | 0.0% |
+| 1  | 29 | 100 | **70.0%** | 3.4% |
+| 2  | 14 |  59 | **54.2%** | 7.1% |
+| 3+ |  7 |  43 | **39.5%** | 0.0% |
+
+Per member, on those same chains:
+
+```
+the game marked it   : 291/324 cleared (89.8%)
+the game refused it  :  19/83  cleared (22.9%)
+```
+
+So refusal is **per member and roughly independent**, not a veto on the
+stroke. The mark is a strong predictor of whether that one tsum leaves the
+board; it says almost nothing about the rest of the chain. A chain with one
+refused member out of five still clears the other four.
+
+**What this does to `verify_reach`'s +27.5%:** it was computed against a
+"never verify" baseline modelled as clearing *zero* on any chain with a
+refused member, when that baseline in fact clears ~70-93% of its members. The
+comparison was against a strawman and the benefit is overstated by an amount
+nobody has derived yet. This does not make the rule bad -- 130 checks over ten
+rounds cost little and the trim is still real -- it makes **the number wrong**,
+and the threshold sweep that produced 260 was run under the same model.
+
+### `verify_extend`: the added members are partners
+
+The thirteenth round shipped the rebuild with an explicit worry: it believes
+the game about *identity* as well as about refusal, and that half was
+unpriced. It is priced now. Isolating genuine rebuilds -- drags carrying
+members the proposal never had:
+
+```
+9 rebuilt chains in the corpus
+members the rebuild ADDED   : 22/22 cleared (100.0%)
+members already in the chain: 35/40 cleared (87.5%)
+```
+
+Twenty-two for twenty-two. The members the marks hand over are not noise read
+at `floor_mult 8.0`; they are partners the graph could not reach, and they
+clear at least as well as the chain they join. Across the batch the rule
+rebuilt 33 chains and added 95 members on 130 checks, for no reading cost at
+all -- the check was already bought by `verify_reach`.
+
+**Leave it on.** It is the first play rule in this document proven by a played
+round on the number that decides rather than by a replay on a proxy.
+
+### What this round did not settle
+
+* **What `verify_reach` is actually worth.** Its benefit has to be
+  re-derived against the per-member model above, and its threshold re-swept
+  under it. `replay_decisions.py` cannot answer this until its cost model is
+  corrected -- and correcting it re-scores the tenth, eleventh, thirteenth
+  and fourteenth rounds, so it wants doing deliberately and in one pass, with
+  both columns shown side by side.
+* **Whether abandoning is right.** 19 chains were released without dragging.
+  By the game's own rule a chain of under three clears nothing, so this looks
+  correct -- but it rests on a mark reading that was unreadable 53 times in
+  this batch, and a wrong reading throws away a whole drag.
+* **The recall gap, still.** 3.75 marked tsums per drag were never proposed,
+  against 3.96 in the fourteenth round. Nothing here touched it, and
+  `scripts/identity_probe.py` closed the cheap way out: no descriptor
+  computable from these crops beats plain median Lab on held-out sessions
+  (0.561 AUC, shape 0.510), because the median tsum shows 0.42 of its own
+  radius. The signal recovers to 0.636 on the least-buried tsums, so it is
+  occlusion rather than absence -- which makes it a capture-resolution
+  question, not a model question.

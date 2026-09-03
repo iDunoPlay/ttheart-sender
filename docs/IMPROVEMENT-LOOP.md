@@ -232,19 +232,25 @@ fix the comment in the same pass. Those numbers are load-bearing.
   every collection carries the one headline that is not a proxy. There is no
   reason to save it for a special round.
 
-**Ready to try -- a tick box in the tray panel, under "Data collection":**
+**Confirmed by a played round, leave on:**
 
-1. **Rebuild chains from marks** (`verify_extend: true`) -- **gameplay.** The
-   thirteenth round's rule, replicated on a fourth corpus and still the only
-   one unproven by a played round. On a `verify_reach` check that has already
-   been paid for, the chain is rebuilt from what the game marked instead of
-   only trimmed to it: +4% to +6% clears over the trim at an identical reading
-   cost, in all three cost columns and on both corpora, and it lengthens
-   chains rather than shortening them. Watch `the marks rebuilt N chain(s)
-   (M% of checks), adding K member(s)` beside the `checked N` cost. Run it
-   **with "Measure tsums cleared" on**: it rests on the same unmeasured
-   assumption `verify_reach` does -- that a drag with one refused member
-   clears nothing -- and that assumption is now load-bearing twice.
+1. **Rebuild chains from marks** (`verify_extend: true`) -- **settled by the
+   fifteenth round.** Ten rounds, 863 drags, measured with `verify_clears`:
+   of the members the rebuild adds, **22 of 22 cleared**, against 87.5% for
+   the members already in the chain. The worry it shipped with -- that it
+   believes the game about identity as well as about refusal -- was the right
+   worry and the answer is that the marks are right. It costs no reading: the
+   check was already bought by `verify_reach`.
+
+**Now in doubt -- do not quote its number:** `verify_reach 260`. The rule is
+sound and cheap, but its +27%/+17%/+7% was computed against a baseline
+modelled as clearing *zero* on any chain with a refused member. The fifteenth
+round measured that baseline directly and it clears 70-93% of its members: a
+refusal costs its own clear, not the drag. The benefit is overstated by an
+amount nobody has derived, and the sweep that chose 260 ran under the same
+model. Re-deriving it means correcting `replay_decisions.py`'s cost model,
+which re-scores four earlier rounds -- do it in one deliberate pass, showing
+both columns.
 
 **Confirmed, no action:** `fit_effort 3` (the default -- stability 74% -> 93%
 replicated on a second corpus; note that three corpora now show it moves no
@@ -261,7 +267,16 @@ with the colour fit silently back at level 1.
 
 **Open, in the order they are worth doing:**
 
-1. **Reachability, re-aimed at colour.** Still the biggest lever, but the
+1. **Reachability, re-aimed at colour -- and now at the capture.** The cheap
+   way out is closed: `scripts/identity_probe.py` scores every descriptor
+   computable from the face crops against the game's own marks, and none
+   beats plain median Lab on held-out sessions (0.561 AUC; shape 0.510; a
+   learned linear metric no better). The reason is occlusion, not absence --
+   restricted to the least-buried tsums the same descriptors reach 0.636,
+   and the median tsum shows only 0.42 of its own radius. So this is a
+   question about capture resolution before it is a question about a model.
+
+2. **Reachability, the original framing.** Still the biggest lever, but the
    thirteenth round moved where it points: the ~4 marked tsums a press names
    and the bot never proposes are missed because `adjacency()` will not link
    across a `kind` difference, not because they are too far apart. Rebuilt

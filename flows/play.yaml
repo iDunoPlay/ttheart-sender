@@ -31,12 +31,37 @@ vars:
   # `verify_clears` -- count what actually left the board after each drag.
   # Cheap: it reads the frame `--verify` already grabbed, so there is no
   # extra capture -- which is why it is worth leaving ON permanently rather
-  # than saving for a measuring round.
-  verify_clears: false
+  # than saving for a measuring round. ON since the fifteenth round: it is
+  # the ruler, and every rule below is unpriceable without it.
+  verify_clears: true
   # `verify_extend` -- on a `verify_reach` check, rebuild the chain from what
-  # the game marked instead of only trimming the proposal to it. Off, per the
-  # house rule for a play rule no round has judged yet.
-  verify_extend: false
+  # the game marked instead of only trimming the proposal to it.
+  #
+  # ON as of the fifteenth round, and the reason is a measurement rather than
+  # patience. `scripts/identity_probe.py` scored the bot's own `kind` as a
+  # classifier against the game's marks for the first time: it links 38.2% of
+  # the game's confirmed partners and 23.6% of non-partners anyway. Identity
+  # is a coin flip, which is what 28.8% refused members and 25% of drags
+  # falling under min_chain have always been. The same probe closed the cheap
+  # way out -- no descriptor computable from these crops beats plain median
+  # Lab on held-out sessions (0.561 AUC; shape 0.510), because the median tsum
+  # shows 0.42 of its own radius and the character is buried under the pile.
+  #
+  # So the bot cannot learn identity from this capture, and the game is the
+  # only reliable source of it. This rule is the one place that answer is
+  # already bought and was being half-spent.
+  #
+  # PROVEN ON A PLAYED ROUND, fifteenth: ten rounds, 863 drags, with
+  # `verify_clears` measuring. The worry this shipped with was that a rebuild
+  # believes the game about IDENTITY as well as about refusal, and that half
+  # had never been priced. It is priced: of the members the rebuild added,
+  # **22 of 22 left the board** -- they clear better than the chain they join
+  # (87.5%). Over the batch it rebuilt 33 chains and added 95 members on 130
+  # checks, for no reading cost at all: `verify_reach` had already bought the
+  # answer. Leave it on.
+  #
+  # HOW TO TURN IT OFF: set this back to false. Nothing else changes.
+  verify_extend: true
 
 steps:
   # Clear anything left over from a previous round (the score tally, the High

@@ -198,6 +198,21 @@ class DatasetWriter:
         #: runs in `play_loop`'s `finally`, so an aborted round still writes
         #: its last sample, just without an outcome.
         self._pending: Optional[dict] = None
+        #: Has the staged row already been given its outcome?
+        #:
+        #: A staged row stays staged until the NEXT sample displaces it, but
+        #: `verify_clears` reports an outcome after *every* drag, and only one
+        #: drag in `every` is sampled. So between two samples the staged row is
+        #: offered three outcomes that do not belong to it, and the last one
+        #: wins -- which is how the fifteenth round's corpus came back with
+        #: `dragged` sets that were not the `proposed` chain of the frame they
+        #: were written beside, rebuilt chains on drags too short to have been
+        #: checked, and a clear rate measured against the wrong board.
+        #:
+        #: The first outcome after a row is staged is always the right one:
+        #: `record` runs inside `after_press` of the very drag whose outcome
+        #: arrives moments later. So take the first and refuse the rest.
+        self._outcome_seen = False
 
     # -- lifecycle -------------------------------------------------------
     def _open(self) -> bool:
@@ -292,11 +307,17 @@ class DatasetWriter:
         all: the answer stayed on the machine that played it, in a log that
         rotates. Recorded here, a collection carries its own result.
 
-        Silently does nothing when no sample is in flight: the clear check
-        runs on every drag and only one drag in `every` is sampled.
+        Silently does nothing when no sample is in flight, and -- just as
+        importantly -- when the sample in flight has already been answered.
+        The clear check runs on every drag while only one drag in `every` is
+        sampled, so a staged row is offered the outcomes of the unsampled
+        drags that follow it. Taking those would attach another drag's
+        `dragged`/`cleared` to this frame's `proposed`, which is not a noisier
+        measurement but a different one. See `_outcome_seen`.
         """
-        if self._pending is not None:
+        if self._pending is not None and not self._outcome_seen:
             self._pending.update(fields)
+            self._outcome_seen = True
 
     def close(self) -> None:
         self._flush()
@@ -430,6 +451,7 @@ class DatasetWriter:
             # happened yet. `_flush` puts it on disk, at the next press
             # or at close, whichever comes first.
             self._pending = row
+            self._outcome_seen = False
             self.written = index
         except (OSError, cv2.error, ValueError) as exc:
             self._disable(exc)

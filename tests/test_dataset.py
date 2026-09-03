@@ -438,3 +438,47 @@ def test_the_collector_scores_marks_at_eight_times_the_floor():
     assert DatasetWriter(Path("x")).floor_mult == 8.0
     assert DatasetConfig().floor_mult == 8.0
     assert tsum.play_defaults().dataset_floor_mult == 8.0
+
+
+def test_an_outcome_belongs_to_the_drag_that_earned_it(tmp_path):
+    """The staged row takes the first outcome offered and refuses the rest.
+
+    `verify_clears` reports after EVERY drag while only one drag in `every` is
+    sampled, so a row stays staged across the unsampled drags that follow it
+    and was being handed their results. The fifteenth round's corpus is what
+    that looks like from the outside: `dragged` sets that are not the
+    `proposed` chain of the frame beside them, and rebuilt chains on drags too
+    short to have been checked at all.
+    """
+    writer = DatasetWriter(tmp_path / "dataset", every=4)
+
+    _sample(writer)                                   # the sampled drag
+    writer.note_outcome(dragged=[0, 1], cleared=[0])  # ...and its own outcome
+    # The three unsampled drags that follow, each reporting its clears.
+    writer.note_outcome(dragged=[7, 8, 9], cleared=[7, 8, 9])
+    writer.note_outcome(dragged=[4, 5], cleared=[])
+    writer.close()
+
+    row = json.loads((next((tmp_path / "dataset").glob("*/samples.jsonl"))
+                      ).read_text(encoding="utf-8").strip())
+    assert row["dragged"] == [0, 1]
+    assert row["cleared"] == [0]
+    assert row["proposed"] == [0, 1]   # the outcome matches the frame it is on
+
+
+def test_the_next_sample_can_still_be_answered(tmp_path):
+    """Refusing later outcomes must not latch -- every sample gets its own."""
+    writer = DatasetWriter(tmp_path / "dataset", every=1)
+
+    _sample(writer)
+    writer.note_outcome(dragged=[0, 1], cleared=[0])
+    writer.note_outcome(dragged=[9], cleared=[9])     # not this row's
+    _sample(writer)
+    writer.note_outcome(dragged=[0], cleared=[])      # the second sample's own
+    writer.close()
+
+    rows = [json.loads(line) for line in
+            (next((tmp_path / "dataset").glob("*/samples.jsonl"))
+             ).read_text(encoding="utf-8").splitlines()]
+    assert [r["dragged"] for r in rows] == [[0, 1], [0]]
+    assert [r["cleared"] for r in rows] == [[0], []]

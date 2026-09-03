@@ -29,3 +29,4 @@ skill icon, and a `!` on it means the corpus mixes more than one character.
 | 2026-09-02 | 726 | k12 link105 fit1 floor8.0 — baseline before fit_effort | 1.47x | 98% | 42 | 29% | 29% | -- |
 | 2026-09-02 | 4306 | k12 link105 fit3 reach260 floor8.0 — fit_effort 3 (steady colour fit ON, verify_clears OFF) | 1.51x | 97% | 42 | 30% | 26% | -- |
 | 2026-09-03 | 1494 | k12 link105 block 1.25 max_chain 12 verify_reach 260 floor8.0 [partial: pre-schema-3 row] — intended as the verify_clears round; fit_effort silently back to 1, and v1.9.0 could not record either | 1.54x | 96% | 41 | 29% | 25% | -- |
+| 2026-09-03 | 122 | k12 link105 block 1.25 bowl_reject 40 fever_min_tsums 12 fit_effort 3 max_chain 12 radius_lock 6 verify_clears verify_extend verify_reach 260 floor8.0 base Lab(200,135,166)! — verify_extend + verify_clears ON, 10 rounds on v1.10.3 -- the round that priced the rebuild | 1.41x | 98% | 36 | 22% | 30% | 79% |
