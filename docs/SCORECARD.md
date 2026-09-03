@@ -12,6 +12,19 @@ Every number is measured against the game's own marks -- see
 * **refused** -- share of proposed chain members the game would not take;
   **dead drags** run and clear nothing.
 
+The **settings** column is computed, not typed: it names every play setting
+that differs from the defaults, so a flag added later appears without anyone
+editing the script. Rows marked `[partial: pre-schema-3 row]` come from a
+corpus that recorded only a curated subset -- there, a setting the column does
+not name is *unknown*, not default.
+
+The equipped tsum decides how the board is filled and which skill fires, so a
+row from another character is not comparable without saying so. **The two rows
+below were played with Beast**, stated by the player because nothing recorded
+it at the time; from schema 3 the column carries `base Lab(...)`, read off the
+skill icon, and a `!` on it means the corpus mixes more than one character.
+
 | collected | samples | settings | colour lift | plausible | found | refused | dead drags |
 |---|---:|---|---:|---:|---:|---:|---:|
 | 2026-09-02 | 726 | k12 link105 fit1 floor8.0 — baseline before fit_effort | 1.47x | 98% | 42 | 29% | 29% |
+| 2026-09-02 | 4306 | k12 link105 fit3 reach260 floor8.0 — fit_effort 3 (steady colour fit ON, verify_clears OFF) | 1.51x | 97% | 42 | 30% | 26% |

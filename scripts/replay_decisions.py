@@ -6,8 +6,10 @@ chain the bot proposed, the subset the game marked while the first tsum was
 held, and the settings both were taken under -- a recording of the bot being
 right and wrong, drag by drag, with the game as the judge.
 
-Stdlib only, and it decodes no images: everything below is read out of
-``samples.jsonl``. Run it over a directory of session folders:
+It decodes no images: everything below is read out of ``samples.jsonl``, and
+all of it is stdlib except the `verify_extend` section, which imports the
+game module so it prices the shipped rule rather than a copy of it. Run it
+over a directory of session folders:
 
     python scripts/replay_decisions.py --dir dataset
 
@@ -47,6 +49,64 @@ def load(root: Path) -> list[dict]:
                 row["_session"] = f.parent.name
                 rows.append(row)
     return [r for r in rows if r.get("schema", 1) >= 2]
+
+
+def describe_run(rows: list[dict]) -> list[str]:
+    """The conditions this corpus was collected under, read off the corpus.
+
+    Two things a replay has to be able to say and, for three rounds, could
+    not: which optional rules were armed, and which tsum was equipped. Schema
+    3 records both. Everything here is derived rather than listed, so a rule
+    added next month is reported by this function without it being edited.
+    """
+    out = []
+    o = rows[0]["options"]
+    schema = rows[0].get("schema", 1)
+    builds = sorted({r.get("version", "?") for r in rows})
+    out.append(f"built by: v{', v'.join(builds)}  (sample schema {schema})")
+
+    # What this corpus is physically unable to answer, stated up front. The
+    # capabilities arrived in a specific build, and a collection from before
+    # it does not fail loudly -- it just quietly has no field, which reads the
+    # same as a measurement that came back empty.
+    cannot = []
+    if schema < 3:
+        cannot.append("which switches were on (only a curated subset of the "
+                      "settings was recorded, so an absent one is UNKNOWN, "
+                      "not default)")
+        cannot.append("which tsum was equipped")
+    if not any("cleared" in r for r in rows):
+        cannot.append("what any drag actually cleared -- either the round was "
+                      "played without `verify_clears`, or by a build that "
+                      "could not write it down (before schema 3 the count "
+                      "went only to the play log)")
+    if cannot:
+        out.append("cannot say: " + "; ".join(cannot))
+
+    # A switch is "armed" if it is on, whatever its type: the point is to name
+    # the ones that were doing something, not to know them in advance.
+    armed = [k for k, v in sorted(o.items())
+             if k.startswith(("verify_", "fit_", "bowl_", "first_leg", "base_"))
+             and v not in (False, 0, 0.0, "", None)]
+    out.append("armed: " + (", ".join(f"{k}={o[k]}" for k in armed) or "nothing"))
+
+    mixed = {json.dumps(r["options"], sort_keys=True) for r in rows}
+    if len(mixed) > 1:
+        out.append(f"WARNING: {len(mixed)} different settings across these rows -- "
+                   f"this is more than one experiment and the totals mix them")
+
+    labs = [tuple(r["base"]["lab"]) for r in rows
+            if isinstance(r.get("base"), dict) and r["base"].get("lab")]
+    if labs:
+        mid = [round(st.median(v[i] for v in labs)) for i in range(3)]
+        spread = max(max(abs(v[i] - mid[i]) for i in range(3)) for v in labs)
+        note = "  WARNING: more than one character in this corpus" if spread > 12 else ""
+        out.append(f"equipped tsum: skill icon Lab {tuple(mid)} "
+                   f"(spread {spread:.0f}){note}")
+    else:
+        out.append("equipped tsum: not recorded -- ask the player, and note it "
+                   "in the scorecard row")
+    return out
 
 
 def dist(a: dict, b: dict) -> float:
@@ -232,6 +292,97 @@ def truncation(rows: list[dict], min_chain: int) -> None:
         run(lambda r, cap=cap: r["proposed"][:cap], f"max_chain {cap}")
 
 
+def rebuild(rows: list[dict], min_chain: int, verify_at: float) -> None:
+    """`verify_extend`: rebuild a checked chain from the marks, or only trim it.
+
+    The trim spends the check's answer on the members it takes AWAY. The same
+    reading also names partners the proposal never held -- see `recall()` above
+    for how many -- and they cost nothing, because the press is already paid
+    for.
+
+    Two things this prices that a document cannot. First, identity: rebuilding
+    with the bot's own `kind` ids loses, because `adjacency()` will not link
+    across a `kind` difference, and that is the whole finding. Second, the
+    reading. The corpus's `marked` was read at `floor_mult` over three frames;
+    a live check reads ONE frame, so the rebuild is only affordable if the
+    strict bar survives a single frame -- which this cannot tell you, and a
+    round can. Both rows are printed at every cost so the comparison is never
+    made against a reading the candidate would not pay for.
+    """
+    # Imported here rather than at the top: everything else in this file is
+    # stdlib, and only this section needs the graph the game is played on. It
+    # calls the shipped `chain_from_marks` rather than re-implementing it, so
+    # the row cannot quietly disagree with the rule it is pricing.
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from ttheart_sender.game import tsum as T
+
+    print("\n== verify_extend: rebuild the checked chain, or only trim it ==")
+    print("  A trimmed drag keeps the proposed members the game marked; a")
+    print("  rebuilt one walks the marks themselves, believing the game about")
+    print("  identity as well as about refusal. Compared at an IDENTICAL")
+    print("  reading cost -- a candidate that needs a dearer read has to beat")
+    print("  the incumbent's read, not its own.")
+
+    fired = [r for r in rows if reach(r) > verify_at]
+    grown: dict[int, list[int]] = {}
+    for r in fired:
+        marked = [int(i) for i in (r.get("marked") or [])]
+        if not marked:
+            continue
+        ts = [T.Tsum(float(t["x"]), float(t["y"]), float(t["r"]), int(t["kind"]),
+                     (0, 0, 0)) for t in r["tsums"]]
+        o = r["options"]
+        grown[id(r)] = T.chain_from_marks(
+            ts, r["proposed"], r["kept"], marked, float(r.get("radius", 25.0)),
+            link_px=float(o.get("link_px", 105)), block=float(o.get("block", 1.25)),
+            max_chain=int(o.get("max_chain", 12)))
+
+    def run(cost: float, extend: bool):
+        cleared = holds = 0
+        total = 0.0
+        lens = []
+        for r in rows:
+            if reach(r) > verify_at:
+                holds += 1
+                total += cost
+                nodes = grown.get(id(r)) if extend else None
+                nodes = nodes if nodes is not None else r["kept"]
+                nodes = nodes if len(nodes) >= min_chain else []
+            else:
+                total += stroke_time(r, r["proposed"])
+                nodes = (r["proposed"]
+                         if len(r["kept"]) == len(r["proposed"]) else [])
+                lens.append(len(nodes))
+                cleared += len(nodes)
+                continue
+            if nodes:
+                total += stroke_time(r, nodes)
+                cleared += len(nodes)
+            lens.append(len(nodes))
+        return cleared, total, holds, lens
+
+    print(f"\n  {'reading':>12} {'rule':>9} {'holds':>7} {'cleared':>8} "
+          f"{'time':>8} {'clears/s':>9} {'vs trim':>8} {'>=6':>6}")
+    for cost in CHECK_COSTS:
+        base = None
+        for extend in (False, True):
+            c, t, h, lens = run(cost, extend)
+            rate = c / t
+            base = base if base is not None else rate
+            long = sum(v >= 6 for v in lens) / len(lens)
+            print(f"  {cost:11.2f}s {'rebuild' if extend else 'trim':>9} "
+                  f"{h:7d} {c:8d} {t:8.1f} {rate:9.2f} "
+                  f"{rate / base - 1:+8.1%} {long:6.1%}")
+
+    same = sum(1 for r in fired if len(grown.get(id(r), r["kept"])) > len(r["kept"]))
+    print(f"\n  the marks grew {same} of {len(fired)} checked chains "
+          f"({same / max(1, len(fired)):.0%})")
+    print("  A rebuild that cannot beat the trim hands the trim back, so this")
+    print("  rule can add clears and never costs any -- what it can cost is a")
+    print("  wrong member, and only a played round prices that.")
+
+
 def readability(rows: list[dict], verify_at: float, min_chain: int) -> None:
     print("\n== readings the trim should not have trusted ==")
     print("  A trim is only as good as the frame it read. A board that shows no")
@@ -308,6 +459,11 @@ def main() -> int:
         f"{k} {opts[k]}" for k in
         ("mode", "k", "link_px", "block", "purity", "min_chain", "max_chain")
         if k in opts))
+    # Every switch that was on while this was collected, named without anyone
+    # keeping a list up to date -- see `describe_run`. A replay that cannot
+    # state the conditions it is replaying is the eleventh round's mistake.
+    for line in describe_run(rows):
+        print(f"  {line}")
     print(f"  capture: {rows[0]['capture']}")
     versions = Counter(r["version"] for r in rows)
     if len(versions) > 1:
@@ -319,6 +475,7 @@ def main() -> int:
     refusal_by_position(rows)
     sweep(rows, min_chain)
     truncation(rows, min_chain)
+    rebuild(rows, min_chain, args.verify_at)
     readability(rows, args.verify_at, min_chain)
     recall(rows, args.aura)
     health(rows)

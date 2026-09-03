@@ -77,8 +77,8 @@ class TrayApp:
             return_heart_minutes=self._settings.return_heart_minutes,
             claim_pattern=self._settings.claim_pattern,
             restart_when_stuck=self._settings.restart_when_stuck,
-            steady_fit=self._settings.steady_fit,
             measure_clears=self._settings.measure_clears,
+            rebuild_chains=self._settings.rebuild_chains,
             on_change=self._on_change,
             on_notify=self._on_notify,
         )
@@ -173,8 +173,8 @@ class TrayApp:
             "return_heart_minutes": self._service.return_heart_minutes,
             "claim_pattern": self._service.claim_pattern,
             "restart_when_stuck": self._service.restart_when_stuck,
-            "steady_fit": self._service.steady_fit,
             "measure_clears": self._service.measure_clears,
+            "rebuild_chains": self._service.rebuild_chains,
             "purchase": dict(self._settings.purchase),
             "auto_update": self._settings.auto_update,
             "update_status": self._updater.status_text(),
@@ -204,12 +204,12 @@ class TrayApp:
         elif name == "restart_when_stuck":
             self._service.set_restart_when_stuck(value)
             self._settings.restart_when_stuck = self._service.restart_when_stuck
-        elif name == "steady_fit":
-            self._service.set_steady_fit(value)
-            self._settings.steady_fit = self._service.steady_fit
         elif name == "measure_clears":
             self._service.set_measure_clears(value)
             self._settings.measure_clears = self._service.measure_clears
+        elif name == "rebuild_chains":
+            self._service.set_rebuild_chains(value)
+            self._settings.rebuild_chains = self._service.rebuild_chains
         elif name == "auto_update":
             self._updater.set_auto(value)
             self._settings.auto_update = self._updater.auto

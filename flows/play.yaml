@@ -23,13 +23,18 @@ vars:
   # the default: set them here and the panel's tick boxes are the same switch
   # from the other end.
   #
-  # `fit_effort` -- how many restarts the per-frame colour fit gets. 1 is what
-  # every measurement in docs/DATASET-FINDINGS.md was taken under; 3 is the
-  # steadiest measured. See the option below for what each buys.
-  fit_effort: 1
+  # `fit_effort` -- how many restarts the per-frame colour fit gets. 3 is the
+  # steadiest measured and, since the thirteenth round, the default: 4,306
+  # drags played at it gave up nothing against the 726-drag level 1 baseline.
+  # Set this to 1 to revert. See the option below for what each buys.
+  fit_effort: 3
   # `verify_clears` -- re-read the board after each drag and count what left
   # it. A measurement, not a play rule: it costs a capture per drag.
   verify_clears: false
+  # `verify_extend` -- on a `verify_reach` check, rebuild the chain from what
+  # the game marked instead of only trimming the proposal to it. Off, per the
+  # house rule for a play rule no round has judged yet.
+  verify_extend: false
 
 steps:
   # Clear anything left over from a previous round (the score tally, the High
@@ -230,9 +235,9 @@ steps:
         #
         # WHAT IT COSTS AND BUYS, over 60 collected boards:
         #     level  two reads agree  count spread  per fit
-        #       1          73.1%        9.1 tsums     51ms   <- today
+        #       1          73.1%        9.1 tsums     51ms
         #       2          83.3%        6.2 tsums    138ms
-        #       3          91.4%        3.0 tsums    349ms
+        #       3          91.4%        3.0 tsums    349ms   <- today
         # Sampling more of the board does not help -- 160k pixels instead of
         # 40k reads 82.3%, no better than level 2 at four times the price. It
         # is the number of restarts that matters.
@@ -243,20 +248,29 @@ steps:
         # a round -- so level 3 costs ~1.5s of a round that runs for minutes,
         # and it spends it exactly on the frames that are hardest to read.
         #
-        # WHY IT IS STILL OFF. Stability is not the same as correctness. A
-        # steadier fit reads the same board the same way twice; nothing
-        # offline says the way it settles on is the better one, and the
-        # collection cannot say either, because every sample in it was taken
-        # at level 1. A round can.
+        # WHY IT IS NOW THE DEFAULT. It used to be off because stability is
+        # not correctness -- a steadier fit reads the same board the same way
+        # twice, and nothing offline says the reading it settles on is the
+        # better one. The thirteenth round is the played round that asked for:
+        # 321 sessions and 4,306 drags at level 3, against the 726-drag level
+        # 1 baseline. Re-measured on the NEW corpus at k 12, the stability
+        # figure replicated almost exactly -- 74% at level 1 against 93% at
+        # level 3 -- and nothing else moved: colour lift 1.47x -> 1.51x,
+        # detections per board 42 either way, over-splits zero either way,
+        # refusals 29% -> 30%, `balanced` identical to two decimal places.
+        # A read that is twice as steady, gives up nothing, and costs ~1.5s.
         #
-        # WHAT TO WATCH LIVE: the `recalibrated (N -> M tsums)` lines. Today
-        # they swing wildly; with this on the two counts should sit closer
-        # together, and there should be fewer of them. Then the count that
-        # matters, `dragged`, over a whole round against a level 1 round.
+        # WHAT WOULD FALSIFY IT: `found` drifting off 42, an over-split board
+        # appearing, or a level 1 round out-dragging a level 3 one.
         #
-        # HOW TO TURN IT ON: tick "Steady colour fit" in the panel, or set
-        # `fit_effort: 3` in this flow's `vars:` at the top. The panel wins
-        # while the tray is driving, because it passes the variable in.
+        # HOW TO TURN IT OFF: set `fit_effort: 1` in this flow's `vars:` at
+        # the top. That is the only switch there is -- the panel box was
+        # removed when this stopped being an experiment, and the tray no
+        # longer sends the variable at all. It could not be left there: the
+        # tray's overrides are applied OVER a flow's own `vars:`, so a panel
+        # still sending `fit_effort` would silently overwrite this line on
+        # every run started from the panel, and the revert above would appear
+        # to do nothing.
         fit_effort: "${fit_effort}"
 
         # `palette` -- READ THE BOARD THROUGH COLOURS LEARNED FROM PAST ROUNDS.
@@ -373,6 +387,60 @@ steps:
         # HOW TO TURN IT ON: tick "Measure tsums cleared" in the panel, or set
         # `verify_clears: true` in this flow's `vars:` at the top.
         verify_clears: "${verify_clears}"
+
+        # `verify_extend` -- SPEND THE CHECK'S ANSWER ON BOTH HALVES OF IT.
+        # `verify_reach` above presses, reads which tsums the game lights up,
+        # and uses that answer only to take members AWAY. The same reading
+        # also names partners the proposal never contained, and they are free:
+        # the press has been paid for already.
+        #
+        # THE SIZE OF WHAT IS BEING THROWN AWAY, over 4,306 collected drags:
+        # the game marks a mean 6.1 tsums per press, the bot proposes 4.8 and
+        # drags 3.4 after the trim -- and 4.0 marked tsums per press were
+        # never proposed at all. That gap is the biggest single number in the
+        # collection.
+        #
+        # WHY THE GRAPH CANNOT REACH THEM, which is the finding that makes
+        # this a rule rather than a wish: `adjacency()` will not link two
+        # tsums whose `kind` differs, and `kind` is a per-frame k-means id.
+        # Rebuild the chain from the marks using the bot's own ids and it gets
+        # SHORTER -- 29% fewer tsums cleared. Rebuild it treating what the
+        # game lit as the pressed character and it gets longer. The recall gap
+        # is a colour problem wearing a graph's clothes, and the press is the
+        # one moment the colour question has an authoritative answer.
+        #
+        # WHAT IT SHOULD BE WORTH, replayed over those drags with the game's
+        # recorded answers, against the trim AT AN IDENTICAL READING COST:
+        #     cheap read (0.17s)   trim 10.58 clears/s   rebuild 11.18  +5.7%
+        #     mid read   (0.28s)   trim  9.68            rebuild 10.27  +6.0%
+        #     3-frame    (0.41s)   trim  8.81            rebuild  9.37  +6.3%
+        # The same sign and the same size in all three columns, which is the
+        # test a rule has to pass here -- 1,033 more tsums cleared on the same
+        # 853 holds, for 37s more stroke. It also LENGTHENS chains rather than
+        # shortening them: the 6+ share rises with the total, 6.7% -> 9.4%, so
+        # it is not the truncation trade in a new dress. The marks grew 323 of
+        # the 853 checked chains.
+        #
+        # WHAT WOULD FALSIFY IT. Two things, and both need a round:
+        #   * The marks are read at 8x the board's noise floor over ONE frame
+        #     live, where the corpus read them over three. If a single frame
+        #     at that bar is dirtier than the collector's, the rebuilt chains
+        #     will contain tsums that are not partners -- a score popup
+        #     drifting across the board reads as a mark.
+        #   * It assumes the game accepts a member it MARKED. That is the same
+        #     assumption `verify_reach` rests on, now load-bearing twice, and
+        #     `verify_clears` above is still the only thing that can settle it.
+        #
+        # WHAT TO WATCH LIVE: the end-of-round line reports `the marks rebuilt
+        # N chain(s) (M% of checks), adding K member(s)` right after the
+        # `checked N chain(s)` cost. Both halves of the trade in one line. If
+        # M is near zero the marks are adding nothing and the rule is only
+        # costing a stricter bar; if `dragged` climbs but `cleared` does not,
+        # the rebuilt members are not really partners -- turn it off.
+        #
+        # HOW TO TURN IT ON: tick "Rebuild chains from marks" in the panel, or
+        # set `verify_extend: true` in this flow's `vars:` at the top.
+        verify_extend: "${verify_extend}"
 
   - find_click:
       template: cancel_button

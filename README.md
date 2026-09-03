@@ -122,6 +122,7 @@ screen, above the taskbar:
 Mode
  (o) Resume  ( ) Launch  ( ) Play (beta)
 [ ] Auto Play                             <- play a round between cycles
+[ ] Restart when stucked                  <- watchdog, off by default
 ────────────────────────
 [x] Return Heart                          <- send hearts on the clock
      Every hour at        [ 15 |v| ] min
@@ -135,6 +136,10 @@ Purchase box          [   Buy tsum   ]  <- runs purchase_box with the ticks
 [x] Premium Box
 [x] Pick-up Capsule
 [x] Happiness Box
+────────────────────────
+[ ] Data collection                       <- write training samples while playing
+[ ] Measure tsums cleared                 <- for a measuring round, not for playing
+[ ] Rebuild chains from marks             <- unproven play rule, off by default
 ────────────────────────
 [ Stop - Running: ... ]  <- Run when idle, Stop while a run is going
 [ Open logs ] [ Exit  ]

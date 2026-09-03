@@ -21,9 +21,6 @@ from ttheart_sender.exceptions import WindowNotFoundError
 from ttheart_sender.tray.modes import MODES, get_mode
 from ttheart_sender.tray.service import (
     CLAIM_ALL_VAR,
-    FIT_EFFORT_OFF,
-    FIT_EFFORT_ON,
-    FIT_EFFORT_VAR,
     PLAY_CHANCE_OFF,
     PLAY_CHANCE_ON,
     PLAY_CHANCE_VAR,
@@ -31,6 +28,7 @@ from ttheart_sender.tray.service import (
     RETURN_HEART_VAR,
     STUCK_CHECK_VAR,
     VERIFY_CLEARS_VAR,
+    VERIFY_EXTEND_VAR,
     AutomationService,
     RunState,
 )
@@ -48,7 +46,7 @@ DEFAULT_MARKS = list(RETURN_HEART_MINUTES_DEFAULT)
 
 
 def overrides(chance=PLAY_CHANCE_OFF, timed=False, marks=None, claim_all=False,
-              stuck_check=False, fit_effort=FIT_EFFORT_OFF, verify_clears=False):
+              stuck_check=False, verify_clears=False, verify_extend=False):
     """What a run started from the panel should be handed."""
     return {
         PLAY_CHANCE_VAR: chance,
@@ -56,8 +54,8 @@ def overrides(chance=PLAY_CHANCE_OFF, timed=False, marks=None, claim_all=False,
         RETURN_HEART_MINUTES_VAR: DEFAULT_MARKS if marks is None else list(marks),
         CLAIM_ALL_VAR: claim_all,
         STUCK_CHECK_VAR: stuck_check,
-        FIT_EFFORT_VAR: fit_effort,
         VERIFY_CLEARS_VAR: verify_clears,
+        VERIFY_EXTEND_VAR: verify_extend,
     }
 
 
@@ -853,38 +851,41 @@ def test_ticking_the_box_creates_no_folder(tmp_path):
 # the two experiment switches
 # --------------------------------------------------------------------------
 def test_the_experiments_are_off_until_the_panel_ticks_them():
-    """Both are unproven by a played round, which is what off-by-default means."""
+    """The service enables nothing it was not handed."""
     app = FakeApp()
     service = AutomationService(app)
 
-    assert service.steady_fit is False
     assert service.measure_clears is False
+    assert service.rebuild_chains is False
     service.start()
     wait_for(lambda: service.state is RunState.IDLE)
-    assert app.variables == [overrides(fit_effort=FIT_EFFORT_OFF, verify_clears=False)]
+    assert app.variables == [overrides(verify_clears=False, verify_extend=False)]
 
-    assert service.set_steady_fit(True) is True
-    assert service.set_steady_fit(True) is False, "re-ticking should be a no-op"
     assert service.set_measure_clears(True) is True
+    assert service.set_rebuild_chains(True) is True
+    assert service.set_rebuild_chains(True) is False, "re-ticking should be a no-op"
 
     service.start()
     wait_for(lambda: service.state is RunState.IDLE)
-    assert app.variables[-1] == overrides(fit_effort=FIT_EFFORT_ON, verify_clears=True)
+    assert app.variables[-1] == overrides(verify_clears=True, verify_extend=True)
 
 
-def test_the_panel_sends_a_level_not_a_flag():
-    """`fit_effort` is an option with three levels; the panel offers two of them.
+def test_the_tray_does_not_send_a_setting_the_flows_have_settled():
+    """`fit_effort` is the flows' to declare, and nobody else's.
 
-    A bool reaching `play_tsum` would be a silent level 1 (or a crash), so the
-    switch has to be turned into a level on the way out.
+    It was a panel box while it was an experiment. Now that `flows/*.yaml` say
+    `fit_effort: 3` outright, the tray sending it too would make the
+    documented revert a lie: `_variables()` is applied over the flow's own
+    `vars:`, so editing `fit_effort: 1` into a flow would be overwritten on
+    every run started from the panel -- silently, and only from the panel.
     """
     app = FakeApp()
-    service = AutomationService(app, steady_fit=True)
+    service = AutomationService(app)
     service.start()
     wait_for(lambda: service.state is RunState.IDLE)
-    handed = app.variables[-1][FIT_EFFORT_VAR]
-    assert handed == FIT_EFFORT_ON
-    assert not isinstance(handed, bool)
+
+    assert "fit_effort" not in app.variables[-1]
+    assert not hasattr(service, "steady_fit")
 
 
 def test_a_live_run_keeps_the_experiments_it_started_with():
@@ -893,8 +894,8 @@ def test_a_live_run_keeps_the_experiments_it_started_with():
 
     service.start()
     app.entered.wait(5)
-    service.set_steady_fit(True)
     service.set_measure_clears(True)
+    service.set_rebuild_chains(True)
     app.release.set()
     wait_for(lambda: service.state is RunState.IDLE)
 
@@ -902,23 +903,34 @@ def test_a_live_run_keeps_the_experiments_it_started_with():
 
 
 def test_the_experiment_ticks_reach_the_service_and_the_saved_file(tray):
+    """The shipped defaults, and a tick that survives a reload.
+
+    Both are play rules no round has judged, which is what off means here.
+    `fit_effort` is not among them any more: the thirteenth round settled it,
+    so it left the panel entirely rather than sitting there as a switch whose
+    off position nobody should choose.
+    """
     from ttheart_sender.tray.settings import PanelSettings
 
-    assert tray._panel_state()["steady_fit"] is False
+    assert "steady_fit" not in tray._panel_state()
     assert tray._panel_state()["measure_clears"] is False
+    assert tray._panel_state()["rebuild_chains"] is False
 
-    tray._set_toggle("steady_fit", True)
     tray._set_toggle("measure_clears", True)
-    assert tray._service.steady_fit is True
+    tray._set_toggle("rebuild_chains", True)
     assert tray._service.measure_clears is True
-    assert tray._panel_state()["steady_fit"] is True
+    assert tray._service.rebuild_chains is True
 
     reloaded = PanelSettings.load(tray._settings_path)
-    assert reloaded.steady_fit is True
     assert reloaded.measure_clears is True
+    assert reloaded.rebuild_chains is True
 
 
-@pytest.mark.parametrize("name", [FIT_EFFORT_VAR, VERIFY_CLEARS_VAR])
+# `fit_effort` is in the list even though the tray no longer sends it: the
+# flows still have to declare and forward it, or editing the revert into
+# launch.yaml would never reach the play round it is meant to revert.
+@pytest.mark.parametrize("name", ["fit_effort", VERIFY_CLEARS_VAR,
+                                  VERIFY_EXTEND_VAR])
 def test_the_experiments_are_declared_and_forwarded_the_whole_chain(name):
     """run_flow re-applies each flow's own vars, so a gap anywhere loses them.
 
@@ -950,3 +962,4 @@ def test_play_reads_both_experiments_from_its_own_variables():
     options = steps[0].params.get("options", {})
     assert options.get("fit_effort") == "${fit_effort}"
     assert options.get("verify_clears") == "${verify_clears}"
+    assert options.get("verify_extend") == "${verify_extend}"

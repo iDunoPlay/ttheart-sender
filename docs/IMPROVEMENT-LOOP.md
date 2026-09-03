@@ -5,7 +5,7 @@ be useful without the one before it, and the last step is what makes the next
 round cheaper than this one.
 
 Why this file exists: the loop is run every few weeks and forgotten in
-between. `docs/DATASET-FINDINGS.md` is the *record* of twelve rounds of it --
+between. `docs/DATASET-FINDINGS.md` is the *record* of thirteen rounds of it --
 what was measured and what it settled -- not the recipe. This is the recipe.
 
 The one rule underneath all of it: **a played round overrules an offline
@@ -47,6 +47,18 @@ The rounds in `DATASET-FINDINGS.md` closed these. They stay closed:
 * **Shortening chains is not an improvement.** Truncation and a lower
   `max_chain` both win on clears-per-second by trading long chains for short
   ones, and nothing offline prices the scoring curve.
+* **The recall gap is colour, not adjacency.** The ~4 marked tsums a press
+  names and the bot never proposes are unreachable because `adjacency()` will
+  not link across a `kind` difference -- rebuild a chain from the marks with
+  the bot's own ids and it gets 29% *shorter*; with the game's word on
+  identity, 11% longer. A better contact test does not answer it.
+* **FEVER does not want its own `verify_reach`.** The check pays very
+  differently inside FEVER (21% refusals against 34%), but every fever-aware
+  threshold pair flips sign across the three cost columns.
+* **A candidate that needs a dearer reading must beat the incumbent's
+  reading, not its own.** `verify_extend` scored +11.7% at the three-frame
+  cost it was measured under, against the trim's +28.9% at the one frame it
+  actually pays for. Same rule, opposite verdict.
 
 ## 1. Collect
 
@@ -73,7 +85,22 @@ unit of holdout, so a corpus of one proves nothing about the next.
 drag in four.
 
 If you are testing a switch from step 5, change **one** and note it in the
-scorecard row's label. Two at once and neither is measured.
+scorecard row's label. Two at once and neither is measured. The exception is
+`verify_clears`, which decides nothing about how a round is played -- it is
+the *ruler*, and a play rule is best judged with it on. What it does change is
+the clock, so never compare a measuring round's `clears/s` to a round that was
+not measuring.
+
+**You no longer have to write down what you turned on.** From schema 3 a row
+carries *every* play setting in force and the equipped tsum's skill-icon
+colour, so steps 3 and 4 print the conditions back rather than trusting a
+label. `scorecard.py` names every setting that differs from the defaults, and
+`replay_decisions.py` opens with an `armed:` line, an `equipped tsum:` line,
+and a warning if the corpus mixes more than one settings combination. The
+`--label` is now for *why* a round was played, not for what it was played at.
+
+Schema 2 corpora recorded a curated subset, so both tools mark those rows
+`[partial: pre-schema-3]`: an absent setting there is unknown, not default.
 
 ## 2. Check the labels before believing anything
 
@@ -114,9 +141,14 @@ unreadable readings, the recall gap, and board health.
 ## 5. Sweep colour and detection -- where those findings come from
 
 ```
-python scripts/sweep_detect.py --dir dataset --samples 150 --stability
-python scripts/sweep_detect.py --dir dataset -k 6,8,12,16
+python scripts/sweep_detect.py --dir dataset --samples 150 --stability        -k 12 --fit-effort 1,3
+python scripts/sweep_detect.py --dir dataset -k 6,8,12,16 --fit-effort 3
 ```
+
+**Pass `--fit-effort` the level the round was played at.** Without it the
+sweep fits at level 1 whatever the corpus was collected under, and `stable`
+then measures a setting nobody is running -- which is what it silently did
+until the thirteenth round.
 
 This scores candidate settings against the tsums **the game confirmed are
 real** -- thousands of them, against the ten boards `tsum eval` has. Three
@@ -191,35 +223,53 @@ fix the comment in the same pass. Those numbers are load-bearing.
 
 ## Where this stands, and what to try next
 
-**Ready to try -- both are tick boxes in the tray panel, under "Data
-collection":**
+**Ready to try -- a tick box in the tray panel, under "Data collection":**
 
-1. **Steady colour fit** (`fit_effort: 3`) -- **colour and detection.** The per-frame k-means is a coin
-   flip on a quarter of the board: two reads of one frame at the same `k` and
-   radius agree on 73.1% of tsums and their counts differ by nine. At level 3
-   that is 91.4% and three, for ~1.5s a round, because the loop only fits about
-   five times. Watch the `recalibrated (N -> M tsums)` lines close up.
+1. **Rebuild chains from marks** (`verify_extend: true`) -- **gameplay.** The
+   thirteenth round's rule, and the only one currently unproven by a round. On
+   a `verify_reach` check that has already been paid for, the chain is rebuilt
+   from what the game marked instead of only trimmed to it: +6% clears over
+   the trim at an identical reading cost, in all three cost columns, and it
+   lengthens chains rather than shortening them (6+ chains 6.7% -> 9.4%). Watch `the marks rebuilt N
+   chain(s) (M% of checks), adding K member(s)` beside the `checked N` cost.
+   Best run **with "Measure tsums cleared" on**, because it doubles down on
+   the same unmeasured assumption -- see below.
+
 2. **Measure tsums cleared** (`verify_clears: true`) -- **gameplay, as a
-   measuring round.** Everything
+   measuring round.** Still owed, and now owed twice. Everything
    `verify_reach` claims assumes a drag with one refused member clears
-   *nothing*. If the game is lenient, the check buys delay and no clears. No
-   collection can settle it; one round with this on can. Do this before tuning
-   `verify_reach` any further.
+   *nothing*, and `verify_extend` assumes the game accepts a member it
+   marked. If the game is lenient, both are buying delay. No collection can
+   settle it; one round with this on can. It has been the next thing to do
+   for two rounds -- do it before tuning either rule further.
 
-**Confirmed, no action:** `verify_reach: 260` (+12% clears/s at a realistic
-check cost, replicated on two corpora), `floor_mult 8.0`, `k 12`, and
-over-splitting, which has not occurred once in 726 boards.
+**Confirmed, no action:** `fit_effort 3` (now the default -- stability 74% ->
+93% replicated on a second corpus, nothing else moved), `verify_reach: 260`
+(+29%/+18%/+7% across the three cost columns, replicated on three corpora),
+`floor_mult 8.0`, `k 12` (re-confirmed under the steadier fit), and
+over-splitting, which has not occurred once in 1,047 boards.
 
 **Open, in the order they are worth doing:**
 
-1. **Reachability.** The game marks ~6 partners per press; the bot's chain
-   contains ~1.4 of the far ones and never proposes ~4 tsums the game just
-   said were legal. `docs/TODO-blob-adjacency.md`, and every unmarked tsum in
-   the collection is a free negative example for it. Biggest lever available.
-2. **Whether stability is worth a palette after `fit_effort`.** A fixed
-   palette is 100% stable by construction but loses on identity. If level 3
-   buys most of the stability, the palette question is closed for good.
+1. **Reachability, re-aimed at colour.** Still the biggest lever, but the
+   thirteenth round moved where it points: the ~4 marked tsums a press names
+   and the bot never proposes are missed because `adjacency()` will not link
+   across a `kind` difference, not because they are too far apart. Rebuilt
+   with the bot's own ids a chain gets *shorter*. So the work is making
+   `kind` agree with the game about identity -- or letting a chain cross a
+   `kind` boundary on evidence -- and `docs/TODO-blob-adjacency.md`, which
+   attacks the contact test, does not answer it. Every unmarked tsum in the
+   collection is still a free negative example.
+2. **Whether stability is worth a palette after `fit_effort` 3.** The gap a
+   fixed palette would close is now seven points rather than twenty-seven,
+   and it still loses on identity. Nearly closed for good.
 3. **`floor_mult` above 8** -- only worth re-sweeping against something
    actually trained on the corpus.
 4. **The `before` crop is not clean.** The previous press's glow survives into
    it and the reading charges its disappearance to the wrong tsum.
+5. **Fetch the play machine's log when a finding needs one.** Rounds are
+   played on a separate machine and only `dataset/` is carried back, so
+   anything that reaches only the log -- `recalibrated (N -> M tsums)`, the
+   end-of-round line -- stays there. From schema 3 the numbers that decide
+   live in the samples instead, which is the durable fix; until then, copy
+   `logs/ttheart.log` off the play machine before it rotates.

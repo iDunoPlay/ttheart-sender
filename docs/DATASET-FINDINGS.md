@@ -1067,3 +1067,264 @@ each other. The baseline row:
 | collected | samples | settings | colour lift | plausible | found | refused | dead drags |
 |---|---:|---|---:|---:|---:|---:|---:|
 | 2026-09-02 | 726 | k12 link105 fit1 floor8.0 | 1.47x | 98% | 42 | 29% | 29% |
+
+## Thirteenth round: the steady fit held, and the recall gap turned out to be colour
+
+Collected with **steady colour fit ON (`fit_effort` 3) and measure tsums
+cleared OFF** -- one switch changed from the twelfth round, as step 1 asks.
+321 sessions, 4,306 drags, six times the baseline corpus. The last 28 samples
+(`20260903_092108`) were taken after the box was unticked and read `fit1`;
+0.6% of the corpus, and nothing below turns on them.
+
+**Both corpora were played with Beast equipped**, stated by the player rather
+than read from the data -- nothing in `samples.jsonl` records which tsum was
+equipped. That is good for the A/B, because the comparison is not confounded
+by a change of character, and it is a limit on everything below: the equipped
+tsum decides how the board is filled and which skill fires, so these numbers
+are Beast's numbers until a second character says otherwise. **`options`
+should carry the equipped tsum**; this is the third provenance gap in three
+rounds, after the collection window's play log and the eleventh round's
+`verify_reach`.
+
+Three things came out of it: `fit_effort` 3 is now the default, a fever-aware
+verify check is dead, and the recall gap -- the biggest open item for three
+rounds -- is not the graph problem everyone assumed.
+
+### `fit_effort` 3: the played round the twelfth asked for
+
+The twelfth round measured stability over 60 boards and shipped the switch
+off, because "every sample in the collection was taken at level 1" and only a
+round could say whether a steadier read is a better one. This is that round.
+
+Re-measured on the new corpus, at k 12, 150 frames, three seeds each:
+
+```
+             setting   kept  found  stable  pairs  balanced  live here
+    live (as played)   100%   41.1       -      -         -          -
+           k 12 fit1    64%   41.7     74%    353     57.2%      57.9%
+           k 12 fit3    63%   41.4     93%    348     57.4%      57.9%
+```
+
+**The stability figure replicated almost exactly** -- 74%/93% here against
+73.1%/91.4% over the 60 boards, on an independent corpus six times the size.
+And the columns beside it did not move: detections per board 41.7 vs 41.4,
+`balanced` 57.2% vs 57.4% against live's 57.9% either way, `kept` within a
+point.
+
+Nothing moved on the scorecard either, except in the right direction:
+
+| | baseline (726 drags, fit1) | this round (4,306 drags, fit3) |
+|---|---:|---:|
+| colour lift | 1.47x | **1.51x** |
+| boards read at a plausible size | 98% | 97% |
+| detections found (median) | 42 | 42 |
+| over-split boards | 0 | 0 |
+| members refused | 29% | 30% |
+| dead drags | 29% | **26%** |
+
+A read that is twice as steady, costs ~1.5s a round, and gives up nothing.
+**Shipped as the default** -- `fit_effort: 3` in all three flows' `vars:`, and
+setting it back to 1 is the whole revert. The panel box went with it: a
+settled setting does not want a switch whose off position nobody should
+choose, and leaving it there would have been worse than untidy. The tray's
+overrides are applied over a flow's `vars:`, so a panel still sending
+`fit_effort` would have overwritten the revert on every run started from the
+panel -- silently, and only from the panel.
+
+What would falsify it: `found` drifting off 42, an over-split board appearing
+(none in 726 + 4,306 drags), or a level 1 round out-dragging a level 3 one.
+
+**What this does not settle.** The `recalibrated (N -> M tsums)` lines the
+twelfth round named as the live evidence were not read. The log on the machine
+these numbers were computed on ends 2026-09-02 20:45 and resumes at the next
+tray start on 09-03 12:39, while the samples run 21:20 to 09:27 -- because
+**rounds are played on a separate machine and only the dataset is carried
+back**. The log is not lost; it is on the play machine, and nobody fetched it.
+The offline replication is strong enough to move the default without it, but
+the live half of that test is still owed.
+
+That split is worth stating once, because it decides what a round can measure:
+anything that reaches only the log stays on the machine that played it. It is
+why `verify_clears` -- whose entire output was a log line -- could not be
+handed over as a dataset until schema 3 wrote the count into the sample.
+
+### `k 12` re-confirmed under the steadier fit
+
+Since `fit_effort` changes the fit, the ninth round's `k` had to be re-asked
+under it. It survives -- `k 12` keeps the most confirmed tsums (63%, against
+56% at k 6, 61% at k 8, 46% at k 16) and sits within half a point of live on
+`balanced`. k 16 scores best on `balanced` (58.9%) and loses a quarter of the
+tsums to get there, which is the trade the ninth round already refused.
+
+### `verify_reach 260` replicated a third time, and re-priced
+
+Third corpus, third time it holds. Clean rate still falls away with reach --
+100% under 90px, 69% at 90-150, 55% at 150-220, 37% at 220-260, 28% at
+260-300, 8% past 300 -- and leg length still separates nothing.
+
+Re-priced over 4,306 drags, 260px is best or near-best in all three cost
+columns (+28.9% / +18.0% / +7.3% against no check). 220px wins the cheap
+column (+31.8%) and loses the dear one, which is exactly why 260 was the
+number chosen rather than 220. **No change.**
+
+### A fever-aware check: measured, and it is not a finding
+
+FEVER is 35% of drags in this corpus and the check pays very differently
+inside it -- refusals run 34.4% in normal play against 21.4% in FEVER, and
+clean drags 48.8% against 60.5%. That looks like a rule: stop paying for
+checks while FEVER is running.
+
+It is not. Priced over ten normal/fever threshold pairs at all three costs,
+the best fever-aware pair beats a flat 260/260 by +2.3% in the cheap column
+and *loses* by 4.6% in the dear one, and exempting FEVER entirely
+(`260/off`) is never better at any cost. **A rule whose ranking flips across
+the three cost columns is not a finding** -- this document's own test, and
+this is the first time it has killed something. `verify_reach` stays flat.
+
+### The recall gap is a colour problem wearing a graph's clothes
+
+This is the round's real result. The gap has been the top open item since the
+tenth round, phrased as reachability: the game marks a mean 6.1 partners per
+press, the bot's chain holds 4.8, and **4.0 marked tsums per press are never
+proposed at all**. `docs/TODO-blob-adjacency.md` treats that as an adjacency
+problem to be fixed with a better contact test.
+
+The corpus can test it directly, because a `verify_reach` check has already
+pressed and already read the marks. Rebuild the chain from what the game lit
+instead of only trimming the proposal to it, over the 806 drags a 260px check
+fires on:
+
+| rebuilt from the marks, using... | cleared | mean length | longer on |
+|---|---:|---:|---:|
+| today: trim the proposal to `kept` | 3,018 | 3.74 | -- |
+| the bot's own `kind` ids | 2,133 | 2.65 (**-29%**) | 4% of drags |
+| the game's word on identity | 3,353 | 4.16 (**+11%**) | 39% of drags |
+
+(Over the 806 of those 853 drags whose reading returned a mark at all.)
+
+**The same rebuild, on the same tsums, with the same graph, wins or loses
+entirely on who is believed about colour.** `adjacency()` will not link two
+tsums whose `kind` differs, and `kind` is a per-frame k-means id -- so the
+partners the game just named are unreachable to the bot's graph not because
+they are too far apart but because the detector called them a different
+character. No contact test fixes that.
+
+That reframes the top open item. It also explains why `link_px` could never
+predict refusal (tenth round, replicated in the eleventh): it was being asked
+a question about distance when the answer was about colour.
+
+### `verify_extend`, and the honest price of it
+
+Shipped as an opt-in play rule: on a check that has already been paid for,
+rebuild the chain from the marks rather than only trimming to them.
+`chain_from_marks()`, `--verify-extend`, the panel's "Rebuild chains from
+marks", off by default.
+
+Against the trim **at an identical reading cost**, over all 4,306 drags --
+`scripts/replay_decisions.py` prints this table, calling the shipped
+`chain_from_marks` rather than a copy of it:
+
+```
+   reading      rule   holds  cleared     time  clears/s  vs trim    >=6
+     0.17s      trim     853    10768   1018.0     10.58    +0.0%   6.7%
+     0.17s   rebuild     853    11801   1055.3     11.18    +5.7%   9.4%
+     0.28s      trim     853    10768   1111.9      9.68    +0.0%   6.7%
+     0.28s   rebuild     853    11801   1149.2     10.27    +6.0%   9.4%
+     0.41s      trim     853    10768   1222.7      8.81    +0.0%   6.7%
+     0.41s   rebuild     853    11801   1260.1      9.37    +6.3%   9.4%
+```
+
+Same sign and the same size in all three columns, on the same holds: 1,033
+more tsums cleared for 37s more stroke. The marks grew 323 of the 853 checked
+chains (38%), and the **6+ column rises with the total** -- 6.7% to 9.4% -- so
+this is not the truncation trade wearing a new hat, which the fifth round
+closed. A rebuild that cannot beat the trim hands the trim back unchanged, so
+the rule can add clears and never subtracts any; what it can cost is a member
+that is not really a partner, and only a round prices that.
+
+**The cost that nearly killed it, stated because it is the interesting part.**
+The corpus's `marked` was read at 8x the board's noise floor over three
+frames: the *collector's* read. A live `verify_reach` check reads one frame at
+the flat 8.0 threshold, and at that bar a press admits 23-35 tsums -- a chain
+built through those is a chain built through the board's noise. So the rule
+has to raise the live bar, and if it also needed the collector's three frames
+it would be dead on arrival: priced at the 0.41s column it returns +11.7%
+against no check, where today's trim at the 0.17s it actually pays returns
++28.9%. **A candidate that needs a dearer reading has to beat the incumbent's
+reading, not its own.**
+
+It survives only because the strict bar is free: `floor_mult` needs the
+board's noise floor, which the same single frame already yields. So the rule
+raises the bar and keeps the one frame, and `floor_mult` is threaded to move
+the *label's* bar only -- the trim keeps its fixed threshold either way, so
+arming this cannot silently re-score `verify_reach`'s own A/B. A test pins
+that split.
+
+**What would falsify it**, and why it is off:
+
+* The strict bar over one frame is not the reading this was measured under.
+  If a single frame at 8x is dirtier than the collector's three, the rebuilt
+  chains will contain tsums that are not partners -- a score popup drifting
+  across the board reads as a mark, and 13.7% of the board outside the glow
+  reads as marked at all.
+* It assumes the game accepts a member it **marked**. That is the same
+  assumption `verify_reach` rests on, now load-bearing in two places, and
+  `verify_clears` is still the only thing that can settle it.
+
+WHAT TO WATCH LIVE: `the marks rebuilt N chain(s) (M% of checks), adding K
+member(s)`, printed beside the `checked N chain(s)` cost. If M is near zero
+the marks add nothing; if `dragged` climbs and `cleared` does not, the added
+members are not partners.
+
+### The provenance gap, closed at the cause rather than the symptom
+
+Three rounds, three versions of the same failure: the eleventh could not say
+whether `verify_reach` was armed while it collected, the twelfth bolted
+`fit_effort` onto the same hand-written dict, and this one had to be *told*
+which tsum was equipped -- while `verify_clears`, the switch the round was
+defined by, was never recorded at all.
+
+The cause is not any of those omissions. It is that `options` was a curated
+list of a dozen keys, and **the key that matters is always the one nobody
+remembered to add**. So the list is gone. Schema 3 records the whole play
+namespace (`play_settings()`, 73 keys, ~1.3KB of JSONL against ~90KB of JPEG
+per sample), taken at write time so a value the loop clamped mid-round is
+recorded as what was used. A flag invented next month is recorded by the same
+function with nobody editing it, and a test holds that property rather than
+holding a list of keys.
+
+`base` joins it: the equipped tsum, as the median Lab colour of its skill
+icon. There is no name to be had -- the cluster id is a per-frame k-means id
+and means nothing between sessions -- but the icon is a fixed sprite in a
+fixed place, so the same character lands within a few Lab units across
+sessions and a different one does not. `scorecard.py` and
+`replay_decisions.py` now print the armed switches and the equipped tsum back
+from the corpus, and warn when a corpus mixes two settings combinations --
+which it immediately did, catching this round's own 28-sample `fit1` tail
+without being told to look.
+
+The first thing it caught about the rounds already banked: every scorecard row
+so far reads `k12 link105 fit… floor8.0`, and the rounds were in fact played
+at `block 1.25` and `max_chain 12` -- neither the CLI default, and neither ever
+in a row.
+
+### A tool that could not measure the switch it was asked about
+
+`scripts/sweep_detect.py` fitted at `fit_effort` 1 unconditionally -- the
+level is not a parameter of `detect()`'s default path -- so its `stable`
+column scored a setting nobody was running, and could not have scored this
+round's corpus at all. It now takes `--fit-effort`, and the numbers above are
+from it. Worth recording as its own line: the sweep is the instrument, and an
+instrument that silently reads one fixed setting will keep confirming it.
+
+### What this round did not settle
+
+* **Whether the game clears a partly-refused chain.** Still the debt, and now
+  owed by two rules instead of one. It was the switch left OFF this round.
+* **The live `recalibrated` evidence for `fit_effort`**, lost with the play
+  log for the collection window.
+* **Whether a palette is worth having after `fit_effort` 3.** At 93% stable
+  the gap a fixed palette would close is now seven points, and it still loses
+  on identity. Close to closed, not closed.
+* **The `before` crop**, still not clean: the previous press's glow survives
+  into it.

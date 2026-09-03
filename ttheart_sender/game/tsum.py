@@ -35,7 +35,7 @@ import logging
 import math
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import product
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional, Sequence
@@ -199,12 +199,21 @@ class Chain:
 #: four times the cost -- so it is the fit's own restarts that matter, not how
 #: much of the board it looks at.
 #:
-#: Level 1 is the default because it is what every measurement in
-#: `docs/DATASET-FINDINGS.md` was taken under. Raising it costs nothing per
-#: *frame*: the loop caches its centres and only refits on a fever transition,
-#: a shuffle or a recalibration -- about five times in a round, so level 3
-#: costs ~1.5s of a round that runs for minutes. See `fit_effort` in
-#: `flows/play.yaml`.
+#: Level 1 stays the *code* default, so a bare `detect()` call and every
+#: offline measurement keep reading the way the rounds in
+#: `docs/DATASET-FINDINGS.md` were taken. What ships to a played round is
+#: level 3: the thirteenth round put 4,306 drags through it and gave up
+#: nothing against the level 1 baseline -- stability 74% -> 93% re-measured on
+#: the new corpus, detections per board, `balanced` and refusals all
+#: unchanged -- so `flows/*.yaml` set `fit_effort: 3`, and the panel box that
+#: used to switch it went away with the experiment. Raising it costs nothing
+#: per *frame*: the loop
+#: caches its centres and only refits on a fever transition, a shuffle or a
+#: recalibration -- about five times in a round, so level 3 costs ~1.5s of a
+#: round that runs for minutes.
+#:
+#: Two defaults rather than one is deliberate: moving the code default would
+#: silently re-score every offline number this project has taken.
 FIT_EFFORT = {1: (4, 20, 1.0), 2: (8, 40, 0.5), 3: (16, 60, 0.25)}
 
 
@@ -851,6 +860,7 @@ def read_base_kind(
     *,
     spec: Optional[str] = None,
     debug_dir: Optional[Path] = None,
+    out: Optional[dict] = None,
 ) -> tuple[Optional[int], float]:
     """Identify which colour cluster the bottom-left skill icon shows.
 
@@ -860,6 +870,16 @@ def read_base_kind(
 
     Returns (cluster index, Lab distance). A large distance means no cluster
     really matched and the caller should not trust it.
+
+    `out` receives the icon's own median Lab colour, which is the closest
+    thing this project has to the *name* of the equipped tsum. The cluster
+    index cannot serve: it is a per-frame k-means id and means nothing between
+    frames, let alone between sessions. The icon colour is read off raw pixels
+    of a fixed sprite in a fixed place, so two collections of the same
+    character land within a few Lab units of each other and two different
+    characters do not. The collector writes it down for exactly that reason --
+    three rounds running, which tsum was equipped was knowable only by asking
+    the player.
     """
     h, w = full_bgr.shape[:2]
     if not spec:
@@ -886,6 +906,8 @@ def read_base_kind(
     if sample.size == 0:
         return None, float("inf")
     icon_lab = np.median(sample, axis=0)
+    if out is not None:
+        out["icon_lab"] = [round(float(v), 1) for v in icon_lab]
 
     d = np.linalg.norm(centres - icon_lab[None, :], axis=1)
     best = int(d.argmin())
@@ -1483,6 +1505,12 @@ class PlayReport:
     #: and a run where it is most of them is a capture problem, not a chain
     #: problem.
     unreadable: int = 0
+    #: --verify-extend only: checks whose marks rebuilt a longer chain than the
+    #: trim would have dragged, and the members those rebuilds added. This is
+    #: the benefit side of the rule, and `verified` above is its cost -- the
+    #: two are only worth reading together.
+    extended: int = 0
+    extended_by: int = 0
     #: Why the loop ended -- shown by the CLI and returned to the flow.
     reason: str = ""
     #: True when the stop key ended it rather than a normal exit condition.
@@ -1511,6 +1539,15 @@ class PlayReport:
             if self.unreadable:
                 out += (f", {self.unreadable} of which read nothing and were "
                         f"dragged as proposed")
+            if self.extended:
+                # Cost and benefit in one line, which is what step 7 of
+                # docs/IMPROVEMENT-LOOP.md asks every opt-in rule for: how
+                # many of the checks paid for above came back with a longer
+                # chain than the trim, and how many tsums that added.
+                share = (f" ({100 * self.extended / self.verified:.0f}% of "
+                         f"checks)" if self.verified else "")
+                out += (f"; the marks rebuilt {self.extended} chain(s){share}, "
+                        f"adding {self.extended_by} member(s)")
         return out
 
 
@@ -1928,6 +1965,75 @@ def marked_by_game(drv, before_crop: np.ndarray, board: tuple, tsums: Sequence[T
     return keep
 
 
+def chain_from_marks(tsums: Sequence[Tsum], nodes: Sequence[int],
+                     keep: Sequence[int], marked: Sequence[int], radius: float,
+                     *, link_px: float, block: float, max_chain: int,
+                     budget: float = 0.02) -> list[int]:
+    """The chain the game just described, not the one it was asked about.
+
+    :func:`marked_by_game` reads the press and the trim throws away every
+    proposed member the game did not light. That answer contains more than a
+    trim can use: the marks name partners the chain never contained. Measured
+    over 4,306 collected drags the game marks a mean 6.1 tsums per press and
+    **4.0 of them were never proposed** -- the recall gap, and the biggest
+    single number in the collection.
+
+    Why the graph cannot reach them by itself, which is the finding that makes
+    this worth doing: :func:`adjacency` refuses to link two tsums whose `kind`
+    differs, and `kind` is a per-frame k-means id. Rebuilt from the marks with
+    the bot's own ids the chain gets *shorter* (-29% cleared over the drags a
+    260px check fires on); rebuilt with the game's word on identity it gets
+    longer. **The recall gap is a colour problem wearing a graph's clothes**,
+    and a press that has already been paid for is the one moment the colour
+    question has an authoritative answer. Priced end to end over the whole
+    corpus by `scripts/replay_decisions.py`, against the trim at an identical
+    reading cost: +5.7%, +6.0% and +6.3% clears/s across the three cost
+    columns, with the 6+ chain share rising 6.7% -> 9.4%.
+
+    So the marked tsums are treated as the pressed character -- the game said
+    so -- while every other tsum stays as detected, because they are still
+    needed as *blockers*: drop them and the segment test invents links through
+    tsums that are really in the way.
+
+    Returns a node list starting at `nodes[0]`, never shorter than `keep`.
+    """
+    head = int(nodes[0])
+    lit = {head} | {int(i) for i in keep} | {
+        int(i) for i in marked if 0 <= i < len(tsums)}
+    if len(lit) <= len(keep):
+        return list(keep)
+
+    kind = tsums[head].kind
+    recoloured = [replace(t, kind=kind) if i in lit else t
+                  for i, t in enumerate(tsums)]
+    adj = adjacency(recoloured, radius, block=block, link_px=link_px)
+
+    cap = max_chain if max_chain > 0 else len(tsums)
+    best = [head]
+    deadline = time.monotonic() + budget
+
+    def walk(path: list[int], seen: set[int]) -> None:
+        nonlocal best
+        if len(path) > len(best):
+            best = list(path)
+        # Same shape as `longest_path`: exhaustive, but on a wall clock. The
+        # candidate set is the marks plus the trim -- single figures, so the
+        # budget almost never binds; when it does, the best found so far is
+        # still a chain the game named.
+        if len(path) >= cap or time.monotonic() > deadline:
+            return
+        for nxt in adj[path[-1]]:
+            if nxt in lit and nxt not in seen:
+                path.append(nxt)
+                seen.add(nxt)
+                walk(path, seen)
+                path.pop()
+                seen.discard(nxt)
+
+    walk([head], {head})
+    return best if len(best) > len(keep) else list(keep)
+
+
 # --------------------------------------------------------------------------
 # assist: the user presses, we read the marks and walk the path
 # --------------------------------------------------------------------------
@@ -2295,11 +2401,23 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
             opts.verify_delay = RENDER_FLOOR
         say(f"    verifying chains that reach past {opts.verify_reach:.0f}px, "
             f"reading at {opts.verify_delay:.2f}s")
+        if opts.verify_extend:
+            say(f"    rebuilding checked chains from the marks, at "
+                f"{opts.verify_floor_mult:.0f}x the board's noise floor")
+    elif opts.verify_extend and not opts.verify_hold:
+        # The rule has nothing to run on without a check to ride along with,
+        # and a switch that silently does nothing is worse than one that says
+        # so -- the twelfth round lost a night to exactly that shape.
+        say("    --verify-extend needs --verify-reach or --verify-hold to have "
+            "a reading to rebuild from; it will not fire")
 
     # Fitting the colour palette is the expensive half of detection, and the
     # tsums in play don't change mid-game, so it's fit once and reused. Same for
     # the radius and the base-tsum lookup.
     palette, radius, base = learned, opts.radius, None
+    #: The equipped tsum's own icon colour, read once when `base` is, and
+    #: carried into every sample so a corpus states which character played it.
+    base_icon: Optional[dict] = None
 
     # The pile does not change size during a round, so the radius is a physical
     # constant and re-measuring it every time the fit is thrown away is a
@@ -2506,8 +2624,14 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
                             f"running unlocked (lower --radius-cover to change that)")
 
             if base is None and opts.use_base:
-                base, base_dist = read_base_kind(frame, palette, spec=opts.base)
-                say(f"base tsum: cluster #{base} (Lab distance {base_dist:.1f})")
+                seen_base: dict = {}
+                base, base_dist = read_base_kind(frame, palette, spec=opts.base,
+                                                 out=seen_base)
+                base_icon = {"kind": base,
+                             "lab": seen_base.get("icon_lab"),
+                             "distance": round(float(base_dist), 1)}
+                say(f"base tsum: cluster #{base} (Lab distance {base_dist:.1f}, "
+                    f"icon Lab {seen_base.get('icon_lab')})")
             # Only quantise a second time when the rule that needs it is on:
             # detect() keeps the centres, not the label map, and refitting the
             # labels costs a GEMM over the crop.
@@ -2735,7 +2859,16 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
                     threshold=opts.hold_threshold, aura=opts.hold_aura,
                     frames=samples.frames if collecting else 1,
                     gap=samples.gap if collecting else 0.0,
-                    floor_mult=samples.floor_mult if collecting else 0.0,
+                    # `floor_mult` sets the bar the *label* is read at and
+                    # nothing else -- the trim below keeps the fixed threshold
+                    # either way, so arming the extend rule cannot silently
+                    # re-score `--verify-reach`'s own A/B. The extend rule
+                    # needs it because a mark read at the flat 8.0 admits 23
+                    # to 35 tsums per press, and a chain built from that is
+                    # built from the board's noise.
+                    floor_mult=(samples.floor_mult if collecting
+                                else (opts.verify_floor_mult
+                                      if opts.verify_extend else 0.0)),
                     out=seen)
                 if collecting:
                     samples.record(
@@ -2743,27 +2876,7 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
                         board=(bx, by, bw, bh),
                         radius=radius, tsums=tsums, head=best.nodes[0],
                         proposed=best.nodes, kept=kept, fever=fever.active,
-                        options={"k": opts.k, "scale": opts.scale,
-                                 "link_px": opts.link_px, "block": opts.block,
-                                 "mode": opts.mode, "purity": opts.purity,
-                                 "min_chain": opts.min_chain,
-                                 "max_chain": opts.max_chain,
-                                 # The play settings in force, for context.
-                                 # What the *label* was photographed with is
-                                 # under "capture" -- a sampled drag reads the
-                                 # mark on the collector's terms, not these.
-                                 "hold_delay": opts.hold_delay,
-                                 "hold_threshold": opts.hold_threshold,
-                                 "hold_aura": opts.hold_aura,
-                                 # Whether the reach check was live while this
-                                 # was collected. It does not change `proposed`
-                                 # -- that is written before any trim -- but a
-                                 # replay cannot state the conditions it is
-                                 # replaying without it, and the eleventh round
-                                 # could not.
-                                 "verify_reach": opts.verify_reach,
-                                 "verify_delay": opts.verify_delay,
-                                 "fit_effort": opts.fit_effort},
+                        base=base_icon, options=play_settings(opts),
                     )
                 if not verifying:
                     # Collection must not change how the round is played.
@@ -2779,8 +2892,34 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
                     # two of which are chains the trim cancelled outright.
                     probe["unreadable"] = True
                     return screen
-                probe["dropped"] = len(best.nodes) - len(kept)
+                if opts.verify_extend:
+                    # The check has already been paid for and the game has
+                    # already named its partners. Trimming spends that answer
+                    # on the members it takes away; this also spends it on the
+                    # ones it hands over. Runs before the min_chain test on
+                    # purpose: a chain the trim would abandon is exactly the
+                    # one the marks are most likely to rebuild.
+                    grown = chain_from_marks(
+                        tsums, best.nodes, kept, seen.get("marked") or [],
+                        radius, link_px=opts.link_px, block=opts.block,
+                        max_chain=opts.max_chain)
+                    if len(grown) > len(kept):
+                        report.extended += 1
+                        report.extended_by += len(grown) - len(kept)
+                        kept = grown
+                # Never negative: `verify_extend` can hand back a chain
+                # LONGER than the proposal, and a negative "dropped" would be
+                # truthy, add itself to `report.trimmed`, and print as
+                # "dropped -2 it would not accept".
+                probe["dropped"] = max(0, len(best.nodes) - len(kept))
                 probe["kept"] = len(kept)
+                # The chain actually dragged, which is not `best.nodes` once
+                # either verify rule has had its say. `cleared_by_drag` asks
+                # "which of the DRAGGED tsums are gone", so it has to be told
+                # what was dragged -- with `verify_extend` on, the members the
+                # marks added are not in the proposal at all, and measuring
+                # the proposal would score the rule's own clears as zero.
+                probe["nodes"] = list(kept)
                 if len(kept) < opts.min_chain:
                     # Abandon before moving. Releasing on one tsum clears
                     # nothing, which is cheaper than dragging a chain the game
@@ -2881,11 +3020,24 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
                     # The stroke registered -- the board moved. Whether these
                     # particular tsums went is a separate question, and this
                     # is the only place with the frames to answer it.
+                    dragged = probe.get("nodes") or best.nodes
                     gone, values, idle = cleared_by_drag(
-                        before, after, tsums, best.nodes, tol=opts.clear_tol)
+                        before, after, tsums, dragged, tol=opts.clear_tol)
                     report.checked = True
                     report.cleared += len(gone)
-                    say(f"    popped {len(gone)}/{len(best.nodes)} "
+                    if samples is not None:
+                        # Onto the sample this drag started, so a round played
+                        # to measure clears can be handed over as a dataset
+                        # instead of as a log file on the machine that played
+                        # it. `dragged` too: what cleared is only meaningful
+                        # beside what was attempted, and the two differ once
+                        # a verify rule has trimmed or rebuilt the chain.
+                        samples.note_outcome(
+                            dragged=[int(i) for i in dragged],
+                            cleared=[int(i) for i in gone],
+                            clear_values=[round(float(v), 1) for v in values],
+                            clear_idle=round(float(idle), 2))
+                    say(f"    popped {len(gone)}/{len(dragged)} "
                         f"({'/'.join(f'{v:.0f}' for v in values)} vs idle {idle:.0f})")
                     if not gone:
                         # Not a stall: the drag was delivered and the game
@@ -4917,6 +5069,29 @@ def add_play_args(play, *, merge_default: bool):
                            "buying the check only past ~260px caught most of "
                            "the bad chains for a third of the cost. See "
                            "docs/DATASET-FINDINGS.md")
+    play.add_argument("--verify-extend", action="store_true",
+                      help="on a --verify-reach check, REBUILD the chain from "
+                           "what the game marked instead of only trimming the "
+                           "chain to it. The press has already been paid for "
+                           "and the marks name partners the proposal never "
+                           "contained: over 4,306 collected drags the game "
+                           "marks a mean 6.1 tsums and 4.0 of them were never "
+                           "proposed. Replayed at an identical reading cost "
+                           "this clears +6%% over the trim in every one of the "
+                           "three cost columns, and lengthens chains rather "
+                           "than shortening them (6+ chains 6.7%% -> 9.4%%). "
+                           "OFF by "
+                           "default: it rests on the game accepting a member "
+                           "it marked, which --verify-clears has still not "
+                           "measured. See docs/DATASET-FINDINGS.md")
+    play.add_argument("--verify-floor-mult", type=float, default=8.0,
+                      help="multiple of the board's own noise floor a mark has "
+                           "to clear before --verify-extend will build a chain "
+                           "through it. Only read when --verify-extend is on, "
+                           "and it never moves the trim, which keeps its fixed "
+                           "--hold-threshold. 8.0 is the bar 11,537 samples "
+                           "settled: below it a tsum that reacts is no more "
+                           "the pressed character than the board average is")
     play.add_argument("--verify-delay", type=float, default=0.25,
                       help="seconds to wait before reading the marks on a "
                            "--verify-reach check. Its own setting rather than "
@@ -5114,6 +5289,31 @@ def add_play_args(play, *, merge_default: bool):
     play.add_argument("--move-time", type=float, default=0.05,
                       help="cursor travel time to the shuffle button")
     play.set_defaults(merge=merge_default)
+
+
+def play_settings(opts: argparse.Namespace) -> dict:
+    """Every play setting in force, for a sample to be written with.
+
+    Deliberately *not* a chosen list of the interesting ones. This used to be
+    a hand-written dict of a dozen keys, and it went stale three rounds
+    running: `verify_reach` was missing when the eleventh round needed it,
+    `fit_effort` and `verify_extend` were each bolted on by the round that
+    happened to add them, and `verify_clears` was never there at all -- so a
+    corpus could not say whether the switch being A/B'd had been on while it
+    was collected. Curating the list is the bug; the fix is not to curate it.
+
+    So the whole namespace goes in, and a flag added tomorrow is recorded by
+    this function without anyone remembering to come back here. Every value
+    the parser can produce is a JSON scalar (`tests/test_dataset_options.py`
+    holds that true), and the effective value is taken at write time, so a
+    setting the loop clamped mid-round -- `verify_delay` up to the render
+    floor -- is recorded as what was actually used rather than what was asked
+    for.
+
+    What it costs: about 1.5KB of JSONL per sample, against ~90KB of JPEG.
+    """
+    return {k: v for k, v in sorted(vars(opts).items())
+            if isinstance(v, (bool, int, float, str)) or v is None}
 
 
 def play_defaults(*, merge: bool = False) -> argparse.Namespace:

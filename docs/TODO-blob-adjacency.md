@@ -1,5 +1,18 @@
 # TODO: decide whether `--mode blob` becomes the default
 
+> **Read this first (thirteenth round).** This document exists because ~4
+> tsums a press marks are never proposed, and it treats that as a *contact*
+> problem. Measured directly on 4,306 collected drags, it is not: rebuilding a
+> chain from the tsums the game itself lit makes it 29% SHORTER when the bot's
+> own `kind` ids are used and 11% longer when the game's word on identity is,
+> because `adjacency()` refuses to link across a `kind` difference at any
+> distance. The missed partners are missed on colour, not on geometry, and a
+> better contact test does not reach them. See "The recall gap is a colour
+> problem wearing a graph's clothes" in `docs/DATASET-FINDINGS.md`. What is
+> below still stands on its own terms -- `blob_adjacency()` does accept more
+> real links than `adjacency()` -- it is just no longer the answer to the
+> recall gap.
+
 Status: **on main, opt-in, switched OFF in `flows/play.yaml`, one live round
 against it.** Played alongside `bowl_reject`, the round showed no improvement
 worth the 60ms, and the line is commented out rather than deleted so the next

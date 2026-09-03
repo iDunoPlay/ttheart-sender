@@ -50,8 +50,8 @@ ID_UPDATE = 2012
 ID_RESTART_STUCK = 2016
 ID_CLEAR_LOGS = 2017
 ID_CLEAR_DATA = 2018
-ID_STEADY_FIT = 2019
 ID_MEASURE_CLEARS = 2020
+ID_REBUILD_CHAINS = 2021
 #: A label rather than a control, but it is rewritten on every refresh, so it
 #: needs an id to be found again.
 ID_UPDATE_STATUS = 2013
@@ -374,8 +374,8 @@ class ControlPanel:
         # "Experiments" says. They are here rather than with Auto Play because
         # each is only worth turning on for a run that is also collecting: the
         # comparison is what makes them mean anything.
-        y = self._add_check(ID_STEADY_FIT, "Steady colour fit", y)
         y = self._add_check(ID_MEASURE_CLEARS, "Measure tsums cleared", y)
+        y = self._add_check(ID_REBUILD_CHAINS, "Rebuild chains from marks", y)
 
         y += SECTION_GAP
         y = self._add_line(y)
@@ -668,8 +668,8 @@ class ControlPanel:
         for index, (key, _label, _flag) in enumerate(CLAIM_PATTERNS):
             self._set_check(ID_CLAIM_BASE + index, key == pattern)
         self._set_check(ID_COLLECT_DATA, state.get("collect_data", False))
-        self._set_check(ID_STEADY_FIT, bool(state.get("steady_fit", False)))
         self._set_check(ID_MEASURE_CLEARS, bool(state.get("measure_clears", False)))
+        self._set_check(ID_REBUILD_CHAINS, bool(state.get("rebuild_chains", False)))
         purchase = state.get("purchase", {})
         for index, (key, _label, default) in enumerate(PURCHASE_BOXES):
             self._set_check(ID_PURCHASE_BASE + index, purchase.get(key, default))
@@ -822,10 +822,10 @@ class ControlPanel:
                 self._on_toggle("restart_when_stuck", self._get_check(ident))
             elif ident == ID_COLLECT_DATA:
                 self._on_toggle("collect_data", self._get_check(ident))
-            elif ident == ID_STEADY_FIT:
-                self._on_toggle("steady_fit", self._get_check(ident))
             elif ident == ID_MEASURE_CLEARS:
                 self._on_toggle("measure_clears", self._get_check(ident))
+            elif ident == ID_REBUILD_CHAINS:
+                self._on_toggle("rebuild_chains", self._get_check(ident))
             elif ident == ID_RETURN_HEART:
                 self._on_toggle("return_heart", self._get_check(ident))
             elif ident == ID_AUTO_UPDATE:

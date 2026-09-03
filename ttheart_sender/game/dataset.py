@@ -89,7 +89,20 @@ log = logging.getLogger(__name__)
 #: ``--verify-hold``'s, and every row carries the mark reading (``baseline``,
 #: ``marks``, ``capture``) it was judged on. Schema 1 rows have no usable
 #: label; see the module docstring.
-SCHEMA = 2
+#:
+#: 3 -- a row states its own conditions and its own result without being
+#: asked. ``options`` is every play setting in force rather than a hand-picked
+#: dozen, ``base`` names the equipped tsum by its skill-icon colour, and
+#: ``cleared``/``dragged`` record what the drag attempted and what actually
+#: left the board when ``--verify-clears`` measured it. Schema 2 rows stay
+#: fully usable and nothing reads 3 as a floor.
+#:
+#: What 3 buys is that a collection can be carried to another machine and
+#: still answer for itself. That matters here more than it sounds: rounds are
+#: played on one machine and read on another, so anything reaching only the
+#: log stays behind -- which is exactly what happened to ``verify_clears``,
+#: whose whole output was a log line.
+SCHEMA = 3
 
 README = """\
 Tsum detection training data
@@ -99,7 +112,9 @@ Each sample is two images and one line of JSON:
 
   NNNN_before.jpg   the board as the bot saw it, just before pressing a tsum
   NNNN_marked.jpg   the same board while the game highlighted what it marked
-  samples.jsonl     detections, the proposed chain, and what the game accepted
+  samples.jsonl     detections, the proposed chain, what the game accepted,
+                    what the drag cleared, the equipped tsum, and every
+                    setting it was played at
 
 The highlight in `marked` is the game's own answer to "which tsums are the
 same character as the one being held, and reachable from it". That is the
@@ -176,6 +191,13 @@ class DatasetWriter:
         self.enabled = self.per_round > 0
         self.dir: Optional[Path] = None
         self._file = None
+        #: The row for the drag in flight. A sample is written when the press
+        #: happens, but what the drag CLEARED is only known once it has
+        #: finished -- so the row is staged here and flushed by the next
+        #: `record` or by `close`, whichever comes first. Never lost: `close`
+        #: runs in `play_loop`'s `finally`, so an aborted round still writes
+        #: its last sample, just without an outcome.
+        self._pending: Optional[dict] = None
 
     # -- lifecycle -------------------------------------------------------
     def _open(self) -> bool:
@@ -249,7 +271,35 @@ class DatasetWriter:
         self.enabled = False
         self.close()
 
+    def _flush(self) -> None:
+        """Write the staged row, if there is one. Never raises."""
+        row, self._pending = self._pending, None
+        if row is None or self._file is None:
+            return
+        try:
+            self._file.write(json.dumps(row, separators=(",", ":")) + "\n")
+            self._file.flush()
+        except (OSError, ValueError) as exc:
+            self._disable(exc)
+
+    def note_outcome(self, **fields: Any) -> None:
+        """Attach what the drag did to the sample that started it.
+
+        The one number this project has never been able to put in a corpus.
+        `verify_clears` measures what actually left the board, and until now
+        that lived only in the play log and a flow variable -- so a round
+        played to MEASURE clears could not be handed over as a dataset at
+        all: the answer stayed on the machine that played it, in a log that
+        rotates. Recorded here, a collection carries its own result.
+
+        Silently does nothing when no sample is in flight: the clear check
+        runs on every drag and only one drag in `every` is sampled.
+        """
+        if self._pending is not None:
+            self._pending.update(fields)
+
     def close(self) -> None:
+        self._flush()
         if self._file is not None:
             try:
                 self._file.close()
@@ -307,7 +357,8 @@ class DatasetWriter:
                board: Sequence[int], radius: float, tsums: Sequence[Any],
                head: int, proposed: Sequence[int], kept: Sequence[int],
                fever: bool, options: Optional[dict] = None,
-               reading: Optional[dict] = None) -> None:
+               reading: Optional[dict] = None,
+               base: Optional[dict] = None) -> None:
         """Write one sample. Never raises."""
         # The cap is enforced here as well as in `wants`, so a caller that
         # samples on its own schedule still cannot fill a disk.
@@ -317,6 +368,10 @@ class DatasetWriter:
             return
         if not self._open():
             return
+        # The previous drag is over by definition -- this call is the next
+        # press -- so its row goes to disk now, with whatever outcome it
+        # managed to collect.
+        self._flush()
         index = self.written + 1
         try:
             params = [int(cv2.IMWRITE_JPEG_QUALITY), self.quality]
@@ -358,10 +413,23 @@ class DatasetWriter:
                 "bar": round(float(reading.get("bar", 0.0)), 2),
                 "marks": [round(float(v), 1) for v in reading.get("values", [])],
                 "marked": [int(i) for i in reading.get("marked", [])],
+                # Which tsum was equipped, as the median Lab colour of its
+                # skill icon -- see `read_base_kind`. Not a name, but the only
+                # thing here that identifies the character *between* sessions,
+                # and the equipped tsum decides how the board is filled and
+                # which skill fires. Three rounds were collected before anyone
+                # noticed it was knowable only by asking the player. None when
+                # `--use-base` is off, because then it was never read.
+                "base": base,
+                # Every play setting in force, whole -- see `play_settings`.
+                # A curated subset is what made schema 2 unable to say which
+                # experiment had been switched on while it was collecting.
                 "options": options or {},
             }
-            self._file.write(json.dumps(row, separators=(",", ":")) + "\n")
-            self._file.flush()
+            # Staged rather than written: what this drag CLEARED has not
+            # happened yet. `_flush` puts it on disk, at the next press
+            # or at close, whichever comes first.
+            self._pending = row
             self.written = index
         except (OSError, cv2.error, ValueError) as exc:
             self._disable(exc)

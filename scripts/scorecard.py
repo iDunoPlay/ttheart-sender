@@ -36,6 +36,7 @@ import json
 import math
 import random
 import statistics as st
+import sys
 import time
 from pathlib import Path
 
@@ -55,9 +56,12 @@ Every number is measured against the game's own marks -- see
   detections); **found** is the median count.
 * **refused** -- share of proposed chain members the game would not take;
   **dead drags** run and clear nothing.
+* **cleared** -- share of DRAGGED tsums that actually left the board. The only
+  column that is not a proxy, and `--` until a round is played with "Measure
+  tsums cleared" on. Before schema 3 no collection could carry it.
 
-| collected | samples | settings | colour lift | plausible | found | refused | dead drags |
-|---|---:|---|---:|---:|---:|---:|---:|
+| collected | samples | settings | colour lift | plausible | found | refused | dead drags | cleared |
+|---|---:|---|---:|---:|---:|---:|---:|---:|
 """
 
 
@@ -141,13 +145,120 @@ def gameplay(rows) -> dict:
     }
 
 
+def _defaults() -> dict:
+    """The play settings at their defaults, or {} if the game module is absent.
+
+    Imported lazily and defensively: everything else here is stdlib reading
+    JSONL, and a scorecard should still print for someone holding only a
+    collection. Without it the row falls back to naming what it can see.
+    """
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from ttheart_sender.game.tsum import play_defaults
+        return {k: v for k, v in vars(play_defaults()).items()
+                if isinstance(v, (bool, int, float, str)) or v is None}
+    except Exception:
+        return {}
+
+
+#: Settings that describe the machine or the collection rather than how the
+#: round was played, and would crowd out the ones that matter. Excluded from
+#: the row only -- schema 3 records them, and this is a display choice.
+_NOT_PLAY = ("dataset", "duration", "countdown", "dry_run", "merge",
+             "no_prepare", "debug_dir")
+
+
+def clears(rows) -> dict:
+    """What actually left the board, when the round measured it.
+
+    The only headline here that is not a proxy. `refused` and `dead drags`
+    describe what the game SAID; this is what the board did, and it is the
+    number the project is ultimately played for. Empty unless the corpus was
+    collected with `verify_clears` on -- which, before schema 3, no corpus
+    could carry at all: the count lived in the play log of the machine that
+    played the round.
+    """
+    measured = [r for r in rows if isinstance(r.get("cleared"), list)]
+    if not measured:
+        return {}
+    popped = sum(len(r["cleared"]) for r in measured)
+    tried = sum(len(r.get("dragged") or r["kept"]) for r in measured)
+    dead = sum(1 for r in measured if not r["cleared"])
+    return {"drags": len(measured), "popped": popped, "tried": tried,
+            "rate": popped / max(1, tried), "per_drag": popped / len(measured),
+            "dead": dead / len(measured)}
+
+
 def settings_of(rows) -> str:
+    """What this collection was played at, as everything that is NOT default.
+
+    Not a chosen list of interesting keys. That is what this function used to
+    be, and the interesting key is always the one somebody forgot to add: the
+    row for the eleventh round could not say whether `verify_reach` had been
+    on. A diff against the defaults names the new flag the round after it is
+    invented, with nobody editing this file.
+
+    Falls back to the old hand-named few when the row predates schema 3 and
+    only carries them.
+    """
     o = rows[0]["options"]
-    bits = [f"k{o.get('k')}", f"link{o.get('link_px')}", f"fit{o.get('fit_effort', 1)}"]
-    if o.get("verify_reach"):
-        bits.append(f"reach{int(o['verify_reach'])}")
+    base = _defaults()
+    full = rows[0].get("schema", 1) >= 3
+    bits = [f"k{o.get('k')}", f"link{o.get('link_px')}"]
+
+    if base:
+        changed = []
+        for key in sorted(o):
+            if key in _NOT_PLAY or key.startswith("dataset_") or key in ("k", "link_px"):
+                continue
+            if key in base and o[key] != base[key]:
+                value = o[key]
+                if isinstance(value, bool):
+                    changed.append(key if value else f"no-{key}")
+                elif isinstance(value, float) and value.is_integer():
+                    changed.append(f"{key} {int(value)}")
+                else:
+                    changed.append(f"{key} {value}")
+        bits += changed
+    else:
+        # Schema 2 and older: only the curated dozen was recorded, so the row
+        # can only name those, and cannot promise the rest were at defaults.
+        bits.append(f"fit{o.get('fit_effort', 1)}")
+        if o.get("verify_reach"):
+            bits.append(f"reach{int(o['verify_reach'])}")
+
     bits.append(f"floor{rows[0]['capture'].get('floor_mult')}")
+    who = equipped_of(rows)
+    if who:
+        bits.append(who)
+    if not full:
+        # Schema 2 recorded a curated subset, so "not in this list" means "not
+        # recorded", not "left at its default". Say so in the row rather than
+        # let a later reader assume the stronger thing.
+        bits.append("[partial: pre-schema-3 row]")
     return " ".join(bits)
+
+
+def equipped_of(rows) -> str:
+    """The equipped tsum, as the colour of its skill icon.
+
+    There is no name to be had -- see `read_base_kind` -- but the icon colour
+    separates one character from another, and the equipped tsum decides how
+    the board is filled and which skill fires. A row that does not say which
+    character played it is not comparable to one that does, which is a thing
+    this file learned three rounds late.
+    """
+    labs = [tuple(r["base"]["lab"]) for r in rows
+            if isinstance(r.get("base"), dict) and r["base"].get("lab")]
+    if not labs:
+        return ""
+    mid = [round(st.median(v[i] for v in labs)) for i in range(3)]
+    spread = max(
+        max(abs(v[i] - mid[i]) for i in range(3)) for v in labs)
+    tag = f"base Lab({mid[0]},{mid[1]},{mid[2]})"
+    # A corpus is meant to be one character. A wide spread means it is not,
+    # and every number in the row is then an average over two games.
+    return tag + ("!" if spread > 12 else "")
 
 
 def main() -> int:
@@ -187,6 +298,18 @@ def main() -> int:
     print(f"                 proposed {play['proposed']:.2f}, kept {play['kept']:.2f}, "
           f"and {play['ignored']:.2f} marked tsums per drag never proposed")
 
+    clr = clears(rows)
+    if clr:
+        print(f"clears     {clr['rate']:.0%}     of dragged tsums actually left the "
+              f"board ({clr['popped']} of {clr['tried']} over {clr['drags']} "
+              f"measured drags)")
+        print(f"                 {clr['per_drag']:.2f} cleared per drag; "
+              f"{clr['dead']:.0%} of drags cleared nothing at all")
+    else:
+        print('clears     --      not measured. Tick "Measure tsums cleared" for a '
+              'round and\n                 this becomes the one headline here that '
+              'is not a proxy.')
+
     if args.append:
         HISTORY.parent.mkdir(parents=True, exist_ok=True)
         if not HISTORY.exists():
@@ -195,7 +318,8 @@ def main() -> int:
         with HISTORY.open("a", encoding="utf-8") as fh:
             fh.write(f"| {when} | {len(rows)} | {note} | {col['lift']:.2f}x | "
                      f"{det['plausible']:.0%} | {det['median']} | "
-                     f"{play['refused']:.0%} | {play['dead']:.0%} |\n")
+                     f"{play['refused']:.0%} | {play['dead']:.0%} | "
+                     f"{(format(clr['rate'], '.0%') if clr else '--')} |\n")
         print(f"\nappended to {HISTORY}")
     return 0
 

@@ -18,8 +18,10 @@ Three questions, and they must not be mixed:
 * **stability -- does the setting read the same board the same way twice?**
   (`--stability`.) The per-frame colour fit is k-means with a seed, so the
   same frame at the same `k` and the same radius can be read twice and
-  disagree. A fixed palette has no fit and is deterministic, which is the
-  whole of its case here.
+  disagree. How much it disagrees is set by `fit_effort` -- the restarts the
+  fit gets -- so pass `--fit-effort` the level the round was played at, or
+  the column measures a setting nobody is running. A fixed palette has no fit
+  and is deterministic, which is the whole of its case here.
 
 * **colour -- given the tsums, does `kind` agree with the game about which are
   the same character?** `agreement` is the share of game-confirmed
@@ -141,14 +143,18 @@ class Setting:
 
 def build_settings(args) -> list[Setting]:
     out = []
+    efforts = [int(v) for v in args.fit_effort.split(",") if v.strip()]
     for k in [int(v) for v in args.k.split(",") if v.strip()]:
-        out.append(Setting(
-            f"k {k}",
-            lambda crop, radius, k=k, seed=None: T.detect(
-                crop, k=k, radius=radius, scale=args.scale,
-                palette=(T._quantise(crop, k, None, seed=seed)[1]
-                         if seed is not None else None))[0],
-            refits=True))
+        for effort in efforts:
+            out.append(Setting(
+                f"k {k} fit{effort}",
+                lambda crop, radius, k=k, effort=effort, seed=None: T.detect(
+                    crop, k=k, radius=radius, scale=args.scale,
+                    fit_effort=effort,
+                    palette=(T._quantise(crop, k, None, seed=seed,
+                                         effort=effort)[1]
+                             if seed is not None else None))[0],
+                refits=True))
     for path in args.palette or []:
         centres = Palette.load(path).centres
         out.append(Setting(
@@ -169,6 +175,12 @@ def main() -> int:
     ap.add_argument("-k", default="12",
                     help="comma-separated colour cluster counts to try. Empty "
                          "to score only a palette")
+    ap.add_argument("--fit-effort", default="1",
+                    help="comma-separated `fit_effort` levels to fit each `k` "
+                         "at (1, 2, 3). The level decides how many restarts "
+                         "the per-frame k-means gets, so it is what `stable` "
+                         "is really measuring -- score the level the round was "
+                         "played at, not just the default")
     ap.add_argument("--palette", action="append",
                     help="also score a learned palette (repeatable)")
     ap.add_argument("--scale", type=float, default=1.0,
