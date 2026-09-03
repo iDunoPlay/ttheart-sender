@@ -223,31 +223,41 @@ fix the comment in the same pass. Those numbers are load-bearing.
 
 ## Where this stands, and what to try next
 
+**Leave this one on, permanently:**
+
+* **Measure tsums cleared** (`verify_clears: true`). It was rationed for three
+  rounds on a comment that was simply wrong -- it does not cost a capture,
+  `--verify` already grabs the frame it reads, and the price is a few disk
+  means. From schema 3 it writes `cleared` and `dragged` into the sample, so
+  every collection carries the one headline that is not a proxy. There is no
+  reason to save it for a special round.
+
 **Ready to try -- a tick box in the tray panel, under "Data collection":**
 
 1. **Rebuild chains from marks** (`verify_extend: true`) -- **gameplay.** The
-   thirteenth round's rule, and the only one currently unproven by a round. On
-   a `verify_reach` check that has already been paid for, the chain is rebuilt
-   from what the game marked instead of only trimmed to it: +6% clears over
-   the trim at an identical reading cost, in all three cost columns, and it
-   lengthens chains rather than shortening them (6+ chains 6.7% -> 9.4%). Watch `the marks rebuilt N
-   chain(s) (M% of checks), adding K member(s)` beside the `checked N` cost.
-   Best run **with "Measure tsums cleared" on**, because it doubles down on
-   the same unmeasured assumption -- see below.
+   thirteenth round's rule, replicated on a fourth corpus and still the only
+   one unproven by a played round. On a `verify_reach` check that has already
+   been paid for, the chain is rebuilt from what the game marked instead of
+   only trimmed to it: +4% to +6% clears over the trim at an identical reading
+   cost, in all three cost columns and on both corpora, and it lengthens
+   chains rather than shortening them. Watch `the marks rebuilt N chain(s)
+   (M% of checks), adding K member(s)` beside the `checked N` cost. Run it
+   **with "Measure tsums cleared" on**: it rests on the same unmeasured
+   assumption `verify_reach` does -- that a drag with one refused member
+   clears nothing -- and that assumption is now load-bearing twice.
 
-2. **Measure tsums cleared** (`verify_clears: true`) -- **gameplay, as a
-   measuring round.** Still owed, and now owed twice. Everything
-   `verify_reach` claims assumes a drag with one refused member clears
-   *nothing*, and `verify_extend` assumes the game accepts a member it
-   marked. If the game is lenient, both are buying delay. No collection can
-   settle it; one round with this on can. It has been the next thing to do
-   for two rounds -- do it before tuning either rule further.
+**Confirmed, no action:** `fit_effort 3` (the default -- stability 74% -> 93%
+replicated on a second corpus; note that three corpora now show it moves no
+outcome, so the claim is "steadier, and free", not "better"), `verify_reach:
+260` (+27%/+17%/+7% across the three cost columns, replicated on four
+corpora), `floor_mult 8.0`, `k 12`, and over-splitting, which has not occurred
+once in 2,541 boards.
 
-**Confirmed, no action:** `fit_effort 3` (now the default -- stability 74% ->
-93% replicated on a second corpus, nothing else moved), `verify_reach: 260`
-(+29%/+18%/+7% across the three cost columns, replicated on three corpora),
-`floor_mult 8.0`, `k 12` (re-confirmed under the steadier fit), and
-over-splitting, which has not occurred once in 1,047 boards.
+**Do not re-derive from a label:** which switches were on, which build played
+it, and which tsum was equipped are read off the corpus by steps 3 and 4. If
+they say `[partial: pre-schema-3]`, the corpus predates that and an unnamed
+setting is unknown rather than default -- which is how a round was collected
+with the colour fit silently back at level 1.
 
 **Open, in the order they are worth doing:**
 

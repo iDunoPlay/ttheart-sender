@@ -68,8 +68,10 @@ STUCK_CHECK_VAR = "stuck_check"
 
 #: Flow variable behind "Measure tsums cleared" -- `play_tsum`'s
 #: `verify_clears`. Not a play rule: it re-reads the board after every drag,
-#: which costs a capture each time and is why it is off unless a round is
-#: being played to measure with.
+#: reading the frame `--verify` already grabbed -- so it costs no extra
+#: capture, only a few disk means. Cheap enough to leave on for every round,
+#: and from schema 3 the count is written into the corpus rather than only
+#: the log.
 VERIFY_CLEARS_VAR = "verify_clears"
 
 #: Flow variable behind "Rebuild chains from marks" -- `play_tsum`'s
@@ -271,8 +273,8 @@ class AutomationService:
     def set_measure_clears(self, enabled: bool) -> bool:
         """Arm or disarm the clear check for the next Start.
 
-        Costs a capture per drag, so it belongs to a measuring round rather
-        than to normal play -- and like the rest, a live run is unaffected.
+        Costs no extra capture: `--verify` already grabs the frame this
+        reads. Like the rest, a live run keeps what it started with.
         """
         enabled = bool(enabled)
         with self._lock:

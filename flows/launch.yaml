@@ -28,8 +28,8 @@ vars:
   # per-frame colour fit gets (3 = the steadiest measured, and the default
   # since the thirteenth round; 1 reverts, and this line is where you do it --
   # it has no panel box, deliberately); `verify_clears` re-reads the board
-  # after each drag to count what actually left it, and costs a capture every
-  # time; `verify_extend` rebuilds a checked chain from what the game marked
+  # after each drag to count what actually left it, for no extra capture;
+  # `verify_extend` rebuilds a checked chain from what the game marked
   # instead of only trimming it. The last two are the panel's "Measure tsums
   # cleared" and "Rebuild chains from marks" boxes, and the tray overrides
   # those two only.

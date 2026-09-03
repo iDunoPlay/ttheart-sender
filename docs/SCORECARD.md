@@ -26,5 +26,6 @@ skill icon, and a `!` on it means the corpus mixes more than one character.
 
 | collected | samples | settings | colour lift | plausible | found | refused | dead drags |
 |---|---:|---|---:|---:|---:|---:|---:|
-| 2026-09-02 | 726 | k12 link105 fit1 floor8.0 — baseline before fit_effort | 1.47x | 98% | 42 | 29% | 29% |
-| 2026-09-02 | 4306 | k12 link105 fit3 reach260 floor8.0 — fit_effort 3 (steady colour fit ON, verify_clears OFF) | 1.51x | 97% | 42 | 30% | 26% |
+| 2026-09-02 | 726 | k12 link105 fit1 floor8.0 — baseline before fit_effort | 1.47x | 98% | 42 | 29% | 29% | -- |
+| 2026-09-02 | 4306 | k12 link105 fit3 reach260 floor8.0 — fit_effort 3 (steady colour fit ON, verify_clears OFF) | 1.51x | 97% | 42 | 30% | 26% | -- |
+| 2026-09-03 | 1494 | k12 link105 block 1.25 max_chain 12 verify_reach 260 floor8.0 [partial: pre-schema-3 row] — intended as the verify_clears round; fit_effort silently back to 1, and v1.9.0 could not record either | 1.54x | 96% | 41 | 29% | 25% | -- |

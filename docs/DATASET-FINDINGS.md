@@ -1328,3 +1328,119 @@ instrument that silently reads one fixed setting will keep confirming it.
   on identity. Close to closed, not closed.
 * **The `before` crop**, still not clean: the previous press's glow survives
   into it.
+
+## Fourteenth round: the measuring round that could not measure
+
+Played to settle `verify_clears` -- whether the game clears a chain it only
+partly accepted -- on the **v1.9.0** build, because the play machine had not
+been updated yet. 109 sessions, 1,494 drags, Beast equipped.
+
+It settles nothing about clears, and the reason is worth more than the round
+was: **v1.9.0 has nowhere to put the answer.** `verify_clears` writes to
+`PlayReport.cleared`, the `tsum_tsums_cleared` flow variable, and a `popped
+N/M` log line. None of those is `samples.jsonl`. Rounds are played on one
+machine and read on another, and only `dataset/` is carried back, so the
+entire output of the round stayed on the machine that played it.
+
+Size was never the problem: 1,494 drags over 109 sessions is twice the
+original baseline and well past the ~700-over-50 bar for pricing a play rule.
+The instrument was the problem. Schema 3 fixes it at the cause -- `cleared`
+and `dragged` are written into the sample the drag came from -- and the play
+machine is now on v1.10.0, so the next round carries its own answer.
+
+### Two switches moved, not one
+
+The corpus reports `fit_effort: 1`. The round was meant to change one thing,
+and changed two: the steady colour fit went back to level 1 at the same time.
+
+Nobody chose that. v1.9.0's panel still had the "Steady colour fit" box, and
+`ttheart-settings.json` on the play machine has no `steady_fit` key -- so it
+took that build's default, which was off. The setting was only ever ON in the
+thirteenth round because it was ticked by hand, and it did not survive being
+carried to another machine.
+
+Two things follow. The narrow one: this corpus is comparable to the *726-drag
+fit1 baseline*, not to the fit3 round. The broader one is in the next section.
+
+### A third corpus says the fit level does not move any outcome
+
+| | baseline 726, fit1 | round 13, 4,306, fit3 | this round, 1,494, fit1 |
+|---|---:|---:|---:|
+| colour lift | 1.47x | 1.51x | **1.54x** |
+| plausible | 98% | 97% | 96% |
+| found (median) | 42 | 42 | 41 |
+| refused | 29% | 30% | 29% |
+| dead drags | 29% | 26% | **25%** |
+| over-split boards | 0 | 0 | 0 |
+
+Three corpora, two fit levels, and **every headline sits inside its own
+noise**. The thirteenth round shipped `fit_effort: 3` on the argument that
+stability doubled and nothing else moved; this round is the same statement
+from the other side, and it is worth being blunt about what that means. The
+steadier fit is bought entirely on stability -- reading the same board the
+same way twice -- and stability is a *means*. Three corpora have now failed to
+show it arriving anywhere downstream.
+
+That is not a reason to revert it: 93% agreement against 74% is real, it costs
+~1.5s a round, and a reading that is a coin flip on a quarter of the board is
+worse in ways an average over 4,306 drags is exactly the wrong instrument to
+see. But the honest statement of the default is **"steadier, and free"**, not
+"better", and no round has yet shown otherwise. If something later needs the
+fit to be the explanation for a gain, this is the note that says it will not
+be.
+
+### `verify_reach 260` and `verify_extend`, replicated on a fourth corpus
+
+Both hold, at a fit level neither was measured under.
+
+Refusal still falls away with reach -- 100% clean under 90px, 70% at 90-150,
+58% at 150-220, 37% at 220-260, 19% at 260-300, 9% past 300 -- and
+`verify_reach 260` prices at +27.5% / +16.7% / +6.9% clears/s across the three
+cost columns (fourth corpus, fourth time). 220px again wins the cheapest
+column only, which is the same reason 260 was chosen over it.
+
+`verify_extend` against the trim at an identical reading cost:
+
+```
+   reading      rule   holds  cleared   clears/s  vs trim    >=6
+     0.17s      trim     294     3783      10.86    +0.0%   7.0%
+     0.17s   rebuild     294     4078      11.33    +4.4%   8.8%
+     0.28s   rebuild     294     4078      10.40    +4.7%   8.8%
+     0.41s   rebuild     294     4078       9.47    +4.9%   8.8%
+```
+
++4.4% to +4.9% here against +5.7% to +6.3% on the fit3 corpus: same sign, same
+size, all three columns, and chains lengthen rather than shorten (6+ share
+7.0% -> 8.8%). The marks grew 98 of 294 checked chains, 33%, against 38%
+before. The recall gap it feeds on is unchanged too -- the game marks 6.02
+partners per press and 3.96 of them are never proposed.
+
+Still off, and still resting on the same unmeasured assumption, which is the
+one this round was supposed to remove.
+
+### `verify_clears` is not expensive, and the comments saying so were wrong
+
+Found while working out whether the switch had even been on. Three comments --
+`flows/play.yaml`, `PanelSettings`, `AutomationService` -- described
+`verify_clears` as costing "a capture per drag", and that is why it was framed
+throughout as something to save for a measuring round.
+
+It does not. `--verify` already grabs the frame after every drag, and
+`cleared_by_drag` reads that same frame; the price is a few per-disk means,
+milliseconds. The CLI help said so correctly all along ("Costs no extra
+capture") and nothing reconciled the two.
+
+So the framing was wrong, not just the number. There is no reason to ration
+it: **leave it on**, and every future corpus carries the one headline that is
+not a proxy. Comments fixed in the same pass. The only real reason it ships
+off is that it changes play slightly -- a drag that clears nothing blacklists
+its kind -- which is a thing to A/B, not a cost to avoid.
+
+### What this round did not settle
+
+* **Whether the game clears a partly-refused chain.** Third round owed it.
+  Now unblocked rather than answered: the play machine is on v1.10.0, so the
+  next collection writes `cleared` per drag.
+* **Whether `verify_extend`'s added members are really partners.** Same
+  answer, same round, and it now wants that round more than anything else
+  does.

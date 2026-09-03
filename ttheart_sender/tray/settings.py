@@ -144,10 +144,11 @@ class PanelSettings:
     #: switch after that -- see :meth:`..tray.app.TrayApp._seed_collection`.
     collect_data: bool = False
     #: Re-read the board after each drag and count what actually left it
-    #: (`verify_clears`). A measurement, not a play rule -- it costs a capture
-    #: per drag and answers the one question no collection can: whether the
-    #: game clears a chain it only partly accepted. Off unless a measuring
-    #: round is being played.
+    #: (`verify_clears`). It answers the one question no collection could:
+    #: whether the game clears a chain it only partly accepted. Costs no extra
+    #: capture -- `--verify` already grabs the frame it reads -- so the only
+    #: reason it ships off is that it changes play slightly: a drag that
+    #: clears nothing blacklists its kind.
     measure_clears: bool = False
     #: On a `verify_reach` check, rebuild the chain from what the game marked
     #: instead of only trimming the proposal to it (`verify_extend`). The

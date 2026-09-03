@@ -28,8 +28,10 @@ vars:
   # drags played at it gave up nothing against the 726-drag level 1 baseline.
   # Set this to 1 to revert. See the option below for what each buys.
   fit_effort: 3
-  # `verify_clears` -- re-read the board after each drag and count what left
-  # it. A measurement, not a play rule: it costs a capture per drag.
+  # `verify_clears` -- count what actually left the board after each drag.
+  # Cheap: it reads the frame `--verify` already grabbed, so there is no
+  # extra capture -- which is why it is worth leaving ON permanently rather
+  # than saving for a measuring round.
   verify_clears: false
   # `verify_extend` -- on a `verify_reach` check, rebuild the chain from what
   # the game marked instead of only trimming the proposal to it. Off, per the
@@ -378,11 +380,17 @@ steps:
         # buys delay and nothing else. No collection can tell those apart,
         # because none of them ever recorded what cleared.
         #
-        # Turning this on makes the loop re-read the board after each drag and
-        # count what left it, which is exactly that missing number. It costs a
-        # capture per drag, so it is for a measuring round, not for playing.
-        # `PlayReport.cleared` and the `tsum_tsums_cleared` variable carry the
-        # answer.
+        # Turning this on makes the loop re-read the board after each drag
+        # and count what left it, which is exactly that missing number.
+        #
+        # WHAT IT COSTS: not a capture. `--verify` already grabs the frame
+        # this reads, so the price is a few per-disk means -- milliseconds.
+        # The comment here used to say "a capture per drag" and was simply
+        # wrong; it is cheap enough to leave on for every round, and from
+        # schema 3 the count lands in `samples.jsonl` beside the chain that
+        # earned it, so leaving it on means every future corpus carries the
+        # one number that is not a proxy. `PlayReport.cleared` and the
+        # `tsum_tsums_cleared` variable carry it live.
         #
         # HOW TO TURN IT ON: tick "Measure tsums cleared" in the panel, or set
         # `verify_clears: true` in this flow's `vars:` at the top.
