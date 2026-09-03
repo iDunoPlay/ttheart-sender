@@ -248,9 +248,11 @@ modelled as clearing *zero* on any chain with a refused member. The fifteenth
 round measured that baseline directly and it clears 70-93% of its members: a
 refusal costs its own clear, not the drag. The benefit is overstated by an
 amount nobody has derived, and the sweep that chose 260 ran under the same
-model. Re-deriving it means correcting `replay_decisions.py`'s cost model,
-which re-scores four earlier rounds -- do it in one deliberate pass, showing
-both columns.
+model. `replay_decisions.py` has been corrected -- it prints
+`all-or-nothing` and `per-member` side by side rather than replacing one with
+the other -- so what is owed now is a corpus to run it over, not a code
+change. Take the sweep on the next collection before quoting any number for
+this rule.
 
 **Confirmed, no action:** `fit_effort 3` (the default -- stability 74% -> 93%
 replicated on a second corpus; note that three corpora now show it moves no

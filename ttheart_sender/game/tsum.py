@@ -2907,6 +2907,29 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
                         report.extended += 1
                         report.extended_by += len(grown) - len(kept)
                         kept = grown
+                if opts.verify_no_trim and len(kept) <= len(best.nodes):
+                    # SPEND THE CHECK ON THE REBUILD ONLY, NEVER ON THE TRIM.
+                    #
+                    # The trim exists because a refused member was believed to
+                    # cost the whole drag. The fifteenth round measured that
+                    # and it is false, and the sixteenth found the shape:
+                    # refusals are a SUFFIX -- the chain dies at the first bad
+                    # member, and 78% of refusing drags refuse everything
+                    # after it. Either way the members the trim removes were
+                    # already worth nothing, so dropping them buys no clears
+                    # and dropping the whole chain (`abandoned`) buys less
+                    # than none.
+                    #
+                    # What the check is still worth is the rebuild above,
+                    # which the same round priced at 22 of 22 added members
+                    # cleared. So: take the rebuild when it is longer, and
+                    # otherwise drag exactly what was proposed. The chain can
+                    # then never fall under min_chain, so nothing is
+                    # abandoned either.
+                    #
+                    # Off by default. It is derived from 36 drags and a model
+                    # this project has now been wrong about twice.
+                    kept = list(best.nodes)
                 # Never negative: `verify_extend` can hand back a chain
                 # LONGER than the proposal, and a negative "dropped" would be
                 # truthy, add itself to `report.trimmed`, and print as
@@ -5084,6 +5107,19 @@ def add_play_args(play, *, merge_default: bool):
                            "default: it rests on the game accepting a member "
                            "it marked, which --verify-clears has still not "
                            "measured. See docs/DATASET-FINDINGS.md")
+    play.add_argument("--verify-no-trim", action="store_true",
+                      help="on a check, use the REBUILD but never the trim: if "
+                           "the marks do not produce a longer chain, drag the "
+                           "proposal exactly as it was rather than cutting it "
+                           "to what the game marked, and never abandon. The "
+                           "trim assumed a refused member costs the whole "
+                           "drag; measured, a drag with one refused member of "
+                           "five still clears the other four (89.8%% of marked "
+                           "members clear, 22.9%% of refused), and refusals are "
+                           "a suffix -- the chain dies at the first bad member, "
+                           "so what the trim removes was already worth nothing. "
+                           "Needs --verify-reach or --verify-hold. OFF by "
+                           "default: derived from 36 drags")
     play.add_argument("--verify-floor-mult", type=float, default=8.0,
                       help="multiple of the board's own noise floor a mark has "
                            "to clear before --verify-extend will build a chain "

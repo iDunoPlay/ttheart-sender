@@ -62,6 +62,27 @@ vars:
   #
   # HOW TO TURN IT OFF: set this back to false. Nothing else changes.
   verify_extend: true
+  # `verify_no_trim` -- spend the check on the REBUILD only, never on the trim.
+  #
+  # The trim was built on "a refused member costs the whole drag". The
+  # fifteenth round measured that and it is false; the sixteenth found the
+  # shape: refusals are a SUFFIX -- 78% of refusing drags refuse everything
+  # after the first bad member, which clears 28.6% against 84.8% before it.
+  # The chain dies where it first goes wrong. So the members the trim removes
+  # were already worth nothing, and a chain the trim ABANDONS outright was
+  # going to clear its opening members for free.
+  #
+  # With this on, a check that cannot lengthen the chain hands back the
+  # proposal untouched, and nothing is ever abandoned. The rebuild still runs
+  # -- that half is the part the fifteenth round proved (22 of 22 added
+  # members cleared).
+  #
+  # OFF, and it should stay off until a round says otherwise: it is derived
+  # from 36 drags and from a cost model this project has now had wrong twice.
+  # WHAT TO WATCH LIVE: `cleared N (M%)` should rise, and the round should
+  # stop reporting `rejected N chain(s) outright`. If clears fall, the trim
+  # was doing something after all -- revert by setting this back to false.
+  verify_no_trim: false
 
 steps:
   # Clear anything left over from a previous round (the score tally, the High
@@ -474,6 +495,11 @@ steps:
         # HOW TO TURN IT ON: tick "Rebuild chains from marks" in the panel, or
         # set `verify_extend: true` in this flow's `vars:` at the top.
         verify_extend: "${verify_extend}"
+
+        # `verify_no_trim` -- KEEP THE REBUILD, DROP THE TRIM.
+        # See the `vars:` block at the top for the measurement and the
+        # revert. Off by default there; this line is what carries it down.
+        verify_no_trim: "${verify_no_trim}"
 
   - find_click:
       template: cancel_button

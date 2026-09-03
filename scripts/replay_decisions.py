@@ -16,6 +16,14 @@ over a directory of session folders:
 The two numbers that decide anything are `cleared` (how many tsums a rule pops)
 and `clears/s` (what it costs to pop them) -- and neither prices the scoring
 curve, which is why a rule that wins on clears/s can still be the wrong rule.
+
+`cleared` is a MODEL, not a measurement, and since the fifteenth round every
+table that reports it prints two: the `all-or-nothing` one this script assumed
+for its first five rounds, under which a chain with any refused member clears
+nothing, and the `per-member` one that round measured, under which each member
+clears on its own odds. They disagree sharply about what NOT checking is worth,
+which is the whole of `verify_reach`'s case. Read the per-member half; the old
+half is there so no earlier round is re-scored without anyone noticing.
 See ``docs/IMPROVEMENT-LOOP.md`` for where this sits in the loop and
 ``docs/DATASET-FINDINGS.md`` for what previous rounds concluded.
 """
@@ -38,6 +46,57 @@ STEP_PX, PER_STEP, HOLD = 8.0, 0.004, 0.05
 #: three and a live check need not. A rule whose ranking flips across these
 #: three columns is not a finding.
 CHECK_COSTS = (0.17, 0.28, 0.41)
+
+#: What a member's fate actually is, measured in the fifteenth round.
+#:
+#: Every number this script printed before that round assumed a drag is
+#: all-or-nothing: an unchecked chain clears in full if the game accepted
+#: every member and clears NOTHING otherwise. That assumption was never
+#: measured, and it is false. Over 111 sampled drags dragged exactly as
+#: proposed -- the game named the refusals, the bot ignored them, and
+#: `verify_clears` recorded what left the board:
+#:
+#:     members the game marked  : 291/324 cleared (89.8%)
+#:     members the game refused :  19/83  cleared (22.9%)
+#:     drags that cleared nothing: 15 of 863 (1.7%)
+#:
+#: So a chain with one refused member out of five still clears the others,
+#: where the all-or-nothing model scored that drag as zero.
+#:
+#: KNOWN WRONG IN ITS SHAPE, and left in place anyway -- read this before
+#: quoting it. "Per member" implies the refusals are independent, and the
+#: sixteenth round says they are not: they are a SUFFIX. Of the drags with a
+#: refusal, 78% have every member from the first bad one onward refused;
+#: P(refused | previous refused) is 81% against 34.5% after a kept one; and
+#: members past the first refusal clear 28.6% against 84.8% before it. The
+#: chain dies where it first goes wrong, which is what a continuous stroke
+#: through a wrong character should do.
+#:
+#: `P_CLEAR_REFUSED` is therefore not "a refused member's own odds" but "what
+#: the dead tail still happens to clear", and this pair is an approximation
+#: of a prefix rule, not a description of one. It is not re-fitted here
+#: because the evidence is 18 refusing drags and 7 post-refusal members --
+#: enough to know the shape is wrong, not enough to fit the right one.
+#: Fix it when a corpus can carry it, and re-read the tables when you do.
+#:
+#: What survives either shape: trimming buys nothing. Under independence the
+#: refused members still clear a little, and under a prefix they were already
+#: dead -- so in both, the trim removes members that cost nothing but stroke
+#: time, and the only part of the check that pays is the rebuild.
+P_CLEAR_MARKED = 0.898
+P_CLEAR_REFUSED = 0.229
+
+#: Members `verify_extend`'s rebuild adds, which the same round priced at
+#: 22 of 22. Kept as its own name rather than folded into P_CLEAR_MARKED: it
+#: is a different population -- partners the graph could not reach -- and n=22
+#: is thin enough that it should be re-measured rather than trusted forever.
+#: Both models are printed side by side, always. Correcting a cost model
+#: re-scores every round already decided under it -- the tenth, eleventh,
+#: thirteenth and fourteenth -- and this project's own rule is not to
+#: re-score a measurement in silence, so the old column stays and stays
+#: labelled. Delete the old one only once every round that quoted it has
+#: been re-read under the new one.
+P_CLEAR_ADDED = 1.000
 
 
 def load(root: Path) -> list[dict]:
@@ -224,35 +283,54 @@ def refusal_by_position(rows: list[dict]) -> None:
 def sweep(rows: list[dict], min_chain: int) -> None:
     print("\n== verify_reach: buying the game's opinion only where it pays ==")
     print("  A checked drag is trimmed to what the game marked and abandoned if")
-    print("  that falls under min_chain; an unchecked one clears only if every")
-    print("  member was accepted. `cleared` is the number that decides -- clears/s")
-    print("  prices the check, and neither prices the scoring curve.")
+    print("  that falls under min_chain. What an UNCHECKED drag clears is where")
+    print("  the two models differ, and it is the whole disagreement:")
+    print("    all-or-nothing -- it clears in full if the game accepted every")
+    print("      member, and nothing otherwise. What this script assumed until")
+    print("      the fifteenth round, and what +27%/+17%/+7% was computed under.")
+    print("    per-member -- each member clears on its own: 89.8% of the ones")
+    print("      the game marked, 22.9% of the ones it refused. Measured.")
+    print("  The time column is shared: the drag runs either way. Read the")
+    print("  per-member half; the other is kept so nothing is re-scored in")
+    print("  silence.")
     for cost in CHECK_COSTS:
         print(f"\n  per-check cost {cost:.2f}s")
-        print(f"  {'verify past':>12} {'holds':>7} {'cleared':>8} {'time':>8} "
-              f"{'clears/s':>9} {'vs off':>8}")
-        base = None
+        print(f"  {'':>12} {'':>7} {'   all-or-nothing (old)':>26} "
+              f"{'      per-member (measured)':>28}")
+        print(f"  {'verify past':>12} {'holds':>7} {'time':>8} "
+              f"{'cleared':>8} {'clears/s':>9} {'vs off':>8} "
+              f"{'cleared':>8} {'clears/s':>9} {'vs off':>8}")
+        base_old = base_new = None
         for thr in (10**9, 300, 260, 220, 180, 150, 0):
-            cleared = holds = 0
+            old = new = 0.0
+            holds = 0
             total = 0.0
             for r in rows:
+                kept_n, prop_n = len(r["kept"]), len(r["proposed"])
+                refused_n = max(0, prop_n - kept_n)
                 checking = thr == 0 or reach(r) > thr
                 if checking:
                     holds += 1
                     total += cost
-                    nodes = r["kept"] if len(r["kept"]) >= min_chain else []
+                    nodes = r["kept"] if kept_n >= min_chain else []
                     if nodes:
                         total += stroke_time(r, nodes)
-                        cleared += len(nodes)
+                        old += len(nodes)
+                        # A trimmed chain is all marked members, so only the
+                        # marked probability applies.
+                        new += P_CLEAR_MARKED * len(nodes)
                 else:
                     total += stroke_time(r, r["proposed"])
-                    if len(r["kept"]) == len(r["proposed"]):
-                        cleared += len(r["proposed"])
-            rate = cleared / total
-            base = base if base is not None else rate
+                    if refused_n == 0:
+                        old += prop_n
+                    new += P_CLEAR_MARKED * kept_n + P_CLEAR_REFUSED * refused_n
+            r_old, r_new = old / total, new / total
+            base_old = base_old if base_old is not None else r_old
+            base_new = base_new if base_new is not None else r_new
             lbl = "never" if thr == 10**9 else ("every drag" if thr == 0 else f"{thr}px")
-            print(f"  {lbl:>12} {holds:7d} {cleared:8d} {total:8.1f} {rate:9.2f} "
-                  f"{rate/base - 1:+8.1%}")
+            print(f"  {lbl:>12} {holds:7d} {total:8.1f} "
+                  f"{old:8.0f} {r_old:9.2f} {r_old/base_old - 1:+8.1%} "
+                  f"{new:8.0f} {r_new:9.2f} {r_new/base_new - 1:+8.1%}")
 
 
 def truncation(rows: list[dict], min_chain: int) -> None:
@@ -339,41 +417,55 @@ def rebuild(rows: list[dict], min_chain: int, verify_at: float) -> None:
             max_chain=int(o.get("max_chain", 12)))
 
     def run(cost: float, extend: bool):
-        cleared = holds = 0
+        old = new = 0.0
+        holds = 0
         total = 0.0
         lens = []
         for r in rows:
+            kept = r["kept"]
             if reach(r) > verify_at:
                 holds += 1
                 total += cost
                 nodes = grown.get(id(r)) if extend else None
-                nodes = nodes if nodes is not None else r["kept"]
+                nodes = nodes if nodes is not None else kept
                 nodes = nodes if len(nodes) >= min_chain else []
+                if nodes:
+                    total += stroke_time(r, nodes)
+                    old += len(nodes)
+                    # A rebuild carries two populations: the marked members
+                    # the trim would also have dragged, and the ones the marks
+                    # handed over, which the fifteenth round priced separately.
+                    added = len(set(nodes) - set(kept))
+                    new += (P_CLEAR_MARKED * (len(nodes) - added)
+                            + P_CLEAR_ADDED * added)
+                lens.append(len(nodes))
             else:
                 total += stroke_time(r, r["proposed"])
-                nodes = (r["proposed"]
-                         if len(r["kept"]) == len(r["proposed"]) else [])
-                lens.append(len(nodes))
-                cleared += len(nodes)
-                continue
-            if nodes:
-                total += stroke_time(r, nodes)
-                cleared += len(nodes)
-            lens.append(len(nodes))
-        return cleared, total, holds, lens
+                prop_n, kept_n = len(r["proposed"]), len(kept)
+                refused_n = max(0, prop_n - kept_n)
+                if refused_n == 0:
+                    old += prop_n
+                new += P_CLEAR_MARKED * kept_n + P_CLEAR_REFUSED * refused_n
+                lens.append(prop_n if refused_n == 0 else 0)
+        return old, new, total, holds, lens
 
-    print(f"\n  {'reading':>12} {'rule':>9} {'holds':>7} {'cleared':>8} "
-          f"{'time':>8} {'clears/s':>9} {'vs trim':>8} {'>=6':>6}")
+    print(f"\n  {'':>12} {'':>9} {'':>7} {'':>8} {'  all-or-nothing':>20}"
+          f" {'   per-member':>20}")
+    print(f"  {'reading':>12} {'rule':>9} {'holds':>7} {'time':>8} "
+          f"{'cleared':>8} {'clears/s':>9} {'vs trim':>8} "
+          f"{'cleared':>8} {'clears/s':>9} {'vs trim':>8} {'>=6':>6}")
     for cost in CHECK_COSTS:
-        base = None
+        base_old = base_new = None
         for extend in (False, True):
-            c, t, h, lens = run(cost, extend)
-            rate = c / t
-            base = base if base is not None else rate
+            o, n, t, h, lens = run(cost, extend)
+            r_old, r_new = o / t, n / t
+            base_old = base_old if base_old is not None else r_old
+            base_new = base_new if base_new is not None else r_new
             long = sum(v >= 6 for v in lens) / len(lens)
             print(f"  {cost:11.2f}s {'rebuild' if extend else 'trim':>9} "
-                  f"{h:7d} {c:8d} {t:8.1f} {rate:9.2f} "
-                  f"{rate / base - 1:+8.1%} {long:6.1%}")
+                  f"{h:7d} {t:8.1f} "
+                  f"{o:8.0f} {r_old:9.2f} {r_old/base_old - 1:+8.1%} "
+                  f"{n:8.0f} {r_new:9.2f} {r_new/base_new - 1:+8.1%} {long:6.1%}")
 
     same = sum(1 for r in fired if len(grown.get(id(r), r["kept"])) > len(r["kept"]))
     print(f"\n  the marks grew {same} of {len(fired)} checked chains "

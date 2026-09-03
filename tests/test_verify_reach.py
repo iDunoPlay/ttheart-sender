@@ -201,3 +201,65 @@ def test_verify_hold_keeps_its_own_delay_and_still_checks_everything(board, spy)
     assert len(spy.checks) == spy.drags, "verify_hold checks near chains too"
     assert all(d == 0.10 for d in spy.checks)
     assert report.verified == spy.drags
+
+
+def _trim_spy(monkeypatch, keep_n):
+    """Record the points actually walked, with the game accepting `keep_n`."""
+    seen = SimpleNamespace(walked=[])
+
+    def drag_chain(points, *, step_px=8.0, per_step=0.006, hold=0.0,
+                   after_press=None, **kw):
+        if after_press is not None:
+            points = list(after_press()) or list(points[:1])
+        seen.walked.append(list(points))
+
+    def marked_by_game(drv, before, board_rect, tsums, nodes, *, delay, **kw):
+        out = kw.get("out")
+        if out is not None:
+            # A non-empty `marked` matters: an unreadable frame is dragged as
+            # proposed anyway, which would pass this test for the wrong reason.
+            out.update(marked_frame=None, values=np.zeros(len(tsums)),
+                       baseline=0.0, bar=8.0, marked=list(nodes)[:keep_n])
+        return list(nodes)[:keep_n]
+
+    monkeypatch.setattr(tsum, "drag_chain", drag_chain)
+    monkeypatch.setattr(tsum, "marked_by_game", marked_by_game)
+    return seen
+
+
+def test_it_is_off_by_default_too():
+    assert tsum.play_defaults().verify_no_trim is False, "a new rule ships off"
+
+
+def test_the_trim_still_cuts_the_chain_when_the_rule_is_off(board, monkeypatch):
+    """The revert has to be exactly the old behaviour on the board it fires on."""
+    board.reach = 400.0
+    seen = _trim_spy(monkeypatch, keep_n=2)   # game keeps 2 of the 3 proposed
+    report = _run(board, _options(verify_reach=260.0, verify_no_trim=False))
+
+    # 2 kept is under min_chain 3, so the old rule releases without dragging.
+    assert report.abandoned > 0
+    assert all(len(w) == 1 for w in seen.walked), "abandon walks nowhere"
+
+
+def test_no_trim_drags_the_proposal_the_trim_would_have_thrown_away(board, monkeypatch):
+    """The members the trim removes were already worth nothing -- so keep them.
+
+    Same board, same refusal, rule on: the chain is dragged as proposed
+    instead of being cut to two and abandoned.
+    """
+    board.reach = 400.0
+    seen = _trim_spy(monkeypatch, keep_n=2)
+    report = _run(board, _options(verify_reach=260.0, verify_no_trim=True))
+
+    assert report.verified > 0, "the check is still bought"
+    assert report.abandoned == 0, "nothing is abandoned any more"
+    assert report.trimmed == 0, "and nothing is trimmed"
+    assert all(len(w) == 3 for w in seen.walked), "the whole proposal is walked"
+
+
+def test_no_trim_is_carried_into_the_flow_action():
+    """A flow's `options:` must accept it, or the switch cannot be turned on
+    where every other one is turned on."""
+    from ttheart_sender.automation import tsum_actions
+    assert "verify_no_trim" in tsum_actions._TUNABLES

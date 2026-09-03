@@ -1569,12 +1569,17 @@ round on the number that decides rather than by a replay on a proxy.
 
 ### What this round did not settle
 
-* **What `verify_reach` is actually worth.** Its benefit has to be
-  re-derived against the per-member model above, and its threshold re-swept
-  under it. `replay_decisions.py` cannot answer this until its cost model is
-  corrected -- and correcting it re-scores the tenth, eleventh, thirteenth
-  and fourteenth rounds, so it wants doing deliberately and in one pass, with
-  both columns shown side by side.
+* **What `verify_reach` is actually worth.** The tool is ready and the
+  corpus is not. `replay_decisions.py` now prints both models side by side --
+  `all-or-nothing` as it always did, and `per-member` from the numbers above
+  -- for the threshold sweep and for the `verify_extend` comparison, so no
+  earlier round is re-scored in silence. On synthetic rows the two disagree
+  in the direction expected: checking that reads +12% under all-or-nothing
+  reads *negative* under per-member, because the baseline it is measured
+  against is no longer modelled as clearing zero. **The real number needs one
+  collection to run against** -- this round's corpus was cleared from disk
+  before the sweep was taken, so the sweep is owed a corpus, not a code
+  change.
 * **Whether abandoning is right.** 19 chains were released without dragging.
   By the game's own rule a chain of under three clears nothing, so this looks
   correct -- but it rests on a mark reading that was unreadable 53 times in
@@ -1587,3 +1592,103 @@ round on the number that decides rather than by a replay on a proxy.
   radius. The signal recovers to 0.636 on the least-buried tsums, so it is
   occlusion rather than absence -- which makes it a capture-resolution
   question, not a model question.
+
+## Sixteenth round: the trim never had a mechanism
+
+Two rounds, 36 samples, v1.10.3, both switches on -- the first corpus ever
+swept under a corrected cost model, and it took two findings to get one
+answer.
+
+**Read the size first.** 36 drags, 18 of them with a refusal, 7 members past a
+first refusal. That is enough to see a shape and not enough to fit one, and
+everything below is written to that bar. The fifteenth round's corpus, which
+would have made this solid, was cleared off the disk before this sweep was
+taken -- along with `logs/ttheart.log.1`-`.5`. Its conclusions survive because
+they were written down; its evidence does not. `dataset-archive/` now exists.
+
+### `verify_reach` under the model that replaced its own
+
+`replay_decisions.py` now prints both models side by side. At a 0.28s check:
+
+| verify past | all-or-nothing (old) | per-member (measured) |
+|---|---:|---:|
+| never | +0.0% | +0.0% |
+| 300px | +11.0% | **-15.2%** |
+| 260px | +14.7% | **-23.6%** |
+| 220px | +20.8% | **-31.3%** |
+| every drag | -14.9% | -58.1% |
+
+Every threshold that won under the old model loses under the new one, and
+"never check" wins outright. But that result is structural rather than
+empirical, and saying so is the point: under a per-member model the trim
+*cannot* help. Dragging the full proposal always clears at least as much as
+dragging a subset of it, because the members the trim removes still carry
+their own odds and cost only stroke time. The table is not evidence that
+checking is bad; it is evidence that this model has no mechanism by which
+trimming is good.
+
+### Refusals are a suffix, not a scatter
+
+Which raises the obvious question -- is per-member the right shape either? It
+is not:
+
+```
+drags with at least one refusal: 18
+  refusals form a clean SUFFIX (the chain died at the first bad member): 78%
+  a kept member appears after a refused one:                             22%
+
+P(member refused | previous kept)    : 34.5%
+P(member refused | previous refused) : 81.0%
+
+members before the first refusal: 84.8% cleared
+members after  the first refusal: 28.6% cleared
+```
+
+**The chain dies where it first goes wrong**, which is what a continuous
+stroke dragged through a wrong character should do, and neither model in the
+tool describes it. `P_CLEAR_REFUSED` is therefore not a refused member's own
+odds; it is what the dead tail still happens to clear. Left unfitted and
+labelled as such in `replay_decisions.py`: the shape is now known to be wrong
+and the corpus cannot fit the right one.
+
+### What survives every shape
+
+Trimming buys nothing. Under independence the refused members still clear a
+little; under a prefix they were already dead. In both, the trim removes
+members that cost nothing but stroke time -- and abandoning a chain outright
+throws away the opening members, which are the ones that *do* clear, at 84.8%.
+
+The rebuild is the whole of the check's value. It is the one part measured
+directly rather than modelled (22 of 22, fifteenth round), and it survives the
+correction: +8.3% to +9.4% over the trim under per-member, against +11.0% to
++12.2% under all-or-nothing. Smaller, still positive, and now the only reason
+to buy a check at all.
+
+### The rule that follows, shipped off
+
+`--verify-no-trim` / `verify_no_trim` in `flows/play.yaml`: on a check, take
+the rebuild when it is longer and otherwise drag the proposal exactly as it
+was. Never trim, never abandon. The check and the rebuild are untouched.
+
+Pinned by `tests/test_verify_reach.py::test_no_trim_drags_the_proposal_the_trim_would_have_thrown_away`,
+with the off-path pinned beside it.
+
+**WHAT TO WATCH LIVE:** `cleared N (M%)` should rise and `rejected N chain(s)
+outright` should disappear from the end-of-round line.
+
+**WHAT WOULD FALSIFY IT:** clears per round falling, or drags that clear
+nothing rising above the 1.7% the fifteenth round measured. Both would mean
+the trim was doing something the models cannot see -- most likely that a dead
+tail does not merely fail but breaks the stroke.
+
+### What this round did not settle
+
+* **What `verify_reach` is worth.** Still open, and now for a better reason:
+  the sweep needs a model with a prefix in it, and that needs a corpus large
+  enough to fit one. 36 drags is not it.
+* **Whether `verify_no_trim` is right.** It is derived, not measured. It wants
+  a round against `verify_no_trim: false` at otherwise identical settings.
+* **Whether the dead tail is free.** The whole case for not trimming assumes a
+  refused member costs only the time to drag over it. If it instead breaks the
+  stroke, the trim is right and this rule is a regression -- and that is
+  exactly what the falsifier above is watching for.
