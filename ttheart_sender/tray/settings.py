@@ -149,7 +149,6 @@ class PanelSettings:
     #: capture -- `--verify` already grabs the frame it reads -- so the only
     #: reason it ships off is that it changes play slightly: a drag that
     #: clears nothing blacklists its kind.
-    measure_clears: bool = False
     #: On a `verify_reach` check, rebuild the chain from what the game marked
     #: instead of only trimming the proposal to it (`verify_extend`). The
     #: press is already paid for and the marks name partners the proposal

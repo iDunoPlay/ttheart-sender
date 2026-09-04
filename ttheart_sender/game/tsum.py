@@ -497,6 +497,64 @@ def _recolour(bgr: np.ndarray, tsums: list[Tsum], radius: float,
     return tsums
 
 
+def _regroup(bgr: np.ndarray, tsums: list["Tsum"], radius: float,
+             groups: int) -> list["Tsum"]:
+    """Sort the board into exactly `groups` identities, by face colour.
+
+    The same evidence as :func:`_recolour` -- one median colour per face --
+    decided a different way, and the difference is the whole point.
+
+    `_recolour` merges everything closer than a *distance*, and its docstring
+    records why that could never be calibrated here: the labels are
+    positive-only, so the score always improves by merging more, and the
+    threshold that looked best produced chains of 27 and 31 tsums. There is no
+    natural place to stop.
+
+    The game supplies one. **A board holds at most five characters, four when
+    an item is used.** That is a hard rule, and it turns identity from an open
+    problem -- name a character out of forty-odd, most of them never labelled
+    -- into a closed one: sort this board into five piles. A count cannot run
+    away the way a threshold can, because the group sizes are bounded by the
+    board, and it needs no labels at all, so it works on the characters nobody
+    has trained and on a base tsum the classifier has never seen.
+
+    Measured over 1,117 saved boards against the game's own marks, by
+    `scripts/group_eval.py`, in expected tsums cleared per drag:
+
+        pixel k-means (today)   3.26
+        groups=3                3.31  (+1.4%, inside the noise)
+        groups=4                3.41  (+4.6%, paired 2 s.e. 0.047)
+        groups=5                3.34  (+2.4%)
+        groups=6                3.23  (-1.0%)
+
+    An interior optimum, which is the shape that says the number means
+    something: too many groups splits a character and its partners become
+    unreachable; too few fills the chain with tsums the game will refuse. The
+    win is real and it is small. OFF BY DEFAULT, and what settles it is a
+    played round, not this table.
+    """
+    if len(tsums) <= max(1, groups):
+        return tsums
+
+    feats = _face_lab(bgr, tsums, radius)
+    crit = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 0.5)
+    # Three attempts: k-means on 40-odd points is cheap, and a bad start here
+    # costs a whole frame's identity rather than a slightly worse centroid.
+    _, labels, _ = cv2.kmeans(np.ascontiguousarray(feats, np.float32), groups,
+                              None, crit, 3, cv2.KMEANS_PP_CENTERS)
+    labels = labels.ravel()
+
+    for new_kind in range(groups):
+        members = [i for i in range(len(tsums)) if labels[i] == new_kind]
+        if not members:
+            continue
+        colour = _lab_to_bgr(np.median(feats[members], axis=0))
+        for i in members:
+            tsums[i].kind = new_kind
+            tsums[i].colour = colour
+    return tsums
+
+
 def _face_lab(bgr: np.ndarray, tsums: Sequence["Tsum"], radius: float,
               *, fill: float = 0.0) -> np.ndarray:
     """Median Lab colour of each tsum's inner face, one row per tsum.
@@ -527,6 +585,207 @@ def _face_lab(bgr: np.ndarray, tsums: Sequence["Tsum"], radius: float,
         if px.size:
             out[i] = np.median(px, axis=0)
     return out
+
+
+#: Where a character id starts, so it cannot collide with a k-means `kind`.
+#: The two live in the same field on purpose -- `adjacency` and `find_chains`
+#: ask only whether two `kind`s are equal, so a character id drops in without
+#: either of them learning a new concept. The offset is what keeps "character
+#: 3" from meaning the same thing as "colour cluster 3".
+CHARACTER_KIND = 1000
+
+
+#: Every forward pass is padded to exactly this many crops.
+#:
+#: **This is a workaround for a crash in OpenCV, not a tuning knob.** cv2 5.0.0
+#: sizes a `dnn` net's internal buffers on the first batch it sees and does not
+#: grow them; a later, larger batch writes past the end and Windows kills the
+#: process with 0xc0000409 (STACK_BUFFER_OVERRUN) inside cv2.pyd -- no Python
+#: traceback, no error box, the tray icon simply vanishes. Reproduced exactly:
+#: a batch of 1 followed by a batch of 46 dies on the 46, and 1,2,3,...  dies
+#: at 13.
+#:
+#: Live that is guaranteed to happen: a round's first frame is the board still
+#: filling and reads ~11 tsums, and a settled board reads ~45. The net gets
+#: sized for 11 and dies on the next real frame.
+#:
+#: So the batch never varies. Short batches are padded with zeros and the
+#: padding's answers are thrown away. 64 covers `--max-tsums` sized boards in
+#: one pass; anything larger goes round again at the same fixed size. The cost
+#: is computing a few unused rows -- about 10ms a board -- against a class of
+#: failure that takes the whole app down mid-round.
+CHARACTER_BATCH = 64
+
+#: One loaded net per (path, confidence), for the life of the process.
+#:
+#: `play_loop` runs once per ROUND, and the tray plays rounds back to back for
+#: hours. Constructing a `cv2.dnn` net per round means a fresh native parse and
+#: a fresh set of layer buffers each time, with the old ones released only if
+#: and when Python gets around to it -- and the reported failure was exactly
+#: that shape: two rounds fine, the third kills the process with no traceback
+#: and no error box.
+#:
+#: The model is immutable and identical every round, so there is nothing to
+#: reload. Cached here rather than on the caller because the caller is a new
+#: `play_loop` frame every time.
+_CHARACTER_CACHE: dict = {}
+
+
+def load_character_model(path, confidence: float) -> "CharacterModel":
+    """The shared model for this path, loaded at most once per process."""
+    key = (str(path), round(float(confidence), 4))
+    model = _CHARACTER_CACHE.get(key)
+    if model is None:
+        model = CharacterModel(path, confidence)
+        _CHARACTER_CACHE[key] = model
+    # Counters are per round, the net is not.
+    model.named = model.seen = 0
+    model.failed = ""
+    return model
+
+
+class CharacterModel:
+    """Names the character in each face crop, where it is sure enough.
+
+    `kind` is a per-frame k-means cluster: it means nothing between frames and
+    agrees with the game about a confirmed partner 37% of the time, because
+    face colour does not identify a Tsum Tsum character -- many of them share
+    one. A classifier trained on crops the game's own marks helped label reads
+    ~95% on held-out sessions.
+
+    **Hybrid, not a replacement, and that is the whole safety of it.** The
+    model knows the characters somebody labelled and no others, and a real
+    board is full of the rest. A crop it is unsure of keeps the k-means `kind`
+    it already had, so an unknown character plays exactly as it does today and
+    a known one plays better. Replacing `kind` outright would make every
+    unlabelled character unchainable and stop the bot playing half the board.
+
+    Costs ~11ms for a 46-tsum board through `cv2.dnn`, against a ~100ms
+    decision. No new dependency: OpenCV is already bundled.
+    """
+
+    def __init__(self, path, confidence: float = 0.85):
+        meta_path = Path(str(path)).with_suffix(".json")
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        self.net = cv2.dnn.readNetFromONNX(str(path))
+        self.classes = list(meta["classes"])
+        self.size = int(meta.get("size", 96))
+        self.mean = np.asarray(meta.get("mean", [0.485, 0.456, 0.406]), np.float32)
+        self.std = np.asarray(meta.get("std", [0.229, 0.224, 0.225]), np.float32)
+        self.confidence = float(confidence)
+        #: Counted per round and reported, because a model that names nothing
+        #: is indistinguishable from one that is switched off.
+        self.named = 0
+        self.seen = 0
+        #: Set when the net is switched off mid-round, and reported at the end.
+        self.failed = ""
+
+    def _crop(self, bgr, t, radius):
+        """The same picture the training set held, or None.
+
+        Must match `scripts/crops.py` exactly -- window 1.0 radii, saved at
+        64px, and REFUSED when the frame edge would clip it. A crop the edge
+        clips is a sliver stretched to a square, which the training set
+        excluded; feeding one in at play time asks the model about a picture
+        it has never seen a single example of.
+        """
+        half = max(4, int(round(radius)))
+        h, w = bgr.shape[:2]
+        x0, y0 = int(t.x) - half, int(t.y) - half
+        x1, y1 = int(t.x) + half + 1, int(t.y) + half + 1
+        if x0 < 0 or y0 < 0 or x1 > w or y1 > h:
+            return None
+        patch = bgr[y0:y1, x0:x1]
+        if patch.size == 0 or min(patch.shape[:2]) < 4:
+            return None
+        # 64 then `size`, not straight to `size`: the training crops were
+        # written to disk at 64 and upsampled from there, and a single resize
+        # would hand the model a sharper image than it ever trained on.
+        small = cv2.resize(patch, (64, 64), interpolation=cv2.INTER_AREA)
+        return cv2.resize(small, (self.size, self.size),
+                          interpolation=cv2.INTER_LINEAR)
+
+    def probabilities(self, bgr: np.ndarray, tsums: Sequence["Tsum"],
+                      radius: float) -> tuple[list[int], np.ndarray]:
+        """Which crops the model could read, and what it thinks each one is.
+
+        Split out of :meth:`apply` so that offline analysis scores the same
+        pictures play does. The crop rules here are fussy and easy to
+        re-implement subtly differently -- window, the 64px round trip, the
+        refusal at the frame edge, the fixed batch -- and an evaluation that
+        got any of them wrong would be measuring a model the bot never runs.
+        """
+        if self.net is None:
+            return [], np.zeros((0, 0), np.float32)
+        usable = [(i, self._crop(bgr, t, radius)) for i, t in enumerate(tsums)]
+        usable = [(i, c) for i, c in usable if c is not None]
+        self.seen += len(tsums)
+        if not usable:
+            return [], np.zeros((0, 0), np.float32)
+        blob = np.stack([c for _, c in usable]).astype(np.float32) / 255.0
+        blob = (blob - self.mean) / self.std
+        # CONTIGUOUS, and not as a tidiness point: `transpose` returns a view
+        # with permuted strides, and handing one to `cv2.dnn` reaches native
+        # code that assumes packed memory. When that goes wrong it does not
+        # raise -- the process dies with no Python traceback, which is exactly
+        # the shape of a crash this rule was reported to cause on its first
+        # round. Unreproduced offline, so this is a hardening rather than a
+        # fix, but the copy costs ~0.5ms on a 46-crop board and a silent
+        # process death costs a round.
+        blob = np.ascontiguousarray(blob.transpose(0, 3, 1, 2), dtype=np.float32)
+        try:
+            # FIXED batch, always -- see CHARACTER_BATCH. A short batch is
+            # padded rather than sent short, because sending a short one
+            # teaches the net a size it will later be killed for exceeding.
+            outs = []
+            for i in range(0, len(blob), CHARACTER_BATCH):
+                chunk = blob[i:i + CHARACTER_BATCH]
+                n = len(chunk)
+                if n < CHARACTER_BATCH:
+                    pad = np.zeros((CHARACTER_BATCH,) + chunk.shape[1:], np.float32)
+                    pad[:n] = chunk
+                    chunk = pad
+                self.net.setInput(np.ascontiguousarray(chunk))
+                out = np.asarray(self.net.forward(), np.float32)
+                outs.append(out[:n].copy())        # the padding's answers go
+            logits = np.concatenate(outs) if outs else np.zeros((0, 1), np.float32)
+        except cv2.error as exc:
+            # Switch the model off for the rest of the round rather than
+            # taking the round down with it. Said once, loudly: a model that
+            # quietly stops naming looks identical to one that was never on.
+            self.failed = str(exc)
+            self.net = None
+            return [], np.zeros((0, 0), np.float32)
+        if logits.ndim != 2 or logits.shape[0] != len(usable):
+            self.failed = f"model returned {logits.shape} for {len(usable)} crops"
+            self.net = None
+            return [], np.zeros((0, 0), np.float32)
+        logits = logits - logits.max(axis=1, keepdims=True)
+        prob = np.exp(logits)
+        prob /= prob.sum(axis=1, keepdims=True)
+        return [i for i, _ in usable], prob
+
+    def apply(self, bgr: np.ndarray, tsums: Sequence["Tsum"], radius: float) -> int:
+        """Rewrite `kind` to a character id where the model is confident."""
+        usable, prob = self.probabilities(bgr, tsums, radius)
+        named = 0
+        for i, p in zip(usable, prob):
+            best = int(p.argmax())
+            if float(p[best]) >= self.confidence:
+                tsums[i].kind = CHARACTER_KIND + best
+                named += 1
+        self.named += named
+        return named
+
+    def summary(self) -> str:
+        if not self.seen:
+            return ""
+        out = (f"character model named {self.named}/{self.seen} detections "
+               f"({self.named / self.seen:.0%}); the rest kept their colour "
+               f"cluster")
+        if self.failed:
+            out += f" -- SWITCHED OFF mid-round: {self.failed}"
+        return out
 
 
 def _base_from_faces(bgr: np.ndarray, tsums: Sequence["Tsum"], radius: float,
@@ -646,6 +905,7 @@ def detect(
     heal_frac: float = 0.9,
     open_ratio: float = 2.2,
     recolour: float = 0.0,
+    kinds: int = 0,
     bowl_reject: float = 0.0,
     floor_frac: float = 0.42,
     hole_frac: float = 0.8,
@@ -867,6 +1127,8 @@ def detect(
 
     if recolour > 0:
         kept = _recolour(bgr, kept, radius, recolour)
+    if kinds > 0:
+        kept = _regroup(bgr, kept, radius, kinds)
 
     if scale != 1.0:
         radius /= scale
@@ -2418,6 +2680,23 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
     # round. See :mod:`ttheart_sender.game.learn`.
     learned = _load_palette(getattr(opts, "palette", ""), say)
 
+    # Loaded here, with the palette, so a bad path fails before a round starts
+    # rather than in the middle of one.
+    characters = None
+    if getattr(opts, "character", ""):
+        try:
+            characters = load_character_model(opts.character,
+                                              opts.character_confidence)
+            say(f"    character model: {len(characters.classes)} classes, "
+                f"naming above {opts.character_confidence:.2f} confidence "
+                f"({', '.join(characters.classes[:6])}"
+                f"{'...' if len(characters.classes) > 6 else ''})")
+        except (OSError, ValueError, KeyError, cv2.error) as exc:
+            # Refused, not limped past: a round played with the model silently
+            # off looks exactly like one played with it on and doing nothing,
+            # and this project has lost two nights to that shape already.
+            raise SystemExit(f"could not load --character {opts.character}: {exc}")
+
     # Clamped rather than rejected, the way `DatasetWriter` clamps its own:
     # a delay under the render floor is asking for a reading of a highlight
     # the game has not drawn yet, and obeying it silently is how a feature
@@ -2472,6 +2751,8 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
     # rounds, and reached 38.6px on 5%.)
     radius_samples: deque = deque(maxlen=max(1, opts.radius_lock))
     locked: Optional[float] = None
+    #: Said once per round, not once per frame -- see where it is set.
+    warned_layout = False
     unlocked_frames = 0
     fever = FeverWatch(drv.matcher, drv.templates,
                        use_banner=getattr(opts, "fever_banner", True),
@@ -2572,13 +2853,32 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
                     locked = known
                     say(f"    radius {locked:.1f}px, measured for this layout "
                         f"(not estimated -- every tsum is the same size)")
+                elif not warned_layout:
+                    # SAY SO, LOUDLY, ONCE. An unmeasured capture size is not a
+                    # small degradation: the board rect falls back to fractions
+                    # of the whole frame, which on LDPlayer swallows the score
+                    # bar and the FEVER strip and detects them, and the radius
+                    # falls back to an estimator that reads 8-38px on a board
+                    # whose faces are 25. Both failures are silent -- the count
+                    # stays inside `--min-tsums`..`--max-tsums`, so nothing
+                    # else complains -- and the round simply plays badly.
+                    #
+                    # Resizing the emulator is the way this happens, and it
+                    # happened: a resolution change moved the capture from
+                    # 578x994 to 598x1031 and nothing said a word. See LAYOUTS.
+                    warned_layout = True
+                    say(f"    NO MEASURED LAYOUT for a {frame.shape[1]}x"
+                        f"{frame.shape[0]} capture -- falling back to a "
+                        f"fraction of the frame and an estimated radius, which "
+                        f"plays worse. Add an entry to LAYOUTS in "
+                        f"ttheart_sender/game/tsum.py, or pass --board/--radius")
 
             t0 = time.perf_counter()
             tsums, radius, palette = detect(crop, k=opts.k, radius=locked or radius,
                                             palette=palette,
                                             scale=opts.scale, include_dark=opts.include_dark,
                                             merge=opts.merge, bowl_reject=opts.bowl_reject,
-                                            recolour=opts.recolour,
+                                            recolour=opts.recolour, kinds=opts.kinds,
                                             fit_effort=opts.fit_effort)
 
             # FEVER repaints the whole board in neon, so a palette fit during
@@ -2625,7 +2925,7 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
                                                    include_dark=opts.include_dark,
                                                    merge=opts.merge,
                                                    bowl_reject=opts.bowl_reject,
-                                                   recolour=opts.recolour,
+                                                   recolour=opts.recolour, kinds=opts.kinds,
                                                    fit_effort=opts.fit_effort)
                 if abs(len(fresh) - floor) < abs(len(tsums) - floor):
                     say(f"    recalibrated ({len(tsums)} -> {len(fresh)} tsums)")
@@ -2655,6 +2955,17 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
                             f"below {opts.radius_cover:.2f} coverage -- "
                             f"running unlocked (lower --radius-cover to change that)")
 
+            if characters is not None:
+                characters.apply(crop, tsums, radius)
+                # `read_base_kind` answers with a palette index, and a named
+                # tsum no longer carries one -- so the equipped character has
+                # to be found again from the icon's own colour, exactly as
+                # `--recolour` needs. Without this the base priority points at
+                # an arbitrary group and the skill quietly stops charging.
+                if opts.use_base and base_icon:
+                    base = _base_from_faces(crop, tsums, radius,
+                                            base_icon.get("lab"))
+
             if base is None and opts.use_base:
                 seen_base: dict = {}
                 base, base_dist = read_base_kind(frame, palette, spec=opts.base,
@@ -2664,7 +2975,7 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
                              "distance": round(float(base_dist), 1)}
                 say(f"base tsum: cluster #{base} (Lab distance {base_dist:.1f}, "
                     f"icon Lab {seen_base.get('icon_lab')})")
-            if opts.recolour > 0 and opts.use_base and base_icon:
+            if (opts.recolour > 0 or opts.kinds > 0) and opts.use_base and base_icon:
                 # `read_base_kind` answers with an index into the PALETTE
                 # centres, and `--recolour` throws those away: it renumbers
                 # `kind` to its own group ids, which have nothing to do with
@@ -3153,6 +3464,8 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
 
     report.played = played
     say(report.describe())
+    if characters is not None and characters.summary():
+        say("    " + characters.summary())
     return report
 
 
@@ -4287,7 +4600,7 @@ def _score(args) -> int:
 #: Every `detect` keyword `eval --sweep` is allowed to vary. Spelled out rather
 #: than introspected so a typo is an error instead of a silently ignored knob.
 _SWEEPABLE = ("k", "radius", "include_dark", "dark_l", "merge", "heal_frac",
-              "open_ratio", "recolour", "bowl_reject", "floor_frac", "hole_frac",
+              "open_ratio", "recolour", "kinds", "bowl_reject", "floor_frac", "hole_frac",
               "scale")
 
 #: Not `detect` arguments -- these shrink the board rect before the crop is
@@ -5342,6 +5655,21 @@ def add_play_args(play, *, merge_default: bool):
     play.add_argument("--shuffle-clicks", type=int, default=3)
     play.add_argument("--shuffle-delay", type=float, default=0.3,
                       help="seconds between shuffle taps")
+    play.add_argument("--character", default="",
+                      help="path to a character classifier (models/character.onnx "
+                           "plus its .json). Names each tsum instead of trusting "
+                           "the per-frame colour cluster, WHERE IT IS SURE -- an "
+                           "unsure crop keeps its `kind`, so an unlabelled "
+                           "character plays exactly as it does now. `kind` agrees "
+                           "with the game about a confirmed partner 37%% of the "
+                           "time; the model reads ~95%% on held-out sessions. "
+                           "Costs ~11ms a board. Empty = off")
+    play.add_argument("--character-confidence", type=float, default=0.85,
+                      help="softmax floor for naming a tsum. Below it the crop "
+                           "keeps its colour cluster rather than being guessed "
+                           "at -- a wrong name is worse than no name, because "
+                           "`adjacency` believes it and a chain dies at its "
+                           "first wrong member")
     play.add_argument("--recolour", type=float, default=0.0,
                       help="re-decide identity by sampling each FACE once and "
                            "merging groups closer than this in Lab, instead of "
@@ -5360,6 +5688,23 @@ def add_play_args(play, *, merge_default: bool):
                            "decides. Try 35 -- it keeps mean chain length near "
                            "6, inside the range the clear model was fitted on. "
                            "Costs ~18ms a frame",
+                      )
+    play.add_argument("--kinds", type=int, default=0,
+                      help="sort the board into exactly this many identities "
+                           "by face colour, instead of trusting the "
+                           "pixel-level k-means. 0 = off. THE GAME BOUNDS "
+                           "THIS: a board holds at most 5 characters, 4 with "
+                           "an item, so identity is a closed problem -- sort "
+                           "the board into 5 piles -- rather than the open one "
+                           "of naming 40-odd characters most of which nobody "
+                           "has labelled. Unlike --recolour this cannot run "
+                           "away, because a count is bounded where a distance "
+                           "threshold is not. Scored over 1,117 saved boards "
+                           "against the game's own marks, in tsums cleared per "
+                           "drag: 3.26 today, 3.31 at 3, 3.41 at 4, 3.34 at 5, "
+                           "3.23 at 6 -- an interior optimum, +4.6%% at its "
+                           "best against a paired 2 s.e. of 0.047. Real, and "
+                           "small. Try 4. Costs ~2ms a frame",
                       )
     play.add_argument("--purity", type=float, default=35.0,
                       help="drop chain members whose colour is this far (Lab) "

@@ -50,7 +50,6 @@ ID_UPDATE = 2012
 ID_RESTART_STUCK = 2016
 ID_CLEAR_LOGS = 2017
 ID_CLEAR_DATA = 2018
-ID_MEASURE_CLEARS = 2020
 ID_REBUILD_CHAINS = 2021
 #: A label rather than a control, but it is rewritten on every refresh, so it
 #: needs an id to be found again.
@@ -374,7 +373,6 @@ class ControlPanel:
         # "Experiments" says. They are here rather than with Auto Play because
         # each is only worth turning on for a run that is also collecting: the
         # comparison is what makes them mean anything.
-        y = self._add_check(ID_MEASURE_CLEARS, "Measure tsums cleared", y)
         y = self._add_check(ID_REBUILD_CHAINS, "Rebuild chains from marks", y)
 
         y += SECTION_GAP
@@ -668,7 +666,6 @@ class ControlPanel:
         for index, (key, _label, _flag) in enumerate(CLAIM_PATTERNS):
             self._set_check(ID_CLAIM_BASE + index, key == pattern)
         self._set_check(ID_COLLECT_DATA, state.get("collect_data", False))
-        self._set_check(ID_MEASURE_CLEARS, bool(state.get("measure_clears", False)))
         self._set_check(ID_REBUILD_CHAINS, bool(state.get("rebuild_chains", False)))
         purchase = state.get("purchase", {})
         for index, (key, _label, default) in enumerate(PURCHASE_BOXES):
@@ -822,8 +819,6 @@ class ControlPanel:
                 self._on_toggle("restart_when_stuck", self._get_check(ident))
             elif ident == ID_COLLECT_DATA:
                 self._on_toggle("collect_data", self._get_check(ident))
-            elif ident == ID_MEASURE_CLEARS:
-                self._on_toggle("measure_clears", self._get_check(ident))
             elif ident == ID_REBUILD_CHAINS:
                 self._on_toggle("rebuild_chains", self._get_check(ident))
             elif ident == ID_RETURN_HEART:

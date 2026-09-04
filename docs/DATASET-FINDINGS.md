@@ -2097,3 +2097,379 @@ in this document were run and read late for that reason.
 * **Capture resolution**, still the only untried lever, and still a re-tune of
   every pixel constant rather than a setting. It is the whole of the remaining
   list.
+
+## Twenty-second round: the resolution lever, and a measurement that fooled itself twice
+
+Investigated because higher capture resolution was the last open item -- the
+answer to identity, which four measurements had blamed on there being too few
+pixels of a character to read. **The answer is no, and getting there took two
+wrong conclusions in one afternoon.** Both are left in, because the second one
+is a mistake worth not repeating.
+
+### The first answer: no, and for the wrong reason
+
+LDPlayer was set to render 1080x1920 at DPI 480. The capture:
+
+```
+display        : 2560 x 1080   -- only 1080 pixels TALL
+capture before : 578 x 994
+capture after  : 598 x 1031
+```
+
+A 1080-tall window cannot fit on a 1080-tall display, so the emulator
+downscales before anything is drawn. Concluded: no extra pixels, no gain.
+
+That reasoning was incomplete. Rendering at 1080x1920 and displaying at
+578x994 is *supersampling* -- four rendered pixels average into one captured
+pixel, and at DPI 480 Android draws from higher-density assets first. Same
+pixel count, potentially better pixels. Pixel count was the wrong quantity.
+
+### The second answer: yes, and it was an artefact
+
+Face colour noise was measured on live frames and came back 40% lower --
+8.94 Lab against 5.35 -- with detections and coverage unchanged. Since
+within-face colour spread is precisely what every identity round has died on,
+this looked like the lever finally opening.
+
+It was **frame-selection bias**. The comparison took the collector's real
+in-play samples on one side and, on the other, live frames filtered to those
+with >=38 detections, on the reasoning that FEVER halves the count and had to
+be excluded. But detection count and colour noise are the same thing measured
+twice:
+
+```
+correlation between detections and face noise : -0.894
+
+all 30 captured frames        : noise 7.66
+only those with >=38 detections: noise 5.35   <- the "result"
+only those with <38 detections : noise 10.68
+```
+
+The filter selected clean frames because clean frames are what detection
+succeeds on. The 40% was the filter, not the renderer.
+
+This is the same shape as the `_recolour` trap two rounds earlier -- a score
+that cannot be lost by guessing -- and it was walked into anyway, from the
+other direction: **a filter chosen to remove a confound selected for the
+outcome instead.** The rule that would have caught both: before comparing two
+populations, check whether the selection rule correlates with the measurement.
+
+### The answer, from the corpus
+
+144 samples were then collected at the new setting through the CLI (the play
+loop needs no templates -- only menu navigation does), and scored the way
+every identity round has been scored:
+
+| | samples | agreement | split | balanced |
+|---|---:|---:|---:|---:|
+| everything before | 944 | 37.2% | 72.7% | **54.9%** |
+| the new collection | 129 | 32.8% | 69.8% | **51.3%** |
+
+No improvement -- if anything slightly worse, and at n=129 that difference is
+noise. Per-session face noise across all 80 sessions shows no step change
+either: the new sessions read 8.2-12.9 against a corpus mean of 10.5.
+
+**Capture resolution is closed.** Not because the pixels cannot reach the bot,
+but because when they do, nothing downstream improves.
+
+### What was worth keeping
+
+* **Pin `window.size`.** LDPlayer resizes its window when the resolution
+  changes (578x994 -> 598x1031), and that 3.5% shift silently invalidates
+  every measured constant: the `LAYOUTS` entry stops matching, so the board
+  rect falls back to `(8, 252, 580, 582)` against the measured
+  `(10, 314, 525, 456)` -- tall enough to swallow the score bar and detect it.
+  Forced in `config.local.yaml`, the geometry survives any render setting.
+* **The templates were never the problem.** At the wrong window size
+  `play_button` scored 0.326; at the pinned size it scores 0.973. The "46
+  templates need re-capturing" claim came from testing templates against
+  screens they were not on, and from the window size, not the DPI.
+* **A guard.** An unmeasured capture size was completely silent -- both
+  fallbacks stay inside every existing gate, so the round just plays worse.
+  `play_loop` now says so once per round, and `tests/test_layouts.py` pins the
+  table.
+
+### What this closes
+
+Identity, for good, on this hardware. It has now survived a learned palette,
+`purity`, every descriptor computable from the face crops, `_recolour` scored
+symmetrically, and a 4x supersampled render. The remaining cause -- the median
+tsum showing 0.42 of its own radius because the pile buries it -- is a
+property of the game, not of the capture.
+
+## Twenty-third round: the chain does not die at its first wrong member
+
+Three questions were put to the saved corpus -- 1,230 drags over 88 sessions,
+all of it already on disk. Two of the answers overturned things this document
+had been asserting for several rounds.
+
+### The failure model was wrong
+
+Every clear model here since the fifteenth round has assumed a **prefix**
+failure: the game refuses a chain at its first bad member, so everything after
+it is lost. `replay_decisions.py` is built on it (`first_refusal`,
+`P_CLEAR_PREFIX`, `P_CLEAR_TAIL`), and so is the argument that a long chain is
+a gamble.
+
+The shape of `cleared` says otherwise:
+
+| | drags | share |
+|---|---:|---:|
+| whole chain cleared | 608 | 49.4% |
+| clean prefix cleared | 292 | 23.7% |
+| nothing cleared | 23 | 1.9% |
+| **hole in the middle** | **307** | **25.0%** |
+
+A quarter of drags cleared members 3 and 5 but not 4, which a prefix failure
+cannot produce -- member 5 was only reachable through member 4. The obvious
+suspect was the measurement: when the front of a chain clears, tsums above the
+gap **fall**, and a tsum that moved changes its disk like one that popped. It
+is not that:
+
+* the skipped member changed **0.61x** the board's idle noise -- it did not
+  move at all;
+* the member past the hole changed **11.4x** idle -- it certainly went;
+* **79.3%** of past-hole members had no cleared tsum below them, so nothing
+  had opened a space for them to fall into.
+
+**The game skips a member it refuses and keeps linking**, as long as the next
+same-character tsum is in reach (median gap to the next cleared member 90px,
+against `link_px: 105`). So a wrong guess costs **one tsum, not the tail**.
+
+That inverts the trade this project has been optimising. Over-merging is cheap
+-- each wrong member costs its own slot -- and over-splitting is expensive,
+because a partner in another group is unreachable at any distance. The
+balanced score, which weighs agreement and split equally, has been pricing the
+two symmetrically and they are not symmetric.
+
+The headline `cleared %` itself survives: 68.4% over the corpus, 65-86% in
+recent rounds, and both sides of every hole are confident readings.
+
+### The character model is a regression, measured three ways
+
+`--character` reached 95.1% on held-out sessions and does not transfer.
+
+| | agreement | ids per marked group | ids per board |
+|---|---:|---:|---:|
+| pixel k-means | 39.8% | 3.47 | 7.17 |
+| `--character` | 23.6% | 4.43 | 11.20 |
+
+It **doubles** the splitting it was built to fix, and the mechanism is the
+safety rule: *a crop the model is unsure of keeps its colour cluster*. That
+was chosen so an unlabelled character would play as it does today. What it
+actually does is guarantee that a character named on 50.6% of its crops
+carries a name **and** two clusters, and `adjacency` links across neither.
+
+Two supporting readings, both from the 8 rounds it played:
+
+* 831 of 1,733 names (48%) were `Grim`. The equipped tsum was **Beast**, which
+  is not one of the 15 trained classes -- so nearly half the naming is one
+  untrained character landing on its nearest neighbour. That would be harmless
+  if it were consistent; it is the half that falls back to colour that hurts.
+* Of 80 groups the game marked as one character, **5** got a single id.
+
+Used as a *fingerprint* rather than a name -- its 15-way output clustered into
+5 groups, so nothing falls back -- it is still worse than colour: 28.2%
+agreement against 39.8%, and 38.5% against 43.7% restricted to the 68.5% of
+crops the frame edge does not clip.
+
+**A caveat on an earlier number.** Within the model-on rounds, comparing heads
+the model named (33.4%) against heads it left alone (34.8%) reads as a wash.
+That comparison is between different heads under one policy, not one drag
+under two; the paired offline test, same drag both ways, is the stronger
+design and says **-24.2% +/- 8.7%**.
+
+### What the group count is worth
+
+`_recolour` merges by a Lab distance and its calibration problem was recorded
+in the nineteenth round: positive-only labels always improve by merging more,
+and following that produced chains of 27 and 31 tsums. The game supplies the
+bound it lacked -- **a board holds at most 5 characters, 4 with an item** --
+so the same evidence can be spent on a group *count*, which cannot run away.
+
+Scored by `scripts/group_eval.py` over 1,117 boards, in expected tsums cleared
+per drag. A chain draws `max_chain` members from the head's group, and the
+share the game accepts is that group's own marked density -- so a group half
+full of the wrong character fills half the chain with tsums that will not pop.
+That charge is what stops the score rewarding a merge to one group:
+
+| grouping | agreement | lift | ids/group | cleared | vs today (paired) |
+|---|---:|---:|---:|---:|---|
+| pixel k-means | 39.8% | 1.44x | 3.47 | 3.26 | -- |
+| `--character` | 23.6% | 1.44x | 4.43 | 2.47 | **-24.2%** +/- 8.7% |
+| `kinds: 2` | 65.1% | 1.12x | 1.78 | 3.10 | |
+| `kinds: 3` | 51.8% | 1.26x | 2.33 | 3.31 | +1.4% +/- 5.2% (noise) |
+| **`kinds: 4`** | 45.4% | 1.39x | 2.77 | **3.41** | **+4.6%** +/- 4.7% |
+| `kinds: 5` | 40.8% | 1.45x | 3.10 | 3.34 | +2.4% +/- 4.7% |
+| `kinds: 6` | 37.4% | 1.49x | 3.40 | 3.23 | |
+
+An interior optimum, which is the shape that says the count carries
+information rather than sliding along a trade. Note that `agreement` alone
+peaks at `kinds: 2` and `lift` alone peaks at `kinds: 7`: neither is the
+objective, and either one on its own picks a different and worse answer.
+
+A 3x3 grid of Lab means per face -- layout, not just average colour -- was
+tried as a richer descriptor and lost to the plain median (3.00 against 3.34
+at the same group count).
+
+### What this leaves
+
+* `kinds` added, off by default, `4` the value to try. **+4.6% is real and
+  small**, and the same score rated `--character` at -24%, so the table is a
+  ranking and not a promise. A played round decides.
+* `--character` should be off. Not a crash risk any more -- that was fixed --
+  but a measured regression.
+* **31.5% of face crops are clipped by the board rect** and unreadable to any
+  crop-based model. Anything trained on crops is working with two-thirds of a
+  board until `detect` crops from the full frame instead.
+* `replay_decisions.py`'s prefix constants describe a mechanism the game does
+  not have, and should be refitted against the skip model.
+
+## Twenty-fourth round: the embedding was memory, and the check that found it
+
+A metric-learning net over the face crops, trained on the game's own marks and
+clustered into four groups per board. It beat everything on the first score and
+none of it was real.
+
+### What it looked like
+
+| | agreement | lift | ids/group | cleared | vs k-means |
+|---|---:|---:|---:|---:|---|
+| pixel k-means | 39.9% | 1.44x | 3.45 | 3.26 | -- |
+| `kinds: 4` | 45.7% | 1.39x | 2.76 | 3.40 | +4.3% |
+| `embed4` | 67.8% | 1.58x | 1.79 | 3.58 | **+9.6%** |
+| `embed5` | 63.0% | **1.70x** | 1.93 | 3.60 | **+10.4%** |
+
+Every column moved the right way, and `lift` moved with them -- which was the
+whole reason to believe it. Agreement alone rises whenever a method merges
+more; lift is agreement over what the method's own group sizes give for free,
+so a method that merely merges cannot raise it. `embed5` at 1.70x against
+k-means at 1.44x reads as new information rather than a coarser partition.
+
+### What it was
+
+**The net trained on 74 of the 93 sessions the evaluation scored it on.**
+`group_eval.py` swept every model-off session; `embed_net.py` held out 20% by
+session. Nobody connected the two, so roughly four fifths of the boards in that
+table were boards the net had already seen -- and boards inside one round are
+near-duplicates of each other, so a session it trained on is a session it can
+recognise.
+
+Scored only on the 19 sessions it never saw:
+
+| | held-out | leaked |
+|---|---:|---:|
+| `embed3` | -3.9% +/- 18.5% (noise) | +8.3% |
+| `embed4` | -5.6% +/- 19.0% (noise) | +9.6% |
+| `embed5` | **-6.6% +/- 21.0%** | +10.4% |
+
+Its lift falls from 1.70x to 1.40x, below plain face colour at five groups
+(1.50x). The embedding does not generalise between rounds at all.
+
+The pair-level skill is real: held out by session throughout training, it
+reaches **AUC 0.667**, against 0.561 for the best hand-made descriptor and
+0.510 for a learned linear metric over them. It is the first thing in this
+project to clear that ceiling. It is also not enough -- 0.667 is a weak pair
+judgement, and clustering compounds weak pair judgements into wrong partitions
+rather than averaging them out.
+
+### What held
+
+`kinds` is unaffected, because it learns nothing and so has nothing to
+memorise. On the same held-out sessions it is **+3.6%** at four groups and
++4.1% at five, both real, and the two are inside each other's intervals -- the
+full-corpus reading that picked 4 stands, and 5 is an equally defensible try.
+
+`--character` reads -24.0% held-out against -24.2% over everything, which is
+the other half of the same point: a method that cannot memorise scores the
+same either way, and the gap between the two columns is a leakage detector.
+
+### The rule this earns
+
+**A learned method is scored only on sessions recorded in its own model file.**
+`embed_net.py` now writes `test_sessions` into the model's JSON and
+`group_eval.py --held-out` refuses to score anything else. The split is no
+longer something an evaluation has to remember; it travels with the weights.
+
+### What it says about the programme
+
+This is the third vision model in a row to win offline and fail to transfer --
+palette learning, the character classifier, now the embedding. The pattern is
+not that the models are bad. It is that every one of them has been judged on
+`cleared`, a proxy for a score nobody measures, over a corpus small enough that
+a session-level split changes the answer by 16 points. Until the round's actual
+score is recorded, another vision model is the wrong thing to build.
+
+## Twenty-fifth round: the data-scaling curve, and the answer is no
+
+The twenty-fourth round left one live hypothesis. The embedding scored +10% on
+sessions it had trained on and -6.6% on sessions it had not, and a gap that
+shape is usually a sample-size problem rather than a modelling one: 93 sessions
+is not many. So before asking for more rounds, measure whether more rounds
+would help.
+
+Five nets, each trained on a different number of sessions and every one scored
+against the **same** held-out 19 sessions, so the points are comparable:
+
+| training sessions | held-out AUC |
+|---:|---:|
+| 15 | 0.643 |
+| 30 | 0.645 |
+| 45 | 0.656 |
+| 60 | 0.658 |
+| 74 | 0.664 |
+
+**Five times the data buys +0.021 AUC**, and the standard error on an AUC over
+this test set is about 0.012 -- so the entire rise across the whole corpus is
+1.7 standard errors. Fitted, it is **+0.0092 AUC per doubling of sessions**,
+which extrapolates to:
+
+* AUC 0.70 -- about **1,300 sessions**
+* AUC 0.75 -- about **56,000 sessions**
+
+At roughly two minutes a round that is four days of continuous play for the
+first and over two years for the second. **Collecting more rounds does not fix
+this**, and that is now a measurement rather than an opinion.
+
+### What is actually capped
+
+Every run overfits after three to five epochs -- training loss keeps falling
+while held-out AUC turns over -- at 15 sessions and at 74 alike. If sample size
+were the binding constraint the peak would move with it. It does not. The
+ceiling is in the pictures: the corpus already records that the median tsum
+shows **0.42 of its own radius** because the pile buries it, and a crop that is
+mostly somebody else's ear does not carry a character no matter how many of
+them are collected.
+
+So the crop-based identity programme is finished at about **0.66 AUC**, and it
+has now been closed four independent ways: a learned palette, hand-made
+descriptors under a linear metric (0.561), a supervised classifier (-24% in
+play), and a metric-learning embedding with free labels (-6.6% held out, and
+this curve).
+
+### What was fixed on the way
+
+`embed_net.py` tracked the best held-out AUC and then exported whatever weights
+the **final** epoch left behind -- so the number reported and the model written
+were two different models, and on a run that overfits past its peak the shipped
+one is strictly worse than the one reported. It now keeps the best epoch's
+state, stops early on `--patience`, and carries weight decay.
+
+`verify_clears` was removed from the tray panel. It is ON in `flows/play.yaml`,
+permanently, because it is the ruler every rule is priced with -- but the
+panel's box defaulted to OFF and `_variables()` is applied OVER a flow's own
+`vars:`, so any round started from the tray without ticking it silently turned
+the measurement off. Same failure the module already documents for
+`fit_effort`, same fix: a settled setting gets one home.
+
+### What happens next
+
+The play flow now keeps the results screen -- one frame a round, taken the
+moment the scoreboard is up and before the next step taps it away. It does not
+read it yet.
+
+That is the whole point. Three vision models and a scaling curve have now all
+been judged on `cleared`, a proxy for a score this project has never recorded,
+and the next thing built should not be a fourth. The question to answer is
+whether clearing more tsums scores more at all -- and it cannot be asked until
+the number stops being thrown away every round.

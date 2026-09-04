@@ -27,7 +27,6 @@ from ttheart_sender.tray.service import (
     RETURN_HEART_MINUTES_VAR,
     RETURN_HEART_VAR,
     STUCK_CHECK_VAR,
-    VERIFY_CLEARS_VAR,
     VERIFY_EXTEND_VAR,
     AutomationService,
     RunState,
@@ -46,7 +45,7 @@ DEFAULT_MARKS = list(RETURN_HEART_MINUTES_DEFAULT)
 
 
 def overrides(chance=PLAY_CHANCE_OFF, timed=False, marks=None, claim_all=False,
-              stuck_check=False, verify_clears=False, verify_extend=False):
+              stuck_check=False, verify_extend=False):
     """What a run started from the panel should be handed."""
     return {
         PLAY_CHANCE_VAR: chance,
@@ -54,7 +53,6 @@ def overrides(chance=PLAY_CHANCE_OFF, timed=False, marks=None, claim_all=False,
         RETURN_HEART_MINUTES_VAR: DEFAULT_MARKS if marks is None else list(marks),
         CLAIM_ALL_VAR: claim_all,
         STUCK_CHECK_VAR: stuck_check,
-        VERIFY_CLEARS_VAR: verify_clears,
         VERIFY_EXTEND_VAR: verify_extend,
     }
 
@@ -848,26 +846,42 @@ def test_ticking_the_box_creates_no_folder(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# the two experiment switches
+# the experiment switch
 # --------------------------------------------------------------------------
-def test_the_experiments_are_off_until_the_panel_ticks_them():
+def test_the_experiment_is_off_until_the_panel_ticks_it():
     """The service enables nothing it was not handed."""
     app = FakeApp()
     service = AutomationService(app)
 
-    assert service.measure_clears is False
     assert service.rebuild_chains is False
     service.start()
     wait_for(lambda: service.state is RunState.IDLE)
-    assert app.variables == [overrides(verify_clears=False, verify_extend=False)]
+    assert app.variables == [overrides(verify_extend=False)]
 
-    assert service.set_measure_clears(True) is True
     assert service.set_rebuild_chains(True) is True
     assert service.set_rebuild_chains(True) is False, "re-ticking should be a no-op"
 
     service.start()
     wait_for(lambda: service.state is RunState.IDLE)
-    assert app.variables[-1] == overrides(verify_clears=True, verify_extend=True)
+    assert app.variables[-1] == overrides(verify_extend=True)
+
+
+def test_the_settled_measurement_is_not_the_panel_s_to_override():
+    """`verify_clears` is ON in play.yaml and the tray must not send it.
+
+    The panel box defaulted to OFF while `_variables()` is applied OVER a
+    flow's own `vars:`, so every run started from the tray without ticking it
+    overwrote the flow's `true` -- and the round came back with no measurement
+    at all, silently, and only when driven from the panel. Same failure the
+    module documents for `fit_effort`, same fix: one home.
+    """
+    app = FakeApp()
+    service = AutomationService(app)
+    service.start()
+    wait_for(lambda: service.state is RunState.IDLE)
+
+    assert "verify_clears" not in app.variables[-1]
+    assert not hasattr(service, "set_measure_clears")
 
 
 def test_the_tray_does_not_send_a_setting_the_flows_have_settled():
@@ -894,7 +908,6 @@ def test_a_live_run_keeps_the_experiments_it_started_with():
 
     service.start()
     app.entered.wait(5)
-    service.set_measure_clears(True)
     service.set_rebuild_chains(True)
     app.release.set()
     wait_for(lambda: service.state is RunState.IDLE)
@@ -913,23 +926,22 @@ def test_the_experiment_ticks_reach_the_service_and_the_saved_file(tray):
     from ttheart_sender.tray.settings import PanelSettings
 
     assert "steady_fit" not in tray._panel_state()
-    assert tray._panel_state()["measure_clears"] is False
+    # `measure_clears` left the same way, for the same reason: see
+    # test_the_settled_measurement_is_not_the_panel_s_to_override.
+    assert "measure_clears" not in tray._panel_state()
     assert tray._panel_state()["rebuild_chains"] is False
 
-    tray._set_toggle("measure_clears", True)
     tray._set_toggle("rebuild_chains", True)
-    assert tray._service.measure_clears is True
     assert tray._service.rebuild_chains is True
 
     reloaded = PanelSettings.load(tray._settings_path)
-    assert reloaded.measure_clears is True
     assert reloaded.rebuild_chains is True
 
 
 # `fit_effort` is in the list even though the tray no longer sends it: the
 # flows still have to declare and forward it, or editing the revert into
 # launch.yaml would never reach the play round it is meant to revert.
-@pytest.mark.parametrize("name", ["fit_effort", VERIFY_CLEARS_VAR,
+@pytest.mark.parametrize("name", ["fit_effort", "verify_clears",
                                   VERIFY_EXTEND_VAR])
 def test_the_experiments_are_declared_and_forwarded_the_whole_chain(name):
     """run_flow re-applies each flow's own vars, so a gap anywhere loses them.

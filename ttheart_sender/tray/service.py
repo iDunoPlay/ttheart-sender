@@ -66,19 +66,20 @@ STUCK_CHECK_VAR = "stuck_check"
 #: silently, and only when driven from the tray. A settled setting gets one
 #: home.
 
-#: Flow variable behind "Measure tsums cleared" -- `play_tsum`'s
-#: `verify_clears`. Not a play rule: it re-reads the board after every drag,
-#: reading the frame `--verify` already grabbed -- so it costs no extra
-#: capture, only a few disk means. Cheap enough to leave on for every round,
-#: and from schema 3 the count is written into the corpus rather than only
-#: the log.
-VERIFY_CLEARS_VAR = "verify_clears"
+#: `verify_clears` is settled the same way and is NOT here either. It is ON
+#: in flows/play.yaml, permanently, because it is the ruler every other rule
+#: is priced with -- it re-reads the board after each drag using the frame
+#: `--verify` already grabbed, so it costs a few disk means and no capture.
+#: The panel box that used to send it defaulted to OFF, so any run started
+#: from the tray without ticking it silently turned the measurement off and
+#: the round came back unmeasurable. One home: the flow.
 
 #: Flow variable behind "Rebuild chains from marks" -- `play_tsum`'s
 #: `verify_extend`. Rides on the `verify_reach` check that is already being
 #: paid for and spends its answer on the partners the game named as well as
 #: the ones it refused. A play rule, and an unproven one: it assumes the game
-#: accepts a member it marked, which is what VERIFY_CLEARS_VAR is for.
+#: accepts a member it marked, which `verify_clears` in the flow is
+#: what measures.
 VERIFY_EXTEND_VAR = "verify_extend"
 
 
@@ -101,7 +102,6 @@ class AutomationService:
         return_heart_minutes: Optional[Sequence[int]] = None,
         claim_pattern: str = CLAIM_PATTERN_DEFAULT,
         restart_when_stuck: bool = False,
-        measure_clears: bool = False,
         rebuild_chains: bool = False,
         on_change: Optional[Callable[[], None]] = None,
         on_notify: Optional[Callable[[str, str, bool], None]] = None,
@@ -115,7 +115,6 @@ class AutomationService:
         )
         self._claim_pattern = normalize_claim_pattern(claim_pattern)
         self._restart_when_stuck = bool(restart_when_stuck)
-        self._measure_clears = bool(measure_clears)
         self._rebuild_chains = bool(rebuild_chains)
         self._state = RunState.IDLE
         #: What the live run is called -- the mode's label, or "Buy tsum" for
@@ -150,11 +149,6 @@ class AutomationService:
         with self._lock:
             return self._restart_when_stuck
 
-    @property
-    def measure_clears(self) -> bool:
-        """Whether the next run counts what actually leaves the board."""
-        with self._lock:
-            return self._measure_clears
 
     @property
     def return_heart_minutes(self) -> List[int]:
@@ -270,21 +264,6 @@ class AutomationService:
         self._on_change()
         return True
 
-    def set_measure_clears(self, enabled: bool) -> bool:
-        """Arm or disarm the clear check for the next Start.
-
-        Costs no extra capture: `--verify` already grabs the frame this
-        reads. Like the rest, a live run keeps what it started with.
-        """
-        enabled = bool(enabled)
-        with self._lock:
-            if self._measure_clears is enabled:
-                return False
-            self._measure_clears = enabled
-        log.info("Measure tsums cleared %s (%s=%s)", "on" if enabled else "off",
-                 VERIFY_CLEARS_VAR, enabled)
-        self._on_change()
-        return True
 
     def set_return_heart(self, enabled: bool) -> bool:
         """Turn timed heart-sending on or off for the next Start."""
@@ -349,7 +328,6 @@ class AutomationService:
             RETURN_HEART_MINUTES_VAR: self.return_heart_minutes,
             CLAIM_ALL_VAR: claim_all_flag(self.claim_pattern),
             STUCK_CHECK_VAR: self.restart_when_stuck,
-            VERIFY_CLEARS_VAR: self.measure_clears,
             VERIFY_EXTEND_VAR: self.rebuild_chains,
         }
 

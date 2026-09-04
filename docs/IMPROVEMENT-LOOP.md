@@ -258,6 +258,18 @@ recovers to 0.636 AUC on the least-buried ones. Stop looking for a better rule
 over these pixels; the answer is more pixels. `--recolour` ships off with the
 base-kind landmine removed, for the one round that could still surprise us.
 
+**Capture resolution is closed too.** Supersampling from a 1080x1920 render
+looked like a 40% cut in face colour noise; it was frame-selection bias
+(detections and noise correlate at -0.894, so filtering on detection count
+selects clean frames). A corpus collected at the new setting scores 51.3%
+balanced against 54.9% -- no gain. Pin `window.size` in `config.local.yaml`
+regardless: LDPlayer resizes its window on a resolution change and silently
+voids every measured constant.
+
+**Before comparing two populations, check that the selection rule does not
+correlate with the measurement.** Two rounds have now been lost to a score
+that could not be lost -- once to a metric, once to a filter.
+
 **The settings are exhausted.** `verify_reach` (off, +22%), `recolour`
 (rejected, -6.5%), `bowl_reject` (kept at 40, 0 costs -9.6%), `block` (flat
 0.9 to 2.5), `max_chain` (12, the player's own preference beat 16),
