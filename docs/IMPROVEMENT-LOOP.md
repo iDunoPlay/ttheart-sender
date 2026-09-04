@@ -242,7 +242,38 @@ fix the comment in the same pass. Those numbers are load-bearing.
    worry and the answer is that the marks are right. It costs no reading: the
    check was already bought by `verify_reach`.
 
-**Now in doubt -- do not quote its number:** `verify_reach 260`. The rule is
+**Settled, and shipped:** the check is OFF (`verify_reach: 0`). 19 played
+rounds, both arms: +22.1% tsums cleared per round from the log, +11.9%
+cleared per second from the corpus, chains per round 80.0 -> 97.1, 6+ chains
+15.2% -> 24.1%. Cleared per drag was unchanged, so the check was never
+improving the drags it fired on -- the 0.25s was dead time and the trim was
+cutting good chains short. `verify_extend` follows it off: the rebuild was
+never wrong, it just has no reading to ride on now.
+
+**Colour identity is closed, four ways.** A learned palette, `purity`, every
+descriptor computable from the face crops, and now `_recolour` re-scored
+symmetrically against the game's marks (flat: 55.1% balanced to 55.6%). The
+cause is measured: the median tsum shows 0.42 of its own radius and the signal
+recovers to 0.636 AUC on the least-buried ones. Stop looking for a better rule
+over these pixels; the answer is more pixels. `--recolour` ships off with the
+base-kind landmine removed, for the one round that could still surprise us.
+
+**The settings are exhausted.** `verify_reach` (off, +22%), `recolour`
+(rejected, -6.5%), `bowl_reject` (kept at 40, 0 costs -9.6%), `block` (flat
+0.9 to 2.5), `max_chain` (12, the player's own preference beat 16),
+`include_dark` (on, worth 2.2 points in FEVER and nothing outside it). What
+is left is not a knob.
+
+**Read a result with `python scripts/rounds.py`** -- one row per round, and
+`--settings` names what each was played at. The end-of-round line scrolls past
+during play; two rounds here were read late because of it.
+
+**Superseded next step (kept for the reasoning):** every chain setting was tuned while the
+check was on, i.e. while a bad chain was trimmed before it was dragged.
+Nothing trims now. Re-sweep `link_px`, `block`, `max_chain` and `min_chain`
+one at a time against the new baseline.
+
+**Superseded -- do not quote its number:** `verify_reach 260`. The rule is
 sound and cheap, but its +27%/+17%/+7% was computed against a baseline
 modelled as clearing *zero* on any chain with a refused member. The fifteenth
 round measured that baseline directly and it clears 70-93% of its members: a

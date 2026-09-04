@@ -1692,3 +1692,408 @@ tail does not merely fail but breaks the stroke.
   refused member costs only the time to drag over it. If it instead breaks the
   stroke, the trim is right and this rule is a regression -- and that is
   exactly what the falsifier above is watching for.
+
+## Seventeenth round: nobody had ever compared checking with not checking
+
+28 rounds, 404 samples, v1.10.4, `verify_no_trim` **off** throughout -- so this
+is not the A/B the sixteenth round asked for. It is something better: a control
+arm big enough to fit the model that round could only see the shape of.
+
+Played on another machine and carried back as `dataset/` alone, with no log.
+That is the workflow schema 3 was built for and the first time it has been
+exercised: every number below comes out of the samples.
+
+### The sixteenth round's shape, replicated at 3.3x
+
+| | 36 drags | 404 drags |
+|---|---:|---:|
+| refusals form a clean suffix | 78% | **70.2%** |
+| P(refused \| previous refused) | 81.0% | **84.2%** |
+| P(refused \| previous kept) | 34.5% | **42.4%** |
+| cleared before the first refusal | 84.8% | **83.5%** |
+| cleared after the first refusal | 28.6% | **26.9%** |
+| marked members clear | 89.8% | **88.2%** |
+| refused members clear | 22.9% | **24.4%** |
+| the rebuild's added members clear | 100% (22/22) | **90.2% (129/143)** |
+
+Everything holds. The one number that moved is the one the fifteenth round
+flagged as too thin to trust -- 22 of 22 was optimistic, and at 143 members
+the rebuild's additions clear 90.2%, still above the 88.2% of the chain they
+join. Flagging it was right.
+
+`prefix` is now fitted rather than described, and is the third column in
+`replay_decisions.py`.
+
+### The comparison five rounds never made
+
+Under `prefix`, at the shipped 0.28s reading, over all 404 drags:
+
+| rule | cleared | time | clears/s | vs never | mean len | >=6 |
+|---|---:|---:|---:|---:|---:|---:|
+| **never check** | 1224 | 97.9 | **12.51** | +0.0% | 4.87 | 25.5% |
+| check + trim (today) | 1129 | 103.9 | 10.87 | -13.2% | 3.79 | 11.1% |
+| check + rebuild | 1213 | 107.5 | 11.29 | -9.8% | 4.03 | 12.9% |
+| check + rebuild, no trim | 1276 | 121.6 | 10.50 | -16.1% | 4.95 | 25.5% |
+
+**Not checking beats every way of checking.** Marginally: the check buys 52
+extra clears for 23.7 extra seconds, which is 2.2 clears/s against a 12.5
+average.
+
+And the usual defence does not apply. `clears/s` cannot price the scoring
+curve, so a rule that clears less but chains longer can still win -- but
+"never" and "no trim" have the SAME length profile (mean 4.87 against 4.95,
+both 25.5% of chains at six or more). There is no longer-chain argument for
+checking, because not checking already has the long chains. What the trim has
+is the short ones: it cuts the mean from 4.87 to 3.79 and 6+ chains from 25.5%
+to 11.1%.
+
+**This reverses nothing that was measured.** The rebuild really does beat the
+trim -- that is all the fifteenth round claimed, and it replicates here. But
+every comparison from the tenth round on was trim against something, and the
+`never` row they were all read against was computed under the all-or-nothing
+model, which scored an unchecked drag at zero whenever one member was refused.
+The baseline was crippled, so the check could not lose.
+
+### What follows
+
+`verify_reach` is a flow variable now, defaulting to its shipped 260. Setting
+it to 0 turns off the check, the trim and the rebuild together, and that is
+the round this document wants next.
+
+`verify_no_trim` stays off and probably stays unbuilt-upon: it clears the most
+of any rule here (1276) and keeps the length profile intact, but it pays for a
+check it then mostly ignores. If the check is not worth buying, the best
+version of "do not trim" is not to check.
+
+### What this round did not settle
+
+* **Any of it, on a played round.** All four rows are a model over a corpus
+  collected with the check ON. The `never` row is grounded -- 330 of the 404
+  drags were dragged exactly as proposed, which is where the prefix
+  probabilities come from -- but it is still arithmetic, and this project's
+  rule is that a played round overrules it. Play one at `verify_reach: 0`.
+* **Whether the stroke really dies at the first refusal, or merely usually.**
+  70.2% of refusing drags are a clean suffix; the other 29.8% recover. The
+  prefix model treats the tail as uniformly worth 26.9% and that is an
+  average over two different things.
+* **`verify_no_trim` itself**, which has still never been played.
+
+## Eighteenth round: the check is off, and the model was right
+
+12 rounds played at `verify_reach: 0` against the 7 at 260 that preceded them,
+same build (v1.10.4), same everything else. The seventeenth round predicted
+this from a model; this measured it, two independent ways.
+
+### Whole rounds, from the log
+
+A round is a fixed clock, so tsums cleared per round is the number that means
+the most and needs no model at all:
+
+| | rounds | chains/round | cleared/round | mean len | cleared % of dragged |
+|---|---:|---:|---:|---:|---:|
+| check ON (260) | 7 | 80.0 | 276.4 | 4.43 | 77.9% |
+| **check OFF (0)** | 12 | **97.1** | **337.4** | 4.49 | 77.3% |
+
+**+22.1% tsums cleared per round.**
+
+### Sampled drags, from the corpus
+
+Independent of the log, and it agrees:
+
+| | drags | cleared/drag | s/drag | **cleared/s** | mean len | 6+ chains |
+|---|---:|---:|---:|---:|---:|---:|
+| check ON (260) | 381 | 3.26 | 0.965 | 3.38 | 4.34 | 15.2% |
+| **check OFF (0)** | 162 | 3.27 | 0.866 | **3.78** | 4.69 | **24.1%** |
+
+**+11.9% cleared per second**, +7.9% mean chain length, and 6+ chains go from
+15.2% to 24.1%. The seventeenth round's model predicted +15% on clears/s; the
+measured +11.9% is inside its error and the sign is right.
+
+### Why it works, stated plainly
+
+The mechanism is visible in one row: **cleared per drag is unchanged** (3.26 →
+3.27) and **drags that clear nothing are unchanged** (1.8% → 1.9%). The check
+was not improving the drags it fired on. It cost 0.25s each time, which is why
+chains per round rose 80.0 → 97.1, and the trim was cutting good chains short,
+which is why 6+ chains went from 15.2% to 24.1%.
+
+So the whole 0.25s was dead time and the trim was a net destroyer of length.
+Both of those are exactly what the corrected cost model said in the
+seventeenth round, and neither was visible under the model it replaced.
+
+### What is now off, and what that does not mean
+
+`verify_reach: 0` and, following it, `verify_extend: false` -- the rebuild has
+no reading to rebuild from without a check. **The rebuild was never wrong.**
+It beat the trim on five corpora and on a played round, and it still would.
+What stopped paying is the check underneath it. `verify_no_trim` is moot for
+the same reason and stays off.
+
+Restoring all three is two lines: `verify_reach: 260`, `verify_extend: true`.
+
+### What this round did not settle
+
+* **Every setting tuned while the check was on.** `link_px 105`, `block 1.25`,
+  `max_chain 12` and `min_chain 3` were all chosen in a regime where a bad
+  chain got trimmed before it was dragged. Nothing trims now, so a
+  loose link rule costs a whole drag rather than a member. These want
+  re-sweeping, one at a time, against the new baseline.
+* **Whether 0.25s was the real cost.** The saving showed up as +21% chains per
+  round, which is larger than 0.25s on 20% of drags accounts for. Something
+  else got faster too -- most likely the settle after a trimmed drag -- and
+  nothing here measured it.
+* **The recall gap.** Untouched, and still the biggest thing in the corpus.
+
+## Nineteenth round: colour is exhausted, and now it is exhausted four ways
+
+No round was played for this. It is an offline investigation of the one
+complaint that has outlived every finding in this document -- identity -- run
+over the 685-sample corpus, and it closes the last cheap idea.
+
+### The measurement `_recolour` was switched off waiting for
+
+`_recolour` samples each face once and merges agglomeratively. It has shipped
+off since it was written, and its docstring says exactly why:
+
+> Tuning `thresh` against labelled links looked like a win -- 80% -> 89% of
+> drawn links got the same kind. But labels only record pairs that DO belong
+> together, and a positive-only score always improves by merging more, right
+> up to "everything is one character". Calibrating this needs negative
+> examples ... which the current labelling flow does not collect.
+
+The collection flow collects them now. Positives are (head, marked) outside
+the glow; negatives are (head, unmarked) near enough that reach is unlikely to
+be the reason. Scored the way `learn.py` scores a palette, so the merge trap is
+closed by construction -- merging the board scores 100% agreement and 0% split:
+
+| rule | agreement | split | balanced |
+|---|---:|---:|---:|
+| k-means (today) | 36.6% | 73.6% | **55.1%** |
+| recolour 15 | 27.8% | 82.7% | 55.2% |
+| recolour 25 | 35.2% | 75.4% | 55.3% |
+| recolour 35 | 46.3% | 64.9% | **55.6%** |
+| recolour 40 | 53.9% | 57.2% | 55.6% |
+| recolour 50 | 73.1% | 36.0% | 54.5% |
+| recolour 80 | 98.0% | 2.7% | 50.4% |
+
+**Flat.** Every threshold trades agreement for split at one for one; the best
+is +0.5 points over k-means, which is noise. `_recolour` does not add
+information about identity, it only chooses where on the same curve to sit.
+`scripts/recolour_sweep.py`.
+
+### Four independent closures, same answer
+
+1. a global learned palette loses to the per-frame fit (ninth round)
+2. `purity` separates right from wrong character worse than a coin flip
+3. no descriptor computable from the face crops beats plain median Lab on
+   held-out sessions -- 0.561 AUC, shape 0.510, a learned linear metric no
+   better (`scripts/identity_probe.py`)
+4. and now: re-deciding identity off the faces is flat
+
+The cause is measured rather than guessed. The signal recovers to 0.636 AUC on
+the least-buried tsums, and the median tsum shows **0.42 of its own radius** --
+only 4.7% show 0.75 or more. There is not enough of a character on screen to
+identify it. That is a capture-resolution problem, and no rearrangement of
+these pixels solves it.
+
+### The trap, walked into and backed out of
+
+Scored on the CHAINS it builds rather than on identity, `_recolour` looks
+excellent -- +21% expected clears at threshold 40, +29% clears per second at
+50. That number is wrong, and the way it is wrong is worth writing down.
+
+The prefix model prices a member past the first refusal at 0.269 clears. That
+is positive, and a longer chain costs almost nothing per extra member, so
+every additional merged member adds value and the score rises without bound.
+It is the docstring's own warning wearing a better metric: the 0.269 was
+fitted on the tails of real chains averaging 4.5 members, and at threshold 50
+the mean is 9.08. The model is extrapolating, and the last time anyone
+followed this gradient the result was "chains of 27 and 31 tsums on real
+boards, and links the model would actually chain fell 85% -> 63%".
+
+Two offline scores, opposite verdicts, and the symmetric one is the one that
+cannot be gamed. **The flat table is the finding.**
+
+### Shipped anyway, off, with the landmine removed
+
+`--recolour` / `recolour` in `flows/play.yaml`, default 0. Only a played round
+can settle a disagreement like this, and the round is now cheap to take:
+`verify_clears` measures the answer directly, and `max_chain: 12` caps the
+downside. 35 is the value to try -- mean chain length near 6, inside the range
+the clear model was fitted on.
+
+It could not have been switched on safely before today. `read_base_kind`
+returns an index into the **palette centres**; `_recolour` renumbers `kind` to
+its own group ids. Turning it on would have pointed `base_kind` at an
+arbitrary group -- the bot would have stopped preferring the equipped
+character, the skill would have stopped charging, and nothing in the log would
+have said so. `_base_from_faces` re-derives the base from the icon's own Lab
+colour, which is what survives a renumbering. Pinned by
+`tests/test_recolour.py::test_the_base_tsum_survives_a_renumbering`.
+
+### What this round did not settle
+
+* **Whether `recolour 35` helps.** Offline it is flat on identity and positive
+  on chains, and those cannot both be right. Play it.
+* **The real fix.** Higher capture resolution, which is a re-tune of every
+  pixel constant (`link_px`, `block`, the board rect, the shuffle and skill
+  coordinates, the layout table) and not a setting.
+
+## Twentieth round: recolour played and rejected, and two conditions pulled apart
+
+5 rounds at `recolour: 35` against the 15 at 0 that preceded them, everything
+else equal, plus an offline split of detection by condition prompted by what
+the player saw on screen.
+
+### `recolour 35`, played
+
+| | clears/s | cleared | mean len | 6+ chains |
+|---|---:|---:|---:|---:|
+| recolour 0 (206 drags) | **3.74** | 68.5% | 4.74 | 23.8% |
+| recolour 35 (98 drags) | 3.50 | 68.6% | 4.49 | 19.4% |
+
+**-6.5% on clears per second**, identical clear rate, slightly shorter chains.
+Back to 0.
+
+Worth writing down because the round was played to settle a disagreement
+between two offline scores, and it settled it the way the nineteenth round
+predicted: the symmetric score -- agreement AND split, where merging the board
+cannot win -- said flat, and flat is what the game gave. The chain score that
+liked it was pricing an unknown tail member as positive.
+
+That is now the second time a metric with no penalty for over-merging has
+recommended over-merging, and the second time a round has refused it. The rule
+is not "`_recolour` is bad"; it is that **a score which cannot be lost by
+guessing must not be used to choose a threshold.**
+
+### The player's two observations, measured
+
+Reported from watching the screen: colour looked better, black tsums are still
+trouble, and FEVER "goes bad on detection". Two of the three check out, and
+the third is backwards.
+
+**FEVER is not detecting badly. It is detecting less.**
+
+| | drags | detections | proposed | refused | cleared |
+|---|---:|---:|---:|---:|---:|
+| normal | 184 | 41.5 | 5.14 | 33.7% | 62.5% |
+| FEVER | 120 | **32.0** | **3.92** | **17.0%** | **80.7%** |
+
+Inside FEVER the bot finds nine fewer tsums and proposes chains a member
+shorter -- but refuses half as often and clears 80.7% against 62.5%. The neon
+repaint that costs detections evidently makes the characters *easier* to tell
+apart, which is the opposite of the fear. So the FEVER problem is recall, not
+identity, and it is a problem worth having: it is the highest-scoring window
+of the round and the bot is playing it with shorter chains.
+
+**Black tsums: the switch is already right, and only FEVER needs it.**
+`scripts/detect_conditions.py`, 160 samples, scored against the tsums the game
+confirmed:
+
+| include_dark | bowl_reject | normal kept | found | FEVER kept | found |
+|---|---:|---:|---:|---:|---:|
+| True | 40 | 69.8% | 44.4 | 66.1% | 32.6 |
+| False | 40 | 69.6% | 44.3 | **63.9%** | 31.0 |
+| True | 0 | 70.5% | **47.0** | 66.1% | **33.8** |
+| False | 0 | 70.3% | 45.1 | 63.9% | 31.4 |
+
+`include_dark` is worth 2.2 points of recall in FEVER and nothing at all in
+normal play -- the dark pass earns its keep only where the board is dim, which
+is a sharper statement than `detect`'s "best-effort, not solved" and does not
+contradict it.
+
+**`bowl_reject 40` costs about 2.6 detections a board and buys no recall.**
+It has been on since the thirteenth round and was shipped with its own help
+text asking for the live A/B that never happened: offline f1 says 0.762 ->
+0.785, and f1 cannot say whether the drags it loses were ones the game would
+have cleared. It is a flow variable now.
+
+A caveat on the whole table, stated where it is easy to forget: `marked`
+indexes into the RECORDED detections, so a tsum detection missed can never
+appear in it. The absolute ~70% is re-fit variance against a fresh k-means,
+not "30% of the board is missed". Differences between rows are fair; the level
+is not.
+
+### What this round did not settle
+
+* **Whether `bowl_reject: 0` helps.** It finds more; this corpus cannot say
+  whether the extra are tsums or bowl. Next round.
+* **FEVER recall.** Nine fewer detections per board in the window that scores
+  most. Nothing here explains where they go -- the neon repaint, the overlay,
+  the animation, or the palette being refit on the dimmest frame of the round.
+* **Higher capture resolution**, still the only answer to identity, and still
+  a re-tune rather than a setting.
+
+## Twenty-first round: recall and chain length pull against each other
+
+10 rounds at `bowl_reject: 0` against the 15 at 40, everything else equal, and
+an end-of-round analysis prompted by the player reporting that play falls off
+during the closing countdown.
+
+### `bowl_reject 0`: the detections are real, and they still cost
+
+| | detections | cleared | mean len | s/drag | clears/s |
+|---|---:|---:|---:|---:|---:|
+| bowl_reject 40 | 38.0 | 68.5% | **4.74** | **0.869** | **3.74** |
+| bowl_reject 0 | **40.7** | **73.2%** | 4.47 | 0.969 | 3.38 |
+
+**-9.6% clears per second**, so 40 stays. But the interesting half is that it
+found more AND cleared better: 73.2% against 68.5%. Only real tsums can raise
+a clear rate. So the answer to the question its help text has been asking
+since the thirteenth round is: **the detections `bowl_reject` throws away are
+tsums, not bowl** -- and they are still not worth keeping.
+
+The mechanism is in the length column. An extra real tsum on a dense pile
+usually sits *between* two others, where it trips the `block` test and breaks
+a link that would otherwise have joined a chain. More of the board, fewer
+chains: 4.74 members down to 4.47.
+
+Confirmed independently from whole rounds -- the 12 rounds at 0 average 299.8
+tsums cleared per round against 337.4 for the same settings at 40.
+
+**Worth carrying forward, because it is a rule and not a setting: on a pile
+this dense, recall and chain length pull against each other.** Any future
+change that finds more tsums has to be priced on chains, not on detections.
+
+`block` was swept for the same reason and is flat -- precision holds at 36.5%
+from 0.9 to 2.5, and only the length moves. There is no setting there.
+
+### The closing countdown, measured
+
+The player reported play falling off in the last five seconds, while the
+screen flashes. It is real, it is narrower than it feels, and it is not a
+slowdown. Over 249 rounds, by seconds remaining:
+
+| sec left | detections | skip % | chain len | gap between drags |
+|---|---:|---:|---:|---:|
+| >20s | 45.3 | 19.6% | 4.93 | 0.489s |
+| 4-6s | 44.7 | 20.0% | 5.13 | 0.470s |
+| 2-4s | 45.8 | 14.2% | 5.28 | 0.498s |
+| **0-2s** | **40.4** | **23.0%** | 5.24 | 0.495s |
+
+The last **two** seconds, not five: detections fall 12% and the share of
+frames yielding nothing rises from 14% to 23%. The gap between drags does not
+move, so nothing is stalling -- the flash breaks the cached palette, the count
+drops, and more frames produce no chain.
+
+**Priced before fixing:** it costs about 0.3 chains per round out of ~90. Real,
+measured, and not worth a change. Recorded so nobody measures it twice.
+
+### A tool, because a result nobody can read is a result not taken
+
+`scripts/rounds.py` prints the last N rounds as one table -- chains, dragged,
+cleared, percentage, mean length -- with `--settings` naming what each was
+collected at. Every experiment in `IMPROVEMENT-LOOP.md` ends with "play a
+round and watch the end-of-round line", and that line scrolls past during play
+inside a log that also holds every chain and every template match. Two rounds
+in this document were run and read late for that reason.
+
+### What this round did not settle
+
+* **Nothing new is open.** `verify_reach`, `recolour`, `bowl_reject`, `block`,
+  `max_chain` and `include_dark` have now all been played or swept, and the
+  settings are exhausted -- the last four moved nothing or moved it the wrong
+  way.
+* **Capture resolution**, still the only untried lever, and still a re-tune of
+  every pixel constant rather than a setting. It is the whole of the remaining
+  list.

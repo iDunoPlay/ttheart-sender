@@ -63,40 +63,75 @@ CHECK_COSTS = (0.17, 0.28, 0.41)
 #: So a chain with one refused member out of five still clears the others,
 #: where the all-or-nothing model scored that drag as zero.
 #:
-#: KNOWN WRONG IN ITS SHAPE, and left in place anyway -- read this before
-#: quoting it. "Per member" implies the refusals are independent, and the
-#: sixteenth round says they are not: they are a SUFFIX. Of the drags with a
-#: refusal, 78% have every member from the first bad one onward refused;
-#: P(refused | previous refused) is 81% against 34.5% after a kept one; and
-#: members past the first refusal clear 28.6% against 84.8% before it. The
-#: chain dies where it first goes wrong, which is what a continuous stroke
-#: through a wrong character should do.
-#:
-#: `P_CLEAR_REFUSED` is therefore not "a refused member's own odds" but "what
-#: the dead tail still happens to clear", and this pair is an approximation
-#: of a prefix rule, not a description of one. It is not re-fitted here
-#: because the evidence is 18 refusing drags and 7 post-refusal members --
-#: enough to know the shape is wrong, not enough to fit the right one.
-#: Fix it when a corpus can carry it, and re-read the tables when you do.
-#:
-#: What survives either shape: trimming buys nothing. Under independence the
-#: refused members still clear a little, and under a prefix they were already
-#: dead -- so in both, the trim removes members that cost nothing but stroke
-#: time, and the only part of the check that pays is the rebuild.
-P_CLEAR_MARKED = 0.898
-P_CLEAR_REFUSED = 0.229
+#: Re-fitted on the seventeenth round's 404 samples; the fifteenth round's
+#: 122-sample values (0.898 / 0.229) reproduce inside a point and a half.
+P_CLEAR_MARKED = 0.882      # 930/1054
+P_CLEAR_REFUSED = 0.244     # 66/270
 
-#: Members `verify_extend`'s rebuild adds, which the same round priced at
-#: 22 of 22. Kept as its own name rather than folded into P_CLEAR_MARKED: it
-#: is a different population -- partners the graph could not reach -- and n=22
-#: is thin enough that it should be re-measured rather than trusted forever.
+#: THE SHAPE THE REFUSALS ACTUALLY HAVE. `per-member` treats them as
+#: independent; they are not. A drag is a continuous stroke, and it dies where
+#: it first meets a wrong character. Over 191 refusing drags in the
+#: seventeenth round:
+#:
+#:     refusals form a clean suffix        : 70.2%
+#:     P(refused | previous refused)       : 84.2%   (vs 42.4% after a kept one)
+#:     members before the first refusal    : 83.5% cleared  (944/1131)
+#:     members after  the first refusal    : 26.9% cleared  (52/193)
+#:
+#: So `prefix` scores an as-proposed drag by where its first refusal falls
+#: rather than by how many refusals it has, and it is the best-supported of
+#: the three models. The sixteenth round saw this shape at n=18 and refused to
+#: fit it; this is that fit.
+#:
+#: A TRIMMED chain has no first refusal -- every member is marked -- so it is
+#: scored at `P_CLEAR_MARKED` under this model too. That is the whole reason
+#: the trim looks better here than under `per-member`: it is the only model in
+#: which cutting the dead tail can do anything at all.
+P_CLEAR_PREFIX = 0.835
+P_CLEAR_TAIL = 0.269
+
+#: Members `verify_extend`'s rebuild adds. The fifteenth round priced this at
+#: 22 of 22 and said n=22 was thin enough to re-measure rather than trust; it
+#: was right to. At 143 added members it is 90.2% -- still above the 88.2% of
+#: the chain they join, and still the only part of a check that is measured
+#: rather than modelled.
 #: Both models are printed side by side, always. Correcting a cost model
 #: re-scores every round already decided under it -- the tenth, eleventh,
 #: thirteenth and fourteenth -- and this project's own rule is not to
 #: re-score a measurement in silence, so the old column stays and stays
 #: labelled. Delete the old one only once every round that quoted it has
 #: been re-read under the new one.
-P_CLEAR_ADDED = 1.000
+P_CLEAR_ADDED = 0.902     # 129/143
+
+
+def first_refusal(row: dict) -> int:
+    """Index of the first proposed member the game did not mark, or len().
+
+    Where the stroke dies, under the `prefix` model. `kept` is a set of
+    members, not a length: a chain can be refused at member 2 and marked again
+    at member 4 (29.8% of refusing drags), and only the FIRST break matters
+    because everything past it is dragged through a chain that has stopped
+    accepting.
+    """
+    kept = set(row["kept"])
+    for pos, i in enumerate(row["proposed"]):
+        if i not in kept:
+            return pos
+    return len(row["proposed"])
+
+
+def as_proposed_clears(row: dict) -> tuple[float, float, float]:
+    """What dragging the proposal untouched clears, under each of the three
+    models: (all-or-nothing, per-member, prefix)."""
+    prop_n = len(row["proposed"])
+    kept_n = len(row["kept"])
+    refused_n = max(0, prop_n - kept_n)
+    cut = first_refusal(row)
+    return (
+        float(prop_n) if refused_n == 0 else 0.0,
+        P_CLEAR_MARKED * kept_n + P_CLEAR_REFUSED * refused_n,
+        P_CLEAR_PREFIX * cut + P_CLEAR_TAIL * (prop_n - cut),
+    )
 
 
 def load(root: Path) -> list[dict]:
@@ -283,54 +318,49 @@ def refusal_by_position(rows: list[dict]) -> None:
 def sweep(rows: list[dict], min_chain: int) -> None:
     print("\n== verify_reach: buying the game's opinion only where it pays ==")
     print("  A checked drag is trimmed to what the game marked and abandoned if")
-    print("  that falls under min_chain. What an UNCHECKED drag clears is where")
-    print("  the two models differ, and it is the whole disagreement:")
-    print("    all-or-nothing -- it clears in full if the game accepted every")
-    print("      member, and nothing otherwise. What this script assumed until")
-    print("      the fifteenth round, and what +27%/+17%/+7% was computed under.")
-    print("    per-member -- each member clears on its own: 89.8% of the ones")
-    print("      the game marked, 22.9% of the ones it refused. Measured.")
-    print("  The time column is shared: the drag runs either way. Read the")
-    print("  per-member half; the other is kept so nothing is re-scored in")
-    print("  silence.")
+    print("  that falls under min_chain. What an UNCHECKED drag clears is the")
+    print("  whole disagreement, and there are three answers to it:")
+    print("    all-or-nothing -- clears in full if every member was accepted,")
+    print("      nothing otherwise. Assumed for five rounds; false.")
+    print("    per-member -- each member on its own odds (88.2% marked, 24.4%")
+    print("      refused). Right that a refusal is not a veto, wrong in shape.")
+    print("    prefix -- the stroke dies at the first refusal: 83.5% before it,")
+    print("      26.9% after. Best supported, and the one to read.")
+    print("  Time is shared: the drag runs either way. The older columns stay")
+    print("  so no earlier round is re-scored in silence.")
     for cost in CHECK_COSTS:
         print(f"\n  per-check cost {cost:.2f}s")
-        print(f"  {'':>12} {'':>7} {'   all-or-nothing (old)':>26} "
-              f"{'      per-member (measured)':>28}")
-        print(f"  {'verify past':>12} {'holds':>7} {'time':>8} "
-              f"{'cleared':>8} {'clears/s':>9} {'vs off':>8} "
-              f"{'cleared':>8} {'clears/s':>9} {'vs off':>8}")
-        base_old = base_new = None
+        print(f"  {'':>12} {'':>7} {'':>8}"
+              f"{'all-or-nothing':>19}{'per-member':>19}{'prefix':>19}")
+        print(f"  {'verify past':>12} {'holds':>7} {'time':>8}"
+              + f"{'clears/s':>10}{'vs off':>9}" * 3)
+        base = [None, None, None]
         for thr in (10**9, 300, 260, 220, 180, 150, 0):
-            old = new = 0.0
+            got = [0.0, 0.0, 0.0]
             holds = 0
             total = 0.0
             for r in rows:
-                kept_n, prop_n = len(r["kept"]), len(r["proposed"])
-                refused_n = max(0, prop_n - kept_n)
-                checking = thr == 0 or reach(r) > thr
-                if checking:
+                if thr == 0 or reach(r) > thr:
                     holds += 1
                     total += cost
-                    nodes = r["kept"] if kept_n >= min_chain else []
+                    nodes = r["kept"] if len(r["kept"]) >= min_chain else []
                     if nodes:
                         total += stroke_time(r, nodes)
-                        old += len(nodes)
-                        # A trimmed chain is all marked members, so only the
-                        # marked probability applies.
-                        new += P_CLEAR_MARKED * len(nodes)
+                        # A trimmed chain is entirely marked, so it has no
+                        # first refusal and every model but the oldest scores
+                        # it the same way.
+                        for m in range(3):
+                            got[m] += (len(nodes) if m == 0
+                                       else P_CLEAR_MARKED * len(nodes))
                 else:
                     total += stroke_time(r, r["proposed"])
-                    if refused_n == 0:
-                        old += prop_n
-                    new += P_CLEAR_MARKED * kept_n + P_CLEAR_REFUSED * refused_n
-            r_old, r_new = old / total, new / total
-            base_old = base_old if base_old is not None else r_old
-            base_new = base_new if base_new is not None else r_new
+                    for m, v in enumerate(as_proposed_clears(r)):
+                        got[m] += v
+            rates = [g / total for g in got]
+            base = [b if b is not None else r_ for b, r_ in zip(base, rates)]
             lbl = "never" if thr == 10**9 else ("every drag" if thr == 0 else f"{thr}px")
-            print(f"  {lbl:>12} {holds:7d} {total:8.1f} "
-                  f"{old:8.0f} {r_old:9.2f} {r_old/base_old - 1:+8.1%} "
-                  f"{new:8.0f} {r_new:9.2f} {r_new/base_new - 1:+8.1%}")
+            cells = "".join(f"{r_:10.2f}{r_/b - 1:+9.1%}" for r_, b in zip(rates, base))
+            print(f"  {lbl:>12} {holds:7d} {total:8.1f}" + cells)
 
 
 def truncation(rows: list[dict], min_chain: int) -> None:

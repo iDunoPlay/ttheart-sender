@@ -529,6 +529,36 @@ def _face_lab(bgr: np.ndarray, tsums: Sequence["Tsum"], radius: float,
     return out
 
 
+def _base_from_faces(bgr: np.ndarray, tsums: Sequence["Tsum"], radius: float,
+                     icon_lab) -> Optional[int]:
+    """Which `kind` is the equipped tsum, when the cluster ids are not k-means'.
+
+    :func:`read_base_kind` matches the skill icon against the palette centres
+    and returns one of their indices. That is the right answer while `kind` IS
+    a palette index; it is meaningless once :func:`_recolour` has regrouped the
+    board under its own numbering.
+
+    The icon's Lab colour survives both, and is the closest thing this project
+    has to naming the character -- read off raw pixels of a fixed sprite in a
+    fixed place. So the group whose faces sit nearest it is the equipped one.
+    Medians rather than means: one member landing on a neighbour's face should
+    not drag a whole group's colour.
+    """
+    if icon_lab is None or not len(tsums):
+        return None
+    faces = _face_lab(bgr, tsums, radius)
+    icon = np.asarray(icon_lab, np.float32)
+    best, best_d = None, float("inf")
+    for kind in {t.kind for t in tsums}:
+        sel = faces[[i for i, t in enumerate(tsums) if t.kind == kind]]
+        if not len(sel):
+            continue
+        d = float(np.linalg.norm(np.median(sel, axis=0) - icon))
+        if d < best_d:
+            best, best_d = kind, d
+    return best
+
+
 def purity_filter(bgr: np.ndarray, tsums: Sequence[Tsum], nodes: Sequence[int],
                   radius: float, tol: float) -> list[int]:
     """Drop chain members that don't actually look like the rest of the chain.
@@ -2548,6 +2578,7 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
                                             palette=palette,
                                             scale=opts.scale, include_dark=opts.include_dark,
                                             merge=opts.merge, bowl_reject=opts.bowl_reject,
+                                            recolour=opts.recolour,
                                             fit_effort=opts.fit_effort)
 
             # FEVER repaints the whole board in neon, so a palette fit during
@@ -2594,6 +2625,7 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
                                                    include_dark=opts.include_dark,
                                                    merge=opts.merge,
                                                    bowl_reject=opts.bowl_reject,
+                                                   recolour=opts.recolour,
                                                    fit_effort=opts.fit_effort)
                 if abs(len(fresh) - floor) < abs(len(tsums) - floor):
                     say(f"    recalibrated ({len(tsums)} -> {len(fresh)} tsums)")
@@ -2632,6 +2664,17 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
                              "distance": round(float(base_dist), 1)}
                 say(f"base tsum: cluster #{base} (Lab distance {base_dist:.1f}, "
                     f"icon Lab {seen_base.get('icon_lab')})")
+            if opts.recolour > 0 and opts.use_base and base_icon:
+                # `read_base_kind` answers with an index into the PALETTE
+                # centres, and `--recolour` throws those away: it renumbers
+                # `kind` to its own group ids, which have nothing to do with
+                # k-means cluster numbers. Left alone, turning recolour on
+                # would silently point `base_kind` at an arbitrary group --
+                # the bot would stop preferring the equipped character, which
+                # is the thing that charges the skill, and nothing would say
+                # so. Re-derived here per frame from the one identifier that
+                # survives a renumbering: the icon's own Lab colour.
+                base = _base_from_faces(crop, tsums, radius, base_icon.get("lab"))
             # Only quantise a second time when the rule that needs it is on:
             # detect() keeps the centres, not the label map, and refitting the
             # labels costs a GEMM over the crop.
@@ -5299,6 +5342,25 @@ def add_play_args(play, *, merge_default: bool):
     play.add_argument("--shuffle-clicks", type=int, default=3)
     play.add_argument("--shuffle-delay", type=float, default=0.3,
                       help="seconds between shuffle taps")
+    play.add_argument("--recolour", type=float, default=0.0,
+                      help="re-decide identity by sampling each FACE once and "
+                           "merging groups closer than this in Lab, instead of "
+                           "trusting the pixel-level k-means. 0 = off. Pixel "
+                           "k-means splits one character across two clusters "
+                           "when it is lit differently across the board, and "
+                           "`adjacency` will not link across a kind "
+                           "difference, so those partners are unreachable. "
+                           "MEASURED BOTH WAYS AND THEY DISAGREE: scored "
+                           "symmetrically against the game's marks it is flat "
+                           "(balanced 55.1%% at k-means, 55.6%% at its best, "
+                           "over 685 samples), but scored on the chains it "
+                           "builds it gains, and that second score prices an "
+                           "unknown tail member as positive so it rewards "
+                           "merging without bound. Only a played round "
+                           "decides. Try 35 -- it keeps mean chain length near "
+                           "6, inside the range the clear model was fitted on. "
+                           "Costs ~18ms a frame",
+                      )
     play.add_argument("--purity", type=float, default=35.0,
                       help="drop chain members whose colour is this far (Lab) "
                            "from the chain median; 0 disables")

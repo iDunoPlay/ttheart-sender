@@ -60,8 +60,13 @@ vars:
   # checks, for no reading cost at all: `verify_reach` had already bought the
   # answer. Leave it on.
   #
-  # HOW TO TURN IT OFF: set this back to false. Nothing else changes.
-  verify_extend: true
+  # OFF SINCE THE EIGHTEENTH ROUND, and not because it was wrong. It rebuilds
+  # a chain from a reading that only a check produces, and `verify_reach` is
+  # now 0, so there is no reading to rebuild from -- left true it would print
+  # "it will not fire" once a round and do nothing. The rule itself is intact
+  # and still beats the trim; what stopped paying is the check underneath it.
+  # Turn `verify_reach` back to 260 and set this true to restore both.
+  verify_extend: false
   # `verify_no_trim` -- spend the check on the REBUILD only, never on the trim.
   #
   # The trim was built on "a refused member costs the whole drag". The
@@ -83,6 +88,96 @@ vars:
   # stop reporting `rejected N chain(s) outright`. If clears fall, the trim
   # was doing something after all -- revert by setting this back to false.
   verify_no_trim: false
+
+  # `recolour` -- DECIDE IDENTITY FROM THE FACES, NOT FROM THE PIXELS.
+  #
+  # `kind` today is a pixel-level k-means cluster. It is a coin flip about
+  # identity: it links 37% of the partners the game confirms and 26% of the
+  # tsums it does not. One character lit differently across the board lands in
+  # two clusters, and `adjacency` will not link across a kind difference at any
+  # distance -- so those partners are unreachable, which is the recall gap.
+  #
+  # `recolour` samples each FACE once, in the middle where lighting is evenest,
+  # and merges groups closer than this many Lab units. 0 = off.
+  #
+  # THE EVIDENCE DISAGREES WITH ITSELF, and that is why it is off:
+  #   * scored symmetrically against the game's marks (agreement that partners
+  #     share an id, AND split that non-partners do not), it is FLAT -- 55.1%
+  #     balanced for k-means, 55.6% at its best, over 685 samples. No threshold
+  #     adds information; they only slide along the same trade.
+  #   * scored on the chains it builds, it gains a lot -- but that score prices
+  #     an unknown tail member as positive, so it rewards merging without
+  #     bound, and following that gradient is what produced "chains of 27 and
+  #     31 tsums on real boards" the last time this was tried.
+  #
+  # So only a played round decides. 35 is the value to try: it keeps mean chain
+  # length near 6, inside the range the clear model was fitted on, and
+  # `max_chain: 12` caps the damage either way.
+  #
+  # PLAYED AND REJECTED, twentieth round. 5 rounds at 35 against 15 rounds at
+  # 0, everything else equal:
+  #     clears/second   3.74 -> 3.50  (-6.5%)
+  #     cleared         68.5% -> 68.6% (unchanged)
+  #     mean chain len  4.74 -> 4.49,  6+ chains 23.8% -> 19.4%
+  # Which is exactly what the symmetric offline score said: flat on identity,
+  # and the chain score that liked it was pricing unknown members as positive.
+  # Stays at 0; set it to 35 only to reproduce the result.
+  # COSTS: about 18ms a frame against a ~100ms decision.
+  recolour: 0
+
+  # `bowl_reject` -- drop detections whose face colour sits within this many
+  # Lab of the board's own colour, on the theory that they landed on the bowl
+  # rather than on a tsum. 0 = off.
+  #
+  # ON AT 40 SINCE THE THIRTEENTH ROUND AND NEVER A/B'd LIVE, which its own
+  # help text asked for: the offline case is f1 0.762 -> 0.785, and f1 cannot
+  # say whether the drags it loses were ones the game would have cleared.
+  #
+  # Measured in the twentieth round, split by condition, against the tsums the
+  # game confirmed (`scripts/detect_conditions.py`):
+  #     normal : keeps 69.8% of confirmed tsums at 40, 70.5% at 0
+  #              finds 44.4 per board at 40, 47.0 at 0
+  #     FEVER  : keeps 66.1% either way; finds 32.6 at 40, 33.8 at 0
+  # So it throws away about 2.6 detections a board in normal play and buys no
+  # recall for them. Whether those were phantoms or tsums is exactly what this
+  # corpus cannot say -- hence the round.
+  #
+  # PLAYED AND KEPT AT 40, twenty-first round. 10 rounds at 0 against 15 at
+  # 40, everything else equal:
+  #     detections/board   38.0 -> 40.7   (it does find more)
+  #     cleared            68.5% -> 73.2% (and they are REAL tsums)
+  #     mean chain length  4.74 -> 4.47   (but chains got SHORTER)
+  #     seconds per drag   0.869 -> 0.969
+  #     clears per second  3.74 -> 3.38   (-9.6%)
+  #
+  # So the answer its help text asked for is: the detections it drops are not
+  # phantoms -- dropping them RAISES the clear rate by 4.7 points, which only
+  # real tsums can do. They cost more than they are worth anyway, because an
+  # extra real tsum sitting between two others trips the `block` test and
+  # breaks a link. More of the board, fewer chains.
+  #
+  # That is worth remembering before adding detections anywhere else: on a
+  # pile this dense, recall and chain length pull against each other.
+  bowl_reject: 40
+  # `verify_reach` -- the px reach past which a chain is checked before being
+  # dragged. 260 has been the shipped value since the tenth round; 0 turns
+  # every check OFF, and with it the rebuild.
+  #
+  # A VARIABLE AS OF THE SEVENTEENTH ROUND, because it is now the thing most
+  # worth A/B-ing. Re-swept on 404 drags under the `prefix` model -- the
+  # stroke dies at its first refusal -- NOT checking beat every way of
+  # checking: 12.51 clears/s against 10.87 for today's trim, 11.29 for the
+  # rebuild and 10.50 for rebuild-without-trim. It is not a scoring-curve
+  # artefact either: "never" and "no trim" have the same length profile
+  # (mean 4.87 vs 4.95, both 25.5% of chains at 6+).
+  #
+  # That reverses nothing that was measured -- the rebuild really does beat
+  # the trim, which is all the fifteenth round claimed -- but five rounds
+  # compared trim against something, and none compared checking against not
+  # checking under a model that was not broken.
+  #
+  # SET THIS TO 0 AND PLAY A ROUND. That is the experiment now.
+  verify_reach: 0
 
 steps:
   # Clear anything left over from a previous round (the score tally, the High
@@ -193,7 +288,7 @@ steps:
         # itself flags over ten boards, and live it was clearly the worse of
         # the two -- 60 takes real tsums out of the middle of chains. Where the
         # two disagree, the round wins.
-        bowl_reject: 40
+        bowl_reject: "${bowl_reject}"
 
         # `mode: blob` -- DECIDE LINKS BY THE PICTURE, NOT BY DISTANCE.
         # The default rule ("touch") calls two tsums linked when their centres
@@ -414,7 +509,7 @@ steps:
         # near 20%. If it is near zero the threshold is too high for your
         # boards; if it is most of them, too low. `cleared` is the number that
         # decides, and `--verify-clears` is what measures it.
-        verify_reach: 260
+        verify_reach: "${verify_reach}"
 
         # `verify_clears` -- MEASURE WHAT ACTUALLY LEFT THE BOARD.
         # Not a play rule: a measurement, and the one this project owes
@@ -500,6 +595,10 @@ steps:
         # See the `vars:` block at the top for the measurement and the
         # revert. Off by default there; this line is what carries it down.
         verify_no_trim: "${verify_no_trim}"
+
+        # `recolour` -- see the `vars:` block at the top for the measurement,
+        # the threshold to try, and the revert.
+        recolour: "${recolour}"
 
   - find_click:
       template: cancel_button
