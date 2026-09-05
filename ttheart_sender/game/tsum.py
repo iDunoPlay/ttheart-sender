@@ -43,7 +43,7 @@ from typing import Any, Callable, Iterable, Optional, Sequence
 import cv2
 import numpy as np
 
-from ..exceptions import StopRequested
+from ..exceptions import StopRequested, TTHeartError
 
 log = logging.getLogger(__name__)
 
@@ -628,12 +628,63 @@ CHARACTER_KIND = 1000
 #: filling and reads ~11 tsums, and a settled board reads ~45. The net gets
 #: sized for 11 and dies on the next real frame.
 #:
-#: So the batch never varies. Short batches are padded with zeros and the
-#: padding's answers are thrown away. 64 covers `--max-tsums` sized boards in
-#: one pass; anything larger goes round again at the same fixed size. The cost
-#: is computing a few unused rows -- about 10ms a board -- against a class of
-#: failure that takes the whole app down mid-round.
+#: So the batch is CAPPED here and the buffers are sized here, once, by
+#: :func:`_warm_up` at load time -- a single forward on 64 rows of zeros,
+#: before any board is read. After that every real board is sent at its own
+#: size, because the buffers can only ever SHRINK from a maximum they were
+#: already given, and shrinking is not what kills it.
+#:
+#: That the shrink is safe is measured, not assumed. On cv2 5.0.0, warmed at
+#: 64 and then fed 41, 33, 47, 12, 58, 1, 64, 40, 5 and 44 in that order, the
+#: net survives every one and its answers are **bit-identical** to the same
+#: crops padded out to 64 -- so this is a speed change with no decision in it.
+#:
+#: It was worth doing because the padding was not the "about 10ms" the first
+#: estimate here guessed. A board is ~41 detections and a forward costs 10.4ms
+#: at 41 against 18.3ms at 64, so **43% of every forward was zero rows**, on a
+#: filter measured at 11% of the frame rate in play. See `updates.md`,
+#: 2026-09-05.
+#:
+#: A board larger than this still goes round again rather than growing the
+#: batch, which is the one thing that must never happen.
 CHARACTER_BATCH = 64
+
+
+def _warm_up(net, size: int) -> None:
+    """Size a freshly loaded net's buffers at the largest batch it will see.
+
+    Called once per net, at load, so the first real board cannot be the thing
+    that sizes them. Without it a round whose opening frame reads 11 tsums
+    sizes the net for 11 and is killed by the next settled board at 45 --
+    which is the crash :data:`CHARACTER_BATCH` was written for. It costs one
+    forward on zeros, once per process, against a class of failure that takes
+    the whole app down mid-round.
+    """
+    net.setInput(np.zeros((CHARACTER_BATCH, 3, int(size), int(size)),
+                          np.float32))
+    net.forward()
+
+
+def _forward(net, blob, name: str) -> np.ndarray:
+    """Every crop's logits, in order, in batches that never exceed the warm-up.
+
+    Shared by both models so a change to the batching rule cannot reach one
+    of them and not the other -- the same reason :func:`_character_crop` is
+    module level.
+    """
+    outs = []
+    for i in range(0, len(blob), CHARACTER_BATCH):
+        chunk = np.ascontiguousarray(blob[i:i + CHARACTER_BATCH])
+        net.setInput(chunk)
+        out = np.asarray(net.forward(), np.float32)
+        if out.shape[:1] != chunk.shape[:1]:
+            raise ValueError(f"{name} returned {out.shape} for "
+                             f"{len(chunk)} crops")
+        outs.append(out.copy())
+    if not outs:
+        return np.zeros((0, 1), np.float32)
+    return np.concatenate(outs)
+
 
 #: One loaded net per (path, confidence), for the life of the process.
 #:
@@ -656,11 +707,56 @@ def load_character_model(path, confidence: float,
     """The shared model for this path, loaded at most once per process."""
     key = (str(path), round(float(confidence), 4), round(float(min_visible), 4))
     model = _CHARACTER_CACHE.get(key)
-    if model is None:
+    if model is None or model.net is None:
+        # `net is None` means it switched itself off mid-round. Rebuilt rather
+        # than handed back dead, because a cached corpse clears `failed` below
+        # and then names nothing for the rest of the process with nothing said.
         model = CharacterModel(path, confidence, min_visible)
         _CHARACTER_CACHE[key] = model
     # Counters are per round, the net is not.
     model.named = model.seen = model.buried = 0
+    model.failed = ""
+    return model
+
+
+def load_chain_model(path, bonus: float) -> "ChainModel":
+    """The shared chain ranker for this path, loaded at most once per process.
+
+    Same cache and the same reason as the other two loaders: `play_loop` runs
+    once per ROUND and a fresh `cv2.dnn` net per round is how this project
+    last killed the tray.
+    """
+    key = ("chain", str(path), round(float(bonus), 4))
+    model = _CHARACTER_CACHE.get(key)
+    if model is None or model.net is None:
+        model = ChainModel(path, bonus)
+        _CHARACTER_CACHE[key] = model
+    model.seen = model.moved = 0
+    model.failed = ""
+    return model
+
+
+def load_reject_model(path, floor: float) -> "RejectModel":
+    """The shared board filter for this path, loaded at most once per process.
+
+    Same cache and the same reason as :func:`load_character_model`: the tray
+    plays rounds back to back for hours, and building a `cv2.dnn` net per round
+    means a fresh native parse and a fresh set of layer buffers each time, with
+    the old ones released only if and when Python gets around to it. The
+    reported failure of that shape was two rounds fine and the third killing
+    the process with no traceback.
+
+    The filter was constructed per round from the day it shipped and had not
+    been noticed because it had never played a long session -- it first ran on
+    2026-09-05, for 14 rounds. Cached before it gets the chance.
+    """
+    key = (str(path), round(float(floor), 4))
+    model = _CHARACTER_CACHE.get(key)
+    if model is None or model.net is None:
+        model = RejectModel(path, floor)
+        _CHARACTER_CACHE[key] = model
+    # Counters are per round, the net is not.
+    model.seen = model.dropped = 0
     model.failed = ""
     return model
 
@@ -728,6 +824,8 @@ class RejectModel:
                           .read_text(encoding="utf-8"))
         self.net = cv2.dnn.readNetFromONNX(str(path))
         self.size = int(meta.get("size", 96))
+        # Before the first board, not on it: see `_warm_up`.
+        _warm_up(self.net, self.size)
         self.mean = np.asarray(meta.get("mean", [0.485, 0.456, 0.406]), np.float32)
         self.std = np.asarray(meta.get("std", [0.229, 0.224, 0.225]), np.float32)
         self.floor = float(floor)
@@ -759,18 +857,8 @@ class RejectModel:
         blob = (blob - self.mean) / self.std
         blob = np.ascontiguousarray(blob.transpose(0, 3, 1, 2), dtype=np.float32)
         try:
-            outs = []
-            for i in range(0, len(blob), CHARACTER_BATCH):
-                chunk = blob[i:i + CHARACTER_BATCH]
-                n = len(chunk)
-                if n < CHARACTER_BATCH:
-                    pad = np.zeros((CHARACTER_BATCH,) + chunk.shape[1:], np.float32)
-                    pad[:n] = chunk
-                    chunk = pad
-                self.net.setInput(np.ascontiguousarray(chunk))
-                outs.append(np.asarray(self.net.forward(), np.float32)[:n].copy())
-            logits = np.concatenate(outs)
-        except cv2.error as exc:
+            logits = _forward(self.net, blob, "the board filter")
+        except (cv2.error, ValueError) as exc:
             # Off for the rest of the round rather than taking the round with
             # it, and said once: a filter that quietly stops filtering looks
             # exactly like one that was never on.
@@ -796,6 +884,210 @@ class RejectModel:
         if self.failed:
             out += f" -- SWITCHED OFF mid-round: {self.failed}"
         return out
+
+
+class ChainModel:
+    """Ranks candidate chains by how many members the GAME will accept.
+
+    The bot has always sorted chains by ``(is_base, len)`` -- longest wins.
+    The proposal corpus says that is the wrong end of the board to optimise:
+    of 7,352 proposed members, the game accepts 97.9% of first members and
+    19.1% of sevenths, and once it refuses one it refuses 86% of what follows.
+    A shorter chain taken whole can be worth more than a long one taken a
+    third of.
+
+    So each candidate is scored as **expected accepted members** -- the sum of
+    a per-member acceptance probability -- and the best of those is played.
+
+    WHAT IS MEASURED, AND WHAT IS NOT
+    ---------------------------------
+
+    * The per-member model reads **0.876 AUC** on rounds it never trained on,
+      against **0.500** for the `adjacency` rule it replaces -- which is not a
+      failure to measure `adjacency` but the whole point: every member it
+      proposes passed its own test, so it scores them all alike and has
+      nothing to rank by.
+    * The expected total is **calibrated**: over 597 held-out presses it
+      predicted 2.274 accepted against 2.310 actually accepted, a bias of
+      -0.036, tracking across every band.
+    * Re-ranking changes the pick on 23.8% of presses and is worth
+      **+0.109 accepted members per press** averaged over all of them. That
+      survives scoring with a SECOND, independently trained model
+      (+0.457 against the choosing model's +0.467), so it is not the winner's
+      curse of taking an argmax over a noisy estimate.
+
+    **It has never been played.** +0.109 on 2.31 is +4.7%, and the corpus's own
+    spread needs ~136 rounds an arm to resolve that on accepted-per-press and
+    ~204 on `cleared`. Ships off, one line to revert, exactly like everything
+    else here -- and unlike the board filter, which had 0.998 AUC offline and
+    lost 143 rounds of play.
+    """
+
+    def __init__(self, path, bonus: float = 0.0):
+        meta = json.loads(Path(str(path)).with_suffix(".json")
+                          .read_text(encoding="utf-8"))
+        self.net = cv2.dnn.readNetFromONNX(str(path))
+        self.features = list(meta["features"])
+        self.mu = np.asarray(meta["mu"], np.float32)
+        self.sd = np.asarray(meta["sd"], np.float32)
+        #: Added per member, so a preference for length can be mixed back in.
+        self.bonus = float(bonus)
+        self.seen = self.moved = 0
+        self.failed = ""
+        _warm_up_rows(self.net, len(self.features))
+
+    def rank(self, chains, tsums, radius: float, fever: bool):
+        """`chains` best-first by expected accepted members.
+
+        Returns the list unchanged on any failure. A ranker that quietly
+        stops ranking looks exactly like one that was never on, so a failure
+        switches it off for the round and says so once.
+        """
+        if self.net is None or len(chains) < 2:
+            return chains
+        pts = np.array([[t.x, t.y] for t in tsums], np.float64)
+        lab = _cluster_lab(tsums)
+        rows, spans = [], []
+        for c in chains:
+            f = _chain_rows(tsums, pts, lab, radius, list(c.nodes),
+                            fever, c.is_base, self.features)
+            spans.append(len(f))
+            if len(f):
+                rows.append(f)
+        if not rows:
+            return chains
+        blob = (np.concatenate(rows) - self.mu) / self.sd
+        try:
+            logit = _forward(self.net, np.ascontiguousarray(
+                blob, dtype=np.float32), "the chain ranker")
+        except (cv2.error, ValueError) as exc:
+            self.failed = str(exc)
+            self.net = None
+            return chains
+        prob = 1.0 / (1.0 + np.exp(-logit.reshape(-1)))
+        out, at = [], 0
+        for c, n in zip(chains, spans):
+            total = float(prob[at:at + n].sum()) + self.bonus * len(c) if n else 0.0
+            at += n
+            out.append((c, total))
+        # `is_base` still leads: clearing the equipped character is what
+        # charges the skill, and that is a rule about the ROUND rather than
+        # about this press. Within it, expected accepted decides.
+        ranked = [c for c, _ in sorted(out, key=lambda kv: (kv[0].is_base, kv[1]),
+                                       reverse=True)]
+        self.seen += 1
+        if ranked and chains and list(ranked[0].nodes) != list(chains[0].nodes):
+            self.moved += 1
+        return ranked
+
+    def summary(self) -> str:
+        if not self.seen:
+            return ""
+        out = (f"chain ranker re-picked {self.moved}/{self.seen} presses "
+               f"({self.moved / self.seen:.0%})")
+        if self.failed:
+            out += f" -- SWITCHED OFF mid-round: {self.failed}"
+        return out
+
+
+def _warm_up_rows(net, width: int) -> None:
+    """Size a row-shaped net's buffers at the cap, before any board.
+
+    Same rule and same reason as :func:`_warm_up`, which shapes its zeros like
+    a batch of crops; this one shapes them like a batch of feature rows.
+    """
+    net.setInput(np.zeros((CHARACTER_BATCH, int(width)), np.float32))
+    net.forward()
+
+
+def _cluster_lab(tsums):
+    """Each tsum's cluster colour in Lab, for the ranker's colour features.
+
+    NOT `_face_lab`, which already exists and reads patches out of a frame.
+    Naming this one the same shadowed it and broke six unrelated tests -- the
+    second shadowing bug in two days, after a dict-valued `experiments`
+    property hid a set-valued one and made every experiment read as armed.
+
+    Read off `Tsum.colour`, which is the cluster's own BGR, rather than
+    re-cutting the frame: the ranker runs on every candidate of every frame
+    and a per-tsum patch read would cost more than the model does.
+    """
+    bgr = np.asarray([[t.colour for t in tsums]], np.uint8)
+    return cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)[0].astype(np.float32)
+
+
+def _chain_rows(tsums, pts, lab, radius, nodes, fever, is_base, want):
+    """One feature row per member after the head, in `want`'s order.
+
+    `want` comes from the model's own sidecar, so a model trained on a
+    different set of columns cannot be fed this one's -- the order is read
+    from the file rather than assumed to match.
+    """
+    if len(nodes) < 2:
+        return np.zeros((0, len(want)), np.float32)
+    head = nodes[0]
+    rows, path = [], 0.0
+    for k in range(1, len(nodes)):
+        i, prev = nodes[k], nodes[k - 1]
+        vx, vy = pts[i][0] - pts[prev][0], pts[i][1] - pts[prev][1]
+        d_prev = float(math.hypot(vx, vy))
+        path += d_prev
+        turn = 1.0
+        if k >= 2:
+            ux, uy = pts[prev][0] - pts[nodes[k - 2]][0], pts[prev][1] - pts[nodes[k - 2]][1]
+            nu, nv = math.hypot(ux, uy), d_prev
+            if nu > 1e-6 and nv > 1e-6:
+                turn = max(-1.0, min(1.0, (ux * vx + uy * vy) / (nu * nv)))
+        near = int(np.count_nonzero(
+            np.hypot(pts[:, 0] - pts[i][0], pts[:, 1] - pts[i][1])
+            < 1.5 * radius) - 1)
+        row = {
+            "position": float(k),
+            "dist_prev_r": d_prev / radius,
+            "dist_head_r": float(math.hypot(pts[i][0] - pts[head][0],
+                                            pts[i][1] - pts[head][1])) / radius,
+            "abs_dx_r": abs(vx) / radius, "dy_r": vy / radius,
+            "turn_cos": turn,
+            "blockers_prev": float(_on_segment(tsums, prev, i, radius)),
+            "blockers_head": float(_on_segment(tsums, head, i, radius)),
+            "density": near / 10.0,
+            "visible": tsums[i].r / radius,
+            "board_n": len(tsums) / 50.0,
+            "lab_prev": float(np.linalg.norm(lab[i] - lab[prev])) / 40.0,
+            "lab_head": float(np.linalg.norm(lab[i] - lab[head])) / 40.0,
+            "same_kind_head": 1.0 if tsums[i].kind == tsums[head].kind else 0.0,
+            "chain_len": float(len(nodes)),
+            "path_so_far_r": path / radius,
+            "fever": 1.0 if fever else 0.0,
+            "is_base": 1.0 if is_base else 0.0,
+        }
+        rows.append([row.get(name, 0.0) for name in want])
+    return np.asarray(rows, np.float32)
+
+
+def _on_segment(tsums, a, c, radius, block=1.25):
+    """How many other tsums lie across the line from `a` to `c`.
+
+    The same question `adjacency`'s `block` asks and the same arithmetic as
+    `scripts/proposal_dataset.blockers`, because the model was trained on that
+    one -- a different definition here would feed it a feature it has never
+    seen under a name it has.
+    """
+    ax, ay, cx, cy = tsums[a].x, tsums[a].y, tsums[c].x, tsums[c].y
+    vx, vy = cx - ax, cy - ay
+    span = vx * vx + vy * vy
+    if span <= 1e-6:
+        return 0
+    n = 0
+    for i, t in enumerate(tsums):
+        if i in (a, c):
+            continue
+        s = ((t.x - ax) * vx + (t.y - ay) * vy) / span
+        if not 0.0 < s < 1.0:
+            continue
+        if math.hypot(t.x - (ax + s * vx), t.y - (ay + s * vy)) < block * radius:
+            n += 1
+    return n
 
 
 class CharacterModel:
@@ -842,6 +1134,8 @@ class CharacterModel:
         self.net = cv2.dnn.readNetFromONNX(str(path))
         self.classes = list(meta["classes"])
         self.size = int(meta.get("size", 96))
+        # Before the first board, not on it: see `_warm_up`.
+        _warm_up(self.net, self.size)
         self.mean = np.asarray(meta.get("mean", [0.485, 0.456, 0.406]), np.float32)
         self.std = np.asarray(meta.get("std", [0.229, 0.224, 0.225]), np.float32)
         self.confidence = float(confidence)
@@ -902,22 +1196,11 @@ class CharacterModel:
         # process death costs a round.
         blob = np.ascontiguousarray(blob.transpose(0, 3, 1, 2), dtype=np.float32)
         try:
-            # FIXED batch, always -- see CHARACTER_BATCH. A short batch is
-            # padded rather than sent short, because sending a short one
-            # teaches the net a size it will later be killed for exceeding.
-            outs = []
-            for i in range(0, len(blob), CHARACTER_BATCH):
-                chunk = blob[i:i + CHARACTER_BATCH]
-                n = len(chunk)
-                if n < CHARACTER_BATCH:
-                    pad = np.zeros((CHARACTER_BATCH,) + chunk.shape[1:], np.float32)
-                    pad[:n] = chunk
-                    chunk = pad
-                self.net.setInput(np.ascontiguousarray(chunk))
-                out = np.asarray(self.net.forward(), np.float32)
-                outs.append(out[:n].copy())        # the padding's answers go
-            logits = np.concatenate(outs) if outs else np.zeros((0, 1), np.float32)
-        except cv2.error as exc:
+            # CAPPED batch, never a GROWING one -- see CHARACTER_BATCH. The
+            # buffers were sized at the cap by `_warm_up` when the net loaded,
+            # so a real board only ever shrinks them.
+            logits = _forward(self.net, blob, "the character model")
+        except (cv2.error, ValueError) as exc:
             # Switch the model off for the rest of the round rather than
             # taking the round down with it. Said once, loudly: a model that
             # quietly stops naming looks identical to one that was never on.
@@ -1967,6 +2250,14 @@ class PlayReport:
     #: Drags the emulator registered but the game refused to clear -- the
     #: chain was not really one character. `--verify-clears` only.
     rejected: int = 0
+    #: Which side of an `--ab` run this round was played on: "on", "off", or
+    #: "" when no A/B was running. Recorded on the ROUND rather than left to be
+    #: read out of the samples, because a round that wrote no sample -- the
+    #: dataset off, or its per-round limit already spent -- still has to say
+    #: which arm it was, or the arms silently stop being balanced.
+    ab_arm: str = ""
+    #: The option `--ab` alternated, for a corpus that mixes experiments.
+    ab: str = ""
     #: Drags that ran but changed nothing -- the cost of an over-permissive
     #: link rule, and the half a positive-only label set cannot measure.
     stalled: int = 0
@@ -2850,6 +3141,136 @@ def _open_dataset(opts, say):
     return writer
 
 
+def model_candidates(path: str) -> list:
+    """Every place a model could be, nearest first.
+
+    A bare `models/reject.onnx` in a flow is relative to the WORKING
+    DIRECTORY, and a tray-launched .exe does not have the app root as its cwd.
+    `Config.resolve` is what every other shipped path goes through -- templates
+    and flows both -- so model files go through it too.
+    """
+    p = Path(path)
+    out = [p]
+    if p.is_absolute():
+        return out
+    try:
+        from ..config import Config, bundle_dir
+        for cand in (Config().resolve(p), (bundle_dir() / p) if bundle_dir() else None):
+            # THE BUNDLE IS THE LAST RESORT AND THE ONE THAT WAS MISSING.
+            # `default_app_root()` hands the whole data directory to the .exe's
+            # own folder the moment a `config.yaml` appears there -- which is
+            # the documented way to override flows and templates. It also means
+            # `Config.resolve` stops looking at the copy baked INTO the .exe.
+            # For config, flows and templates that is right: the point is to
+            # override them. For a model it is not: nobody edits an .onnx, and
+            # a build that carries one should be able to use it even when the
+            # folder beside the .exe has been customised for something else.
+            if cand is not None and cand not in out:
+                out.append(cand)
+    except Exception:                      # config is optional for the CLI
+        pass
+    return out
+
+
+#: How many rounds this process has started under `--ab`. Module level because
+#: alternation is a property of the RUN, not of a round: `play_loop` is called
+#: once per round and cannot remember anything by itself, and the tray plays
+#: rounds back to back in one process for hours.
+#:
+#: A restart resets it, which can leave the arms uneven. That is reported by
+#: `scripts/ab_eval.py` rather than hidden -- an uneven split is a weaker
+#: experiment, and a silent one would be a wrong experiment.
+_AB_ROUNDS = 0
+
+
+def _ab_arm(opts, say) -> str:
+    """Set the option `--ab` names to this round's arm, and say which it is.
+
+    **Why the alternation lives here and not in the flows.** The tray runs
+    `launch` or `resume`, never `play`, and `run_flow` re-applies each flow's
+    own `vars:` on the way down -- so a value has to be declared AND forwarded
+    at every hop, and the three times this project has failed to do that cost
+    it 11, 18 and 50 rounds. `play_loop` is the one place every round passes
+    through exactly once, so an arm chosen here cannot be dropped by a hop.
+
+    It is also self-recording. `play_settings` snapshots the whole namespace
+    into every sample at write time, so the arm this sets appears in the corpus
+    under the option's own name, with nothing to remember and no new field to
+    keep in step.
+
+    Returns the arm's name for the round record: "on", "off", or "" when no
+    A/B is running.
+    """
+    global _AB_ROUNDS
+    name = str(getattr(opts, "ab", "") or "")
+    if not name:
+        return ""
+    if not hasattr(opts, name):
+        # Loudly, and without stopping the round: a typo here would otherwise
+        # alternate nothing at all while every round recorded `ab` set, which
+        # is the exact shape of an experiment that looks like it ran.
+        say(f"    A/B: there is no play option called {name!r} -- "
+            f"nothing is being alternated")
+        return ""
+    on_value = getattr(opts, name)
+    off_raw = getattr(opts, "ab_off", "")
+    # Coerced to the live option's type so `ab_off: 0` reaches an int option as
+    # 0 and a str option as "0", rather than arming a bool with a string that
+    # happens to be truthy -- which is how an unresolved "${verify_clears}"
+    # once turned a check on for every drag of a round nobody was measuring.
+    if isinstance(on_value, bool):
+        off_value = str(off_raw).strip().lower() in ("1", "true", "yes", "on")
+    elif isinstance(on_value, int):
+        off_value = int(float(off_raw or 0))
+    elif isinstance(on_value, float):
+        off_value = float(off_raw or 0.0)
+    else:
+        off_value = str(off_raw)
+    if off_value == on_value:
+        say(f"    A/B: {name} is {on_value!r} in both arms -- "
+            f"nothing is being alternated")
+        return ""
+    arm = "on" if _AB_ROUNDS % 2 == 0 else "off"
+    _AB_ROUNDS += 1
+    if arm == "off":
+        setattr(opts, name, off_value)
+    say(f"    A/B round {_AB_ROUNDS}: {name}={getattr(opts, name)!r} "
+        f"({arm.upper()} arm)")
+    return arm
+
+
+def _model_path(path: str) -> Path:
+    """The model to load: the first candidate that has BOTH of its files.
+
+    A crop model is two files -- the weights and the `.json` beside them that
+    carries the class order and the normalisation. Picking the location on the
+    weights alone found `./models/reject.onnx`, then looked for its sidecar at
+    `./models/reject.json`, which was not there, and failed the round with an
+    error naming a file nobody had asked for. Both, or keep looking.
+    """
+    tried = model_candidates(path)
+    for c in tried:
+        if c.exists() and c.with_suffix(".json").exists():
+            return c
+    for c in tried:                        # the weights alone: better error
+        if c.exists():
+            return c
+    return tried[0]
+
+
+def _model_missing(path: str, exc: Exception) -> str:
+    """Why a model would not load, naming every place that was looked in."""
+    lines = [f"{exc}"]
+    for c in model_candidates(path):
+        have = ("weights yes" if c.exists() else "weights NO")
+        side = ("sidecar yes" if c.with_suffix(".json").exists()
+                else "sidecar NO")
+        lines.append(f"    tried {c}  ({have}, {side})")
+    lines.append("    A crop model is TWO files: <name>.onnx and <name>.json. "
+                 "Copy both, or rebuild -- `models/` now ships with the app.")
+    return chr(10).join(lines)
+
+
 def _load_palette(path: str, say) -> Optional[np.ndarray]:
     """Learned colour centres for this round, or None to fit per frame.
 
@@ -2892,10 +3313,17 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
     """
     say = drv.say
 
+    # FIRST, before the models load and before anything reads a setting: the
+    # arm decides what `reject_model` (or whatever `--ab` names) is for this
+    # round, and every line below has to see the arm's value, not the flow's.
+    ab_option = str(getattr(opts, "ab", "") or "")
+    report_arm = _ab_arm(opts, say)
+
     bubbles = _load_bubbles(drv, opts.bubble) if opts.bubble and not opts.dry_run else []
 
     deadline = time.perf_counter() + opts.duration if opts.duration > 0 else None
     report = PlayReport()
+    report.ab, report.ab_arm = (ab_option, report_arm) if report_arm else ("", "")
 
     # A palette learned offline from collected samples, or None for the
     # per-frame fit this has always done. Loaded once, here, so a bad path
@@ -2915,21 +3343,46 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
     rejector = None
     if getattr(opts, "reject_model", ""):
         try:
-            rejector = RejectModel(opts.reject_model,
-                                   float(getattr(opts, "reject_floor",
-                                                 RejectModel.FLOOR)))
+            rejector = load_reject_model(
+                _model_path(opts.reject_model),
+                float(getattr(opts, "reject_floor", RejectModel.FLOOR)))
             say(f"    board filter: dropping detections below "
                 f"{rejector.floor:.2f}")
         except (OSError, ValueError, KeyError, cv2.error) as exc:
-            raise SystemExit(
-                f"could not load --reject-model {opts.reject_model}: {exc}")
+            # TTHeartError, never SystemExit. SystemExit derives from
+            # BaseException, so it goes straight past the runner's
+            # `except TTHeartError` AND its `except Exception`, out of the
+            # flow, out of the service thread, and kills the tray -- with no
+            # message at all, because a windowed build has no stderr. That is
+            # what "the app halts when the tsums drop" was: the model file was
+            # not beside the .exe, and saying so killed the app instead.
+            raise TTHeartError(
+                f"could not load the board filter {opts.reject_model!r}. The "
+                f"round is stopped rather than played without it -- a round "
+                f"that silently drops the filter looks exactly like one that "
+                f"ran with it and did nothing.\n"
+                + _model_missing(opts.reject_model, exc)) from exc
+
+    ranker = None
+    if getattr(opts, "chain_model", ""):
+        try:
+            ranker = load_chain_model(
+                _model_path(opts.chain_model),
+                float(getattr(opts, "chain_bonus", 0.0)))
+            say(f"    chain ranker: picking by expected accepted members"
+                + (f", +{ranker.bonus:.2f} per member for length"
+                   if ranker.bonus else ""))
+        except (OSError, ValueError, KeyError, cv2.error) as exc:
+            raise TTHeartError(
+                f"could not load the chain ranker {opts.chain_model!r}.\n"
+                + _model_missing(opts.chain_model, exc)) from exc
 
     characters = None
     if getattr(opts, "character", ""):
         try:
             min_visible = float(getattr(opts, "character_min_visible",
                                         CHARACTER_MIN_VISIBLE))
-            characters = load_character_model(opts.character,
+            characters = load_character_model(_model_path(opts.character),
                                               opts.character_confidence,
                                               min_visible)
             say(f"    character model: {len(characters.classes)} classes, "
@@ -2941,7 +3394,12 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
             # Refused, not limped past: a round played with the model silently
             # off looks exactly like one played with it on and doing nothing,
             # and this project has lost two nights to that shape already.
-            raise SystemExit(f"could not load --character {opts.character}: {exc}")
+            #
+            # TTHeartError rather than SystemExit -- see the board filter's
+            # loader below for why that distinction cost a build.
+            raise TTHeartError(
+                f"could not load the character model {opts.character!r}.\n"
+                + _model_missing(opts.character, exc)) from exc
 
     # Clamped rather than rejected, the way `DatasetWriter` clamps its own:
     # a delay under the render floor is asking for a reading of a highlight
@@ -3280,6 +3738,12 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
             longest = len(chains[0]) if chains else 0
             chains = [c for c in chains
                       if len(c) >= opts.min_chain and c.kind not in skip_kinds]
+
+            # AFTER the length floor and the blacklist, so the ranker reorders
+            # exactly the set that would otherwise be played longest-first,
+            # and BEFORE the purity loop below, which takes chains[0] onwards.
+            if ranker is not None and chains:
+                chains = ranker.rank(chains, tsums, radius, fever.active)
 
             if not chains:
                 misses += 1
@@ -3738,6 +4202,8 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
     say(report.describe())
     if characters is not None and characters.summary():
         say("    " + characters.summary())
+    if ranker is not None and ranker.summary():
+        say("    " + ranker.summary())
     if rejector is not None and rejector.summary():
         say("    " + rejector.summary())
     return report
@@ -5953,6 +6419,28 @@ def add_play_args(play, *, merge_default: bool):
     play.add_argument("--reject-floor", type=float, default=RejectModel.FLOOR,
                       help="drop a detection whose probability of being a tsum "
                            "is below this")
+    play.add_argument("--chain-model", default="",
+                      help="ONNX that scores how likely the GAME is to accept "
+                           "each member of a proposed chain. With it, chains "
+                           "are ranked by expected accepted members instead "
+                           "of by raw length. Empty by default -- it has never "
+                           "been played; see flows/play.yaml")
+    play.add_argument("--chain-bonus", type=float, default=0.0,
+                      help="added to a chain's score per member, so a "
+                           "preference for length can be mixed back in")
+    play.add_argument("--ab", default="",
+                      help="run an A/B: the name of another play option to "
+                           "ALTERNATE between rounds, one round on and the "
+                           "next off, e.g. --ab reject_model. The arm is "
+                           "chosen inside the play loop, so no flow hop can "
+                           "drop it, and it records itself in every sample "
+                           "because the option's own value is what changes. "
+                           "Empty by default -- read the result with "
+                           "scripts/ab_eval.py")
+    play.add_argument("--ab-off", default="",
+                      help="the value the --ab option takes on its OFF "
+                           "rounds, coerced to that option's type. The ON "
+                           "value is whatever the option is already set to")
     play.add_argument("--character-min-visible", type=float,
                       default=CHARACTER_MIN_VISIBLE,
                       help="least of a tsum that must be showing before the "

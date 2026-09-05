@@ -37,7 +37,23 @@ vars:
   # from marks" box -- the only one of these the tray still overrides.
   fit_effort: 3
   verify_clears: true
-  verify_extend: false
+
+  # The panel's "Experiments" radio. Every one is a play rule no round has
+  # settled, every one is declared here at play.yaml's own default, and every
+  # one is forwarded below. BOTH halves are needed and the missing half is
+  # SILENT: the tray runs `resume` or `launch`, `run_flow` re-applies each
+  # flow's own vars, and a variable not declared AND forwarded here is put
+  # back to play.yaml's default on the way down. That is how 11 rounds were
+  # played with the board filter selected and the filter switched off.
+  verify_extend: true
+  reject_model: ""
+  settle_board: false
+  ab: ""
+  ab_off: ""
+  chain_model: ""
+  chain_bonus: 0.0
+  step_px: 8
+  kinds: 0
 
 steps:
   # `python main.py run` already detects + parks LDPlayer before this flow
@@ -119,3 +135,11 @@ steps:
         fit_effort: "${fit_effort}"
         verify_clears: "${verify_clears}"
         verify_extend: "${verify_extend}"
+        reject_model: "${reject_model}"
+        settle_board: "${settle_board}"
+        ab: "${ab}"
+        ab_off: "${ab_off}"
+        chain_model: "${chain_model}"
+        chain_bonus: "${chain_bonus}"
+        step_px: "${step_px}"
+        kinds: "${kinds}"

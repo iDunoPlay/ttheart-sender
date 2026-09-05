@@ -49,7 +49,23 @@ ICON = ROOT / "ttheart_sender" / "tray" / "assets" / "tray-running.ico"
 #: Copied beside the .exe after the build, and bundled inside it. These are the
 #: files a user is expected to tweak.
 DATA_FILES = ("config.yaml",)
-DATA_DIRS = ("flows", "templates")
+
+#: ...and the directories. `models` is here because a flow can name one:
+#: `reject_model: models/reject.onnx` is a path the app has to be able to
+#: FIND, and a build without it produced the worst failure this project has
+#: had -- the tray died the moment a round started, silently, because the
+#: loader could not open the file and said so by raising SystemExit in a
+#: windowed process with no stderr. Both halves are fixed; this is the half
+#: that means the file is actually there.
+DATA_DIRS = ("flows", "templates", "models")
+
+#: What of `models/` the RUNTIME actually reads: an ONNX graph through
+#: `cv2.dnn`, and the `.json` beside it carrying the class order and the
+#: normalisation. `.pt` files are torch checkpoints kept so a model can be
+#: retrained or re-exported, and torch is not a runtime dependency at all --
+#: shipping them put 12MB of dead weight in a file that gets copied to another
+#: machine by hand.
+MODEL_SUFFIXES = (".onnx", ".json")
 
 #: pywin32 pulls this in lazily, so PyInstaller's analysis never sees it.
 HIDDEN_IMPORTS = ("win32timezone",)
@@ -99,7 +115,14 @@ def build(*, onefile: bool, console: bool, clean: bool, with_data: bool = False)
             command += _add_data(path, ".")
     for name in DATA_DIRS:
         path = ROOT / name
-        if path.exists():
+        if not path.exists():
+            continue
+        if name == "models":
+            # File by file, so the training checkpoints stay behind.
+            for f in sorted(path.iterdir()):
+                if f.is_file() and f.suffix in MODEL_SUFFIXES:
+                    command += _add_data(f, name)
+        else:
             command += _add_data(path, name)
 
     for module in HIDDEN_IMPORTS:
@@ -122,24 +145,44 @@ def build(*, onefile: bool, console: bool, clean: bool, with_data: bool = False)
     # A one-file build is meant to be one file, so the editable copies are
     # opt-in there -- emitting them by default would recreate the very folder
     # the user asked to get rid of.
-    if with_data or not onefile:
+    #
+    # BUT copies that already exist are always refreshed, whether they were
+    # asked for this time or not. Editable copies beside the .exe WIN over the
+    # bundle (see `default_app_root()`), so a stale `flows/` silently replaces
+    # every flow in the build -- and one did, for a month. Three separate
+    # experiments were selected in the panel, played, and came back as
+    # baseline rounds because the app was reading August's flows.
+    if with_data or not onefile or (target / DATA_DIRS[0]).exists():
         _copy_editable_data(target)
     _report(target, onefile, with_data)
     return 0
 
 
 def _copy_editable_data(target: Path) -> None:
-    """Put the editable copies of config/flows/templates beside the .exe."""
+    """Put the editable copies of config/flows/templates/models beside the .exe.
+
+    Directories are REPLACED, not merged. `copytree(dirs_exist_ok=True)` leaves
+    behind any file the source no longer has, and a flow that was renamed or
+    split would keep running from its old copy -- which is the same failure as
+    the stale directory this exists to prevent, one file down.
+
+    `config.yaml` is copied only if it is not already there: it is the one file
+    a user is expected to have edited, and its presence is also what makes this
+    directory the app root at all.
+    """
     target.mkdir(parents=True, exist_ok=True)
     for name in DATA_FILES:
-        source = ROOT / name
-        if source.exists():
-            shutil.copy2(source, target / name)
+        source, dest = ROOT / name, target / name
+        if source.exists() and not dest.exists():
+            shutil.copy2(source, dest)
     for name in DATA_DIRS:
         source = ROOT / name
         if not source.exists():
             continue
-        shutil.copytree(source, target / name, dirs_exist_ok=True)
+        dest = target / name
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.copytree(source, dest)
 
 
 def _report(target: Path, onefile: bool, with_data: bool) -> None:

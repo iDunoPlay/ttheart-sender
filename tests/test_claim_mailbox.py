@@ -36,12 +36,20 @@ OK_RECT = Rect(337, 570, 102, 41)
 class FakeMailbox:
     """A mailbox of ``items`` gifts, claimed one dialog at a time."""
 
-    def __init__(self, items: int, *, blocked_for: float = 2.0) -> None:
+    def __init__(self, items: int, *, swallow: int = 1) -> None:
         self.items = items
-        #: How long taps keep going nowhere after a dialog is dismissed.
-        self.blocked_for = blocked_for
+        #: How many taps go nowhere after a dialog is dismissed.
+        #:
+        #: COUNTED, not timed. This was a clock -- taps were lost while
+        #: `now < blocked_until` -- and `sleep` in a flow is jittered with
+        #: `random.uniform`, so whether the fake swallowed anything at all was
+        #: a coin flip. The test failed 12% of runs, always on its own
+        #: precondition (`lost_taps > 0`) and never on the thing it checks. A
+        #: count says the same thing about the game (the dialog's closing
+        #: animation eats the next tap) and says it the same way every run.
+        self.swallow = swallow
+        self.pending = 0
         self.now = 0.0
-        self.blocked_until = 0.0
         self.dialog_open = False
         self.claimed = 0
         self.taps = 0
@@ -65,7 +73,8 @@ class FakeMailbox:
     # -- input -----------------------------------------------------------
     def click(self, point: Point, **_kwargs) -> None:
         self.taps += 1
-        if self.now < self.blocked_until:
+        if self.pending:
+            self.pending -= 1
             self.lost_taps += 1
             return
         if self.dialog_open:
@@ -73,7 +82,7 @@ class FakeMailbox:
                 self.dialog_open = False
                 self.items -= 1
                 self.claimed += 1
-                self.blocked_until = self.now + self.blocked_for
+                self.pending = self.swallow
             else:
                 self.lost_taps += 1  # modal: everything else is dead
             return

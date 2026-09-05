@@ -3305,3 +3305,610 @@ tsums and the revert is the same line.
 `_character_crop` was lifted to module level on the way through, so the reject
 model and the character model cut the same picture and a change to the window
 or the edge rule cannot reach one and not the other.
+
+## Thirty-fifth round: the radio turned off the baseline
+
+Two batches came back: 11 rounds selected as "Skip detections that are board"
+and 7 as "Wait for the board, not the screen". The player's verdict on the
+second was "pretty bad".
+
+**Neither experiment ran.** Every one of the 18 sessions recorded
+`reject_model=''` and `settle_board=False`.
+
+### The wiring bug
+
+The tray runs `resume` (or `launch`), not `play`. `run_flow` re-applies each
+flow's own `vars:`, so a variable has to be **declared AND forwarded at every
+hop**. The four new experiment variables were added to `play.yaml` only, so
+`launch` -> `resume` -> `play` put each one back to its default on the way
+down. The radio worked, the service sent the value, and the chain discarded it.
+
+This is the third time this shape has cost rounds -- `verify_clears` cost ~50.
+The chain test existed and was correct; its list of variables was hand-written
+and was not extended when four experiments were added. It is now generated from
+`EXPERIMENTS`, because a hardcoded list cannot fail loudly about something
+missing from it.
+
+### What the 18 rounds actually measured
+
+Diffing all 82 recorded options between the builds left exactly one
+behavioural difference, and it was not one anybody chose:
+
+    option            1.11.1e     1.11.2
+    verify_extend     True        False
+
+`verify_extend` was the panel's "Rebuild chains from marks" box, and it had
+been ticked for **248 consecutive rounds** -- every round in this document from
+the twenty-ninth on. When the experiments became a radio group, choosing any
+other row silently unticked it.
+
+So the 18 rounds are the only ones ever played without it:
+
+    metric            extend ON   extend OFF      diff        p
+    clear rate            76.5%        61.8%   +14.8pp   0.0091   REAL
+    FEVER share           49.1%        40.6%    +8.5pp   0.0516
+    tsums dragged           372          403       -31   0.1139
+    tsums CLEARED           272        259.5     +12.5   0.4858
+    score               508,342      386,792  +121,550   0.2495
+    coins                   532          471       +61   0.4390
+
+**It does not clear more.** 272 against 259.5, p=0.49. It drags 31 fewer tsums
+for the same clears, so the rate moves because the denominator falls. On score
+-- the objective since the thirtieth round -- 18 rounds cannot tell.
+
+Which also explains the player's reading: "pretty bad" was the clear rate, and
+the clear rate is exactly the number that moves here without the score moving
+with it.
+
+Perfectly confounded with the build, and worth saying: all 248 ON rounds are
+1.11.1e and all 18 OFF rounds are 1.11.2. Nothing in 1.11.2 touches play -- the
+character and reject models are both off, and the option diff above is the
+whole of it -- but this is an argument, not a control.
+
+### The design mistake, and the rule it bought
+
+Putting `verify_extend` in the radio was wrong, and not because of what it
+does. It was **already on in the corpus**, so it was part of the baseline --
+and a baseline row in a radio group turns every other row into a two-variable
+experiment. Nothing measured after that could say which change it was seeing.
+
+    A row in EXPERIMENTS must be OFF in the corpus the experiment will be
+    compared against.
+
+`verify_extend: true` now lives in `flows/*.yaml`, which is what the baseline
+actually is, and reverts by editing that line the way `fit_effort` does. A test
+asserts every remaining row's flow default equals its off-value, so this cannot
+recur silently.
+
+### Still unmeasured
+
+Everything the two batches were meant to answer. `reject_model` and
+`settle_board` have never been played. That is the same state as before the
+rounds were collected, minus 18 rounds of the player's time.
+
+## Thirty-sixth round: the halt, and six seconds of your own machine
+
+Two reports, both correct, and the second was not what it looked like.
+
+### Selecting the board filter killed the app
+
+The live log stops mid-round at `wait_for go -> appeared` -- the instant the
+tsums drop -- with no `board filter:` line, no traceback and no error. Three
+mistakes, all mine, stacked into one silent death:
+
+1. **`models/` was not among the directories `build.py` bundles.** The .exe
+   ships `config.yaml`, `flows/` and `templates/`. `reject_model:
+   models/reject.onnx` names a file that was never copied.
+2. **A relative model path resolved against the working directory**, which for
+   a tray-launched .exe is not the app root. Every other shipped path --
+   templates, flows -- goes through `Config.resolve`; models did not.
+3. **The loader said so by raising `SystemExit`.** `SystemExit` derives from
+   `BaseException`, so it went straight past the flow runner's
+   `except TTHeartError` **and** its `except Exception`, out of the flow, out
+   of the service thread, and took the process with it. A windowed build has
+   no stderr, so nothing was written anywhere.
+
+Any one of the three would have been survivable. Together they turn "a file is
+missing" into "the app vanishes when a round starts".
+
+Fixed: `models` is in `DATA_DIRS`; `_model_path()` resolves a relative path
+against the app root the way templates do; both model loaders raise
+`TTHeartError`, which the runner reports as a failed step with the round
+stopped and the tray alive. The character model's loader had the identical
+`SystemExit` and was one panel click away from the same behaviour.
+
+A test reads the play loop's source and fails on `raise SystemExit`, because
+the bug only appears when a model is missing -- which is exactly the case no
+test run has on disk.
+
+### "My mouse moves and spam-clicks"
+
+Nothing run for analysis touches input: the repo's own `logs/ttheart.log` was
+last written the previous evening, and the play loop is never invoked by a
+training script or the test suite. It was the tray, playing, as asked.
+
+But the report was right about something real, and the log says it plainly:
+
+    stopped 11:32:15 -> restarted 11:32:21   (6.2s later)
+    stopped 11:53:24 -> restarted 11:53:34  (10.0s later)
+    stopped 11:54:23 -> restarted 11:54:28   (5.8s later)
+
+Moving the cursor out of the emulator stops the run. That safety works and
+always has. Six seconds later the mouse was taken back.
+
+There is no automatic restart in the code -- every one of those is an explicit
+`start()` -- so the trigger was a click, deliberate or otherwise. It does not
+matter which: **a safety you get six seconds out of is not a safety.** The
+first `start()` inside 20 seconds of a cursor-stop is now refused, with a
+notification saying why; pressing Run again starts anyway, because someone who
+presses twice means it. F12, the scoreboard and a finished round hold nothing
+-- none of them mean the person at the keyboard wants their mouse back.
+
+### Still unmeasured
+
+`reject_model` and `settle_board`, for the third document in a row. Nothing
+about either has been learned; what has been learned is three ways to ship a
+switch that does not reach the thing it switches, and one way to make a missing
+file fatal.
+
+## 2026-09-05 15:10 / 20:15 -- Experiment A: the board filter, one build, alternating -- REVERT
+
+Written BEFORE the rounds are played, and that is the point of it. Every
+comparison in this document so far chose its metric after seeing the numbers,
+and the thirty-fifth round is what that costs: 18 rounds read as "pretty bad"
+on a clear rate that fell while the score did not move with it. The metric, the
+threshold and the verdict rule below are fixed now.
+
+### Hypothesis
+
+`reject_model` drops detections that are board rather than tsum, so the bot
+spends fewer chain slots on strokes over empty bowl. It should CLEAR more per
+round. Its cost is inference time, which it pays out of the frame rate.
+
+### Dataset
+
+Collected from here on, on **1.11.6 only**. The existing corpus cannot answer
+this: its only reading is 13 rounds of 1.11.5 against 244 of 1.11.1e, and the
+three rounds of 1.11.3 that sit between them separate nothing.
+
+### Baseline and treatment
+
+The same build, alternating round by round -- ON, OFF, ON, OFF. The arm is
+chosen inside `play_loop` by `_ab_arm`, which is the one place every round
+passes through exactly once. It is deliberately **not** a flow variable: a flow
+variable has to be declared AND forwarded at three hops, and failing to do that
+has now cost this project 11, 18 and about 50 rounds. The arm records itself,
+because what changes is `reject_model`'s own value and `play_settings`
+snapshots the whole option set into every sample.
+
+**Armed from the panel, not from a file, and that correction is worth
+recording.** The first instruction written for this was "set `reject_model` and
+`ab` in flows/play.yaml", and it was wrong twice over. The tray sends
+`reject_model` from the experiments radio on every run and *"the panel always
+has the last word"* in `_variables()`, so the flow's value is overwritten; and
+`resume.yaml` declares and forwards its own `ab: ""`, so play.yaml's would be
+overwritten too in the two modes that go through it. Only "Play (beta)", which
+runs `play.yaml` directly, would have honoured half of it. That is the fourth
+time this shape has cost something, so it was built out rather than documented
+around:
+
+* Select the radio row **"Skip detections that are board"**.
+* Tick **"Alternate it round by round (A/B)"** underneath it.
+
+The tick box is deliberately NOT a fifth radio row. The rows are mutually
+exclusive because two rules armed at once cannot be told apart -- but an A/B is
+not a rule, it is a way of running one, and as a row "A/B the board filter"
+would be unselectable, because choosing it would unselect the board filter.
+
+Both flow variables are derived from the armed row rather than typed: `ab`
+takes its `var` and `ab_off` takes its `off`. That is what makes every row
+A/B-able with no second table to keep in step, and it is what stops `step_px`
+-- whose off-value is 8, not an empty one -- from being alternated against 0.
+
+Unticking the box reverts to the baseline. Read the result with
+`scripts/ab_eval.py`, which refuses to pool across builds unless forced.
+
+### Metrics, and why the objective is not the decision metric
+
+Score is the objective and it cannot be the decider. Over the 277 scored
+rounds, score has a **63.4% coefficient of variation** -- p10 82k, p50 503k,
+p90 995k. Detecting a 10% change in it at 80% power needs **632 rounds per
+arm**, about 42 hours of play.
+
+Nor can that be bought back by blocking. Adjacent rounds were checked for
+correlation and there is none at any lag:
+
+    metric      r(lag 1)  r(lag 2)  r(lag 5)  r(lag 20)
+    score         -0.028     0.095    -0.079     -0.000
+    FEVER         -0.096     0.073    -0.034     -0.054
+    cleared       -0.040     0.108    -0.060     -0.027
+
+Round-to-round variation is independent noise, not drift. That is good for the
+VALIDITY of alternating -- there is no trend for the arms to be confounded with
+-- and it means a paired analysis buys nothing: the within-pair difference has
+1.01x the spread that two independent rounds do.
+
+So, pre-registered:
+
+| role | metric | rounds/arm for +10% | why |
+|---|---|---:|---|
+| **PRIMARY** | `cleared` | **71** | `corr(cleared, score) = +0.72`; the thirtieth round validated it as the proxy. A count, not a ratio. |
+| guardrail | score | 632 | the objective; can only veto |
+| guardrail | FEVER share | 214 | what the thirtieth round found the score turns on |
+| guardrail | coins | 547 | |
+| mechanism | dead drags | 23 | did the filter do its job at all |
+| mechanism | seconds/frame | -- | what it cost to do it |
+
+**`clear rate` is not a metric here.** It is a ratio whose denominator the
+filter directly moves, it is what fell 14.8pp in round 35 while the score did
+not follow, and it is what made "pretty bad" the wrong verdict.
+
+### Decision rule
+
+Fixed in `scripts/ab_eval.py`, not in anybody's judgement afterwards:
+
+* Under **20 rounds per arm**, or under the computed requirement, the answer is
+  **NEED MORE DATA** whatever the p is. The floor exists because the power sum
+  divides by the sample standard deviation, and at a handful of rounds that
+  standard deviation is mostly luck -- without the floor a tight run of six
+  rounds reports "at adequate power", which it did on the first test written
+  against it.
+* At power, `cleared` up with no guardrail down: **SHIP**.
+* At power, `cleared` up but a guardrail down beyond noise: **DISTRUST**.
+* At power, no movement: **REJECT**.
+
+**142 rounds, about five hours,** is what the primary needs. That is the whole
+ask.
+
+### Results
+
+**143 rounds, 72 ON / 71 OFF, all on 1.11.6c.** The first comparison in this
+document that is not confounded by the build.
+
+    metric              ON       OFF       diff              95% CI       p
+    cleared          256.93    275.38     -18.45     [-35.66, -1.24]   0.036   PRIMARY
+    FEVER share      0.4120    0.4707    -0.0587   [-0.112, -0.006]   0.030
+    score           514,851   556,170    -41,319   [-150k, +67.7k]   0.457
+    coins            527.45    576.54     -49.09   [-156.5, +58.3]   0.370
+    frames           106.61    111.17      -4.56    [-9.11, -0.01]   0.050
+    dead drags        0.750     1.437     -0.687   [-1.075, -0.298]   0.001
+    seconds/frame     0.694     0.683     +0.010   [-0.011, +0.032]   0.346
+
+The primary was **at power** -- 71 rounds an arm against the 63 the corpus's own
+spread required -- and it moved the wrong way. Score and coins agree in
+direction and are nowhere near power, precisely as pre-registered.
+
+**The filter does exactly what it was built to do and loses anyway.** Dead
+drags fell **48%**, the largest effect in the table.
+
+### It multiplies the collapse
+
+                                    ON          OFF
+    never reached FEVER          6 (8.3%)     1 (1.4%)
+    under 15% FEVER              9 (12.5%)    1 (1.4%)     p=0.009
+
+**Nine times the collapse rate.** The thirty-seventh round's own analysis had
+just identified collapsed rounds as the largest pot of recoverable score in the
+corpus -- 17 of them costing 5.5% of everything ever scored. The filter takes a
+1.4% collapse rate to 12.5%. The mean differences above are not a uniform tax;
+they are a handful of rounds destroyed.
+
+### Where the clears went: the same chains, less often accepted
+
+    per press               ON       OFF      diff       p
+    detections/board     40.191    40.402    -0.212   0.775
+    median visibility     0.420     0.429    -0.009   0.170
+    members PROPOSED      4.757     4.700    +0.057   0.805
+    members ACCEPTED      3.261     3.435    -0.174   0.008
+
+**The bot proposed the same chains and the game took fewer of them** -- 68.6%
+accepted against 73.1%. The filter did not shorten the proposals; it made
+same-length proposals worse. And the board itself is unchanged: 40.19
+detections against 40.40, p=0.775. Whatever the filter cost, it did not cost
+detection.
+
+### A mechanism, confirmed at 100% and too small to be the answer
+
+`adjacency()` rejects a pair when ANY other tsum's centre lies within `block`
+radii of the segment joining them. A detection therefore does two jobs -- it is
+a chain candidate AND an obstacle -- and the filter removes it from both. A
+pair correctly blocked by an intervening tsum becomes linked once the blocker
+is deleted, and the stroke goes through a gap the game will not join.
+
+Tested on 144 frames from 40 OFF-arm rounds, which are unfiltered and can
+therefore be scored both ways:
+
+    detections 5671, filter drops 437 (7.7%)
+    adjacency edges  3049 -> 2938  (-3.6%)
+    links existing ONLY after the drop: 27
+      of those, passing within block radius of a DROPPED detection: 27 (100%)
+
+**Every invented link goes through a deleted blocker.** The mechanism is real
+and unambiguous -- and it is 0.19 links a frame against 3,049 edges, and the
+net edge count falls, so it is not what cost 18 clears. The dominant cost is
+the blunt one: 7.7% of the board deleted, and the thirty-fourth round's mark
+test already said those rejections are game-confirmed at 15.4% against a 17.2%
+base rate, *"no longer enriched for real tsums, but only just below chance."*
+
+That write-up said the mark test could rule a filter out and could not certify
+one, and that a played round would have to decide. It has.
+
+### A bug in the wording, not in the numbers
+
+The evaluator first reported `DISTRUST. cleared improved, but FEVER share
+fell`. `cleared` had fallen 18.4. The verdict branch tested the guardrail
+vetoes before the primary's direction, so a run where both fell was worded as a
+win with a caveat. Fixed: a primary that fell is a REVERT whatever the
+guardrails did, and they are quoted as agreeing rather than objecting. The
+decision was never in doubt; the sentence carrying it was wrong, which is worth
+a line because it is the second time in two days a correct measurement was
+nearly filed under the wrong conclusion.
+
+### What was built to make it collectable
+
+* `--ab` / `--ab-off` on the play command, alternating inside `play_loop`.
+  `tests/test_ab.py` pins that the arms alternate, that they balance over an
+  even number of rounds, that the OFF value is coerced to the live option's
+  type -- an unresolved string is truthy, and that is how a check once armed
+  itself on every drag of a round nobody was measuring -- and that a typo or an
+  identical pair is refused out loud rather than recorded as an experiment that
+  ran.
+* `scripts/ab_eval.py`, with the table above and the decision rule built in.
+  Verified on a dry run over the 248 real 1.11.1e rounds relabelled into
+  alternating arms, where the true effect is zero by construction: it returned
+  `REJECT (no effect), p=0.918`, and correctly flagged score, FEVER and coins
+  as underpowered at 124 rounds an arm.
+* The flow-chain test that used to be half hand-written is now an invariant:
+  **a variable declared on both sides of a `run_flow` hop must be forwarded**,
+  generated from the overlap of the two flows' `vars:`. A variable only the
+  child declares is not flagged, because nothing upstream is trying to set it.
+  That states the bug that cost rounds 35 and 36 as a rule rather than as a
+  list somebody has to remember to extend.
+
+### Decision
+
+**REVERT.** `reject_model` stays `""`. Nothing needs editing -- that is already
+the flow default; untick the panel row.
+
+Four documents in a row ended with "`reject_model` is still unmeasured". This
+closes it, and the thing that closed it was not a better model or another
+offline test. It was 143 rounds on one build with the arm alternated inside the
+play loop, and a metric chosen before the numbers existed.
+
+### Next experiment
+
+**NOT B.** The 64px reject model was next in the plan and is now withdrawn: it
+is a pure cost reduction on a component that has just been beaten on its own
+terms, and it would only make a losing filter cheaper.
+
+The collapse is the target, and this round leaves it in a much better place
+than it found it: 71 baseline rounds on a single build, with a collapse rate of
+**1.4%** to work against rather than the 6.1% drawn from a mixed-build corpus
+this morning.
+
+One idea is worth carrying forward and is deliberately not being played yet: a
+rejected detection could be made **unchainable but still blocking**, which is a
+two-line change to where the filter is applied and keeps the 48% dead-drag win
+without loosening the block test. It cannot recover an 18-clear loss on its own
+-- the blocker effect is 0.19 links a frame -- so playing it now would be a
+round spent rescuing a component that has already lost.
+
+The question underneath all of it is unchanged: the bot proposes 4.7 members
+and the game takes 3.4, and in a collapsed round it takes 3.0 of 5.6. That is
+the quality of the candidate actions, and the board filter was an attempt at it
+from the detection side -- on a board the two arms agree about to within 0.2
+detections.
+
+## 2026-09-05 21:05 -- Experiment B: one row per proposed chain member, and the game's verdict on each
+
+The board filter's defeat moved the target rather than closing it. The two
+arms agreed about the board to within 0.2 detections a frame and disagreed
+about what the game accepted, so the question stopped being *what should we
+remove from the board* and became *which sequence will the game actually
+take*. Nothing in this repository had ever looked at a refusal one member at
+a time. `scripts/proposal_dataset.py` does.
+
+### The label was already there, and it is the game's own
+
+`kept` in `samples.jsonl` is not the bot's opinion. It is `marked_by_game(...)`
+-- the chain is held, the game lights the members it will link, and the read
+is recorded. So `accepted = member in kept` is the game's answer for every
+proposed member of every press ever collected, free.
+
+    7,352 proposed members from 1,975 presses over 143 rounds (1.11.6c)
+
+    accepted by the game    63.1%
+    actually dragged       100.0%
+    cleared the board       60.6%
+
+**The bot drags 100% of what it proposes**, including the 37% the game has
+already refused while the chain was being held. `verify_reach` is 0, so
+nothing trims. That is not a bug -- it is the shipped baseline -- but it is
+now a measured cost rather than an assumption.
+
+### Acceptance falls off a cliff with chain position
+
+    position       n  accepted  cleared
+           1   1,975     97.9%    80.1%
+           2   1,975     68.8%    71.6%
+           3   1,155     54.4%    60.6%
+           4     689     45.7%    47.8%
+           5     448     35.0%    38.6%
+           6     325     29.2%    31.4%
+           7     251     19.1%    21.1%
+           8     188     18.6%    20.2%
+          10     118     22.0%    21.2%
+
+The first member after the head is nearly free. **By position 7 the bot is
+right less than one time in five**, and `max_chain` is 12. The sort is
+`(is_base, len(c))` -- longest wins -- so the bot systematically prefers the
+chains with the most members it is about to be refused on.
+
+### And a refusal is very nearly the end of the chain
+
+    after an ACCEPTED member   n=5,403   accepted 80.9%
+    after a REFUSED  member    n=1,949   accepted 13.8%
+
+This sharpens the twenty-sixth round rather than contradicting it. That round
+found the game **skips** a refused member and keeps linking, so a wrong guess
+costs one slot and not the tail -- true, and the mechanism stands. What it
+could not see, because it was measured on drag totals, is that the members
+after a refusal are almost all refused too: **86% of everything proposed after
+the first refusal is waste.** The chain does not end at its first bad member;
+it just stops being worth anything.
+
+### The shipped rule has no opinion, and a model already beats it
+
+Scored on those 7,352 members. Every 1.11.6c session postdates every link
+model's training and test split, so the whole baseline is genuinely held out.
+
+    model             ROC-AUC  PR-AUC   Brier  base rate
+    adjacency          0.5000  0.5987  0.2328      63.1%
+    link_geom          0.8153  0.8921  0.1894      63.1%
+    link_colour        0.8419  0.9087  0.1741      63.1%
+
+`adjacency` scores exactly **0.5000**, and that is not a failure to measure it
+-- it is the finding. Every member it proposed passed its own test by
+construction, so it assigns them all the same score and has nothing to rank
+them by. It cannot prefer the member the game will take, because it does not
+distinguish them at all.
+
+`link_colour` -- seven numeric features, trained months of rounds ago for a
+different question -- reaches **0.842 ROC / 0.909 PR** on data it has never
+seen. That is the gap between the rule in use and a rule that could be in use.
+
+> A tie-handling bug nearly buried this. The first run scored `adjacency` at
+> 0.576, because `argsort` broke its all-equal scores in array order. Averaged
+> ranks give a constant predictor exactly 0.5, which is both correct and far
+> more interesting than a near-random-looking number.
+
+### It is not calibrated, and that matters for what comes next
+
+    link_colour     predicted 0.451   actual 0.243
+                    predicted 0.574   actual 0.419
+                    predicted 0.686   actual 0.655
+                    predicted 0.781   actual 0.851
+                    predicted 0.861   actual 0.988
+
+Over-confident at the bottom, under-confident at the top -- monotone, which is
+the recoverable kind. As a **ranker** it is already good. As a **probability**,
+which is what "expected accepted members" would need, it is not yet usable.
+Recalibration before any expected-value arithmetic, not after.
+
+### Decision
+
+**NEED MORE DATA -- offline only, nothing shipped to play.** The plan's STEP 2
+asked for the dataset and its validation and explicitly said not to touch live
+strategy, and that is where this stops.
+
+What it establishes: the refusal is concentrated (late positions, and after
+the first refusal), the shipped rule cannot see it at all, and a model that
+already exists can. What it does not establish is that acting on any of it
+scores more -- and the board filter is this month's reminder that a mechanism
+working as designed is not the same as a round going better.
+
+### Next experiment
+
+Recalibrate `link_colour` on this dataset, then measure -- offline, against
+these same recorded presses -- whether ranking or truncating on predicted
+acceptance would have produced chains the game took more of. Only a positive
+there earns a played round.
+
+## 2026-09-05 23:30 -- Experiment C, offline: rank chains by what the game will take
+
+STEP 3 and 4 of the plan, on presses already recorded. Nothing was collected
+and nothing was changed in how a round is played.
+
+### The model
+
+Trained on the 7,352 proposal members, held out by ROUND, `prev_accepted`
+excluded -- it is the previous member's LABEL and the chain is proposed whole,
+so a model given it answers a question that is never asked.
+
+    held-out AUC 0.8761   (a second model, different seed: 0.8752)
+    adjacency, same rows:  0.5000
+
+### The expected total is calibrated, which is what makes ranking possible
+
+Over 597 held-out presses, predicted accepted members against what the game
+actually took:
+
+    mean predicted 2.274   mean ACTUAL 2.310   bias -0.036
+    predicted 1.43 -> actual 1.51      predicted 2.62 -> actual 2.59
+    predicted 1.82 -> actual 1.76      predicted 3.43 -> actual 3.58
+    predicted 2.07 -> actual 2.11
+
+Without this the rest is arithmetic on a number that means nothing.
+
+### Re-ranking: +0.109 accepted members a press, and it is not the winner's curse
+
+Candidates were regenerated with `find_chains` at each press's own recorded
+options -- **91% reproduced the exact chain the bot played**, which is the
+check that they are the bot's candidates and not a different question.
+
+    the ranking changes the pick on 142/597 presses (23.8%)
+    when it changes: -1.20 members (44% of the time SHORTER)
+    predicted gain, SAME model that chose:      +0.467   <- circular
+    predicted gain, INDEPENDENT second model:   +0.457   <- honest
+    averaged over every press:                  +0.109 accepted members
+
+Taking an argmax over ~40 noisy estimates and then reporting that estimate is
+guaranteed to look positive: the winner is whichever candidate the model most
+over-estimates. Scoring the choice with a second model trained on a different
+split removes exactly that, and the gain barely moves. **It is real.**
+
+### Truncation, tested with the game's REAL answers, LOSES
+
+Cutting the played chain at its first predicted refusal is the one
+counterfactual with ground truth -- every member of a prefix was held in front
+of the game and answered.
+
+    presses where the cut fires:                36.3%
+    members ACTUALLY accepted, as played:       2.310
+    members ACTUALLY accepted, truncated:       1.883
+    accepted members LOST to the cut:           0.427 per press
+    stroke saved:                               1.33 members per press
+
+    acceptance ratio: as played 65.7%  ->  truncated 85.3%
+
+**And that ratio is the trap.** Truncation improves accepted/proposed by
+19.6pp while destroying 18% of the accepted members, because it shrinks the
+denominator -- the same shape as the clear rate that made "pretty bad" the
+wrong verdict in the thirty-fifth round. The plan named accepted/proposed as
+"the important intermediate metric". On this evidence it must not be one.
+
+Why truncation loses is the twenty-sixth round's finding doing its work: the
+game **skips** a refused member and keeps linking, so attempting a long shot
+costs a slot rather than the tail. A 15%-likely member is nearly free.
+
+That also settles the shape of the rule. `expected accepted = sum of
+probabilities` is monotone in length -- a probability is never negative, so
+adding a member can only raise the score. **The ranker cannot truncate**, and
+that is agreement with the measurement rather than a limitation of it.
+
+### What shipped, off
+
+`ChainModel` in `ttheart_sender/game/tsum.py`, `chain_model: ""` in
+`flows/play.yaml`, and the first panel row in this project's history that
+carries a measurement instead of a story.
+
+Verified against the real thing rather than the replay: on 41 held-out frames
+the shipped ranker re-picks 22.0% (the replay said 23.8%) and costs **2.74 ms
+a frame** -- against the board filter's 27ms, and 0.4% of a 675ms frame.
+
+### Decision
+
+**NEED MORE DATA -- a played round.** +0.109 on 2.31 is +4.7%, and this
+corpus's own spread needs **~136 rounds an arm** to resolve that on accepted
+members per press and ~204 on `cleared`. Score would need 2,321.
+
+Everything about it is better than the board filter was at the same stage --
+calibrated, debiased, ten times cheaper, and with a mechanism that agrees with
+two independent earlier findings. The board filter is why that is not enough.
+
+### Next experiment
+
+D: `chain_ranker` ON against OFF, alternating, same build, ~272 rounds.
+Primary **accepted members per press**, which is what the change targets and
+what the offline number predicts; `cleared` co-primary; score and FEVER as
+guardrails. NOT accepted/proposed -- see above.

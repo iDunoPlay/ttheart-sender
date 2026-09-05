@@ -101,6 +101,29 @@ def clamp_minutes(values: Any) -> List[int]:
     return marks
 
 
+def normalize_experiment(value: Any, raw: Any = None) -> List[str]:
+    """Every valid experiment key that is armed, in `EXPERIMENTS` order.
+
+    Reads all three shapes this file has had: a list of keys (now), one key as
+    a string (the radio), and a flag per key at the top level (the original
+    tick boxes). A key that no longer exists is dropped rather than kept --
+    `board_filter` was retired after it was played and lost, and a saved
+    settings file still naming it must not resurrect a row that is gone.
+    """
+    from .service import EXPERIMENTS       # imported here: service imports us
+    keys = [e.key for e in EXPERIMENTS]
+    if isinstance(value, (list, tuple, set)) and value:
+        # `and value`: the field's own default is an EMPTY list, so taking
+        # this branch unconditionally returned [] for every settings file
+        # written in the tick-box era and silently dropped what it had armed.
+        return [k for k in keys if k in set(value)]
+    if isinstance(value, str) and value in keys:
+        return [value]
+    if isinstance(raw, dict):
+        return [k for k in keys if bool(raw.get(k))]
+    return []
+
+
 def _default_purchase() -> Dict[str, bool]:
     return {key: default for key, _, default in PURCHASE_BOXES}
 
@@ -133,6 +156,11 @@ class PanelSettings:
     #: needless restart when it is wrong, so it is opted into rather than out
     #: of. Drives the `stuck_check` flow variable.
     restart_when_stuck: bool = False
+    #: Alternate the armed experiment on and off, round by round, so the run
+    #: is its own control. Off by default -- with it off the armed row is on
+    #: for every round, which is how every experiment before it was played.
+    #: Read the result with `scripts/ab_eval.py`.
+    ab_experiment: bool = False
     #: Install a newer release by itself once one is found. The *check* runs
     #: either way -- this only decides whether the panel acts on the answer.
     #: On by default: a bot left running unattended is exactly the thing that
@@ -156,15 +184,19 @@ class PanelSettings:
     #: -- replayed it clears +6% over the trim at an identical reading cost,
     #: in all three cost columns, but it rests on the game accepting a member
     #: it marked, and "Measure tsums cleared" has still not settled that.
-    #: The panel's "Experiments" switches. Every one of these is a play rule
-    #: no played round has settled yet, and every one ships OFF -- the value
-    #: each reverts to is the flow's own, which is what every number in
+    #: Which of the panel's "Experiments" are armed, by key. Empty is the
+    #: baseline, and the baseline is what every number in
     #: docs/DATASET-FINDINGS.md was measured under.
-    rebuild_chains: bool = False
-    board_filter: bool = False
-    settle_board: bool = False
-    fast_stroke: bool = False
-    four_groups: bool = False
+    #:
+    #: A LIST, because the panel is tick boxes. It was a radio group for a real
+    #: reason -- a round played with two rules armed cannot say which was
+    #: responsible, and the thirty-fifth round lost 18 rounds to that. The
+    #: constraint did not go away; it moved from the control to the record.
+    #: `AutomationService.set_experiment` says so in the log, in the panel and
+    #: in a notification when a second row is ticked, and `experiment`
+    #: (singular) answers only when exactly one is armed so nothing downstream
+    #: quietly picks one of two.
+    experiment: List[str] = field(default_factory=list)
     purchase: Dict[str, bool] = field(default_factory=_default_purchase)
 
     # -- conversion ------------------------------------------------------
@@ -200,6 +232,12 @@ class PanelSettings:
         # The loop above already copied it across as a plain string; this is
         # what keeps a typo in the file from lighting neither radio.
         settings.claim_pattern = normalize_claim_pattern(settings.claim_pattern)
+        # Read straight off `raw`, not off the field: `from_dict`'s loop only
+        # assigns bool and str fields, so a list-valued field is never
+        # populated from the file and passing it here read the default every
+        # time -- silently dropping whatever the file had armed.
+        settings.experiment = normalize_experiment(
+            raw.get("experiment", settings.experiment), raw)
         return settings
 
     def to_dict(self) -> Dict[str, Any]:

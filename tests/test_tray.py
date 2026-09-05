@@ -27,7 +27,10 @@ from ttheart_sender.tray.service import (
     RETURN_HEART_MINUTES_VAR,
     RETURN_HEART_VAR,
     STUCK_CHECK_VAR,
+    AB_OFF_VAR,
+    AB_VAR,
     EXPERIMENTS,
+    NO_EXPERIMENT,
     VERIFY_EXTEND_VAR,
     AutomationService,
     RunState,
@@ -46,7 +49,7 @@ DEFAULT_MARKS = list(RETURN_HEART_MINUTES_DEFAULT)
 
 
 def overrides(chance=PLAY_CHANCE_OFF, timed=False, marks=None, claim_all=False,
-              stuck_check=False, verify_extend=False, **armed):
+              stuck_check=False, verify_extend=False, ab="", **armed):
     """What a run started from the panel should be handed.
 
     Every experiment is present in the dict whether or not it is armed, and
@@ -60,6 +63,10 @@ def overrides(chance=PLAY_CHANCE_OFF, timed=False, marks=None, claim_all=False,
     dozen tests already pass it by name.
     """
     armed.setdefault("rebuild_chains", verify_extend)
+    # `ab` names the armed row's key when the A/B box is ticked. Derived here
+    # the same way the service derives it, so a new EXPERIMENTS row needs no
+    # edit: the pair is the row's own `var` and `off`.
+    spec = next((e for e in EXPERIMENTS if e.key == ab), None)
     return {
         PLAY_CHANCE_VAR: chance,
         RETURN_HEART_VAR: timed,
@@ -67,6 +74,8 @@ def overrides(chance=PLAY_CHANCE_OFF, timed=False, marks=None, claim_all=False,
         CLAIM_ALL_VAR: claim_all,
         STUCK_CHECK_VAR: stuck_check,
         **{e.var: (e.on if armed.get(e.key) else e.off) for e in EXPERIMENTS},
+        AB_VAR: spec.var if spec else "",
+        AB_OFF_VAR: str(spec.off) if spec else "",
     }
 
 
@@ -861,22 +870,37 @@ def test_ticking_the_box_creates_no_folder(tmp_path):
 # --------------------------------------------------------------------------
 # the experiment switch
 # --------------------------------------------------------------------------
-def test_the_experiment_is_off_until_the_panel_ticks_it():
-    """The service enables nothing it was not handed."""
+def test_verify_extend_is_not_the_panel_s_to_send():
+    """It was a box, and the box had been ticked for 248 consecutive rounds.
+
+    When the experiments became a radio group, choosing any other one silently
+    unticked it -- so the 18 rounds that followed measured two changes at once
+    and no comparison could say which. It belongs to the flow now, at `true`,
+    which is what the baseline actually is.
+    """
     app = FakeApp()
     service = AutomationService(app)
-
-    assert service.rebuild_chains is False
     service.start()
     wait_for(lambda: service.state is RunState.IDLE)
-    assert app.variables == [overrides(verify_extend=False)]
+    assert VERIFY_EXTEND_VAR not in app.variables[0]
 
-    assert service.set_rebuild_chains(True) is True
-    assert service.set_rebuild_chains(True) is False, "re-ticking should be a no-op"
 
-    service.start()
-    wait_for(lambda: service.state is RunState.IDLE)
-    assert app.variables[-1] == overrides(verify_extend=True)
+@pytest.mark.parametrize("flow_name", ["play", "resume", "launch"])
+def test_verify_extend_is_on_in_every_flow(flow_name):
+    flow = load_flow_by_name(Config().flows_dir, flow_name)
+    assert flow.vars[VERIFY_EXTEND_VAR] is True
+
+
+def test_no_experiment_is_already_on_in_the_corpus():
+    """The rule the `verify_extend` mistake bought: a row in EXPERIMENTS must
+    be OFF in the baseline it will be compared against. Anything already on is
+    PART of the baseline, and putting it in the radio turns every other row
+    into a two-variable experiment."""
+    flow = load_flow_by_name(Config().flows_dir, "play")
+    for spec in EXPERIMENTS:
+        assert flow.vars[spec.var] == spec.off, (
+            f"{spec.var}: the flow ships it at {flow.vars[spec.var]!r} but the "
+            f"radio treats {spec.off!r} as its off position")
 
 
 def test_the_settled_measurement_is_not_the_panel_s_to_override():
@@ -921,20 +945,19 @@ def test_a_live_run_keeps_the_experiments_it_started_with():
 
     service.start()
     app.entered.wait(5)
-    service.set_rebuild_chains(True)
+    service.set_experiment("settle_board")
     app.release.set()
     wait_for(lambda: service.state is RunState.IDLE)
 
     assert app.variables == [overrides()]
 
 
-def test_the_experiment_ticks_reach_the_service_and_the_saved_file(tray):
-    """The shipped defaults, and a tick that survives a reload.
+def test_the_experiment_choice_reaches_the_service_and_the_saved_file(tray):
+    """The shipped default is the baseline, and a choice survives a reload.
 
-    Both are play rules no round has judged, which is what off means here.
-    `fit_effort` is not among them any more: the thirteenth round settled it,
-    so it left the panel entirely rather than sitting there as a switch whose
-    off position nobody should choose.
+    `fit_effort` is not among the experiments any more: the thirteenth round
+    settled it, so it left the panel entirely rather than sitting there as a
+    switch whose off position nobody should choose.
     """
     from ttheart_sender.tray.settings import PanelSettings
 
@@ -942,20 +965,81 @@ def test_the_experiment_ticks_reach_the_service_and_the_saved_file(tray):
     # `measure_clears` left the same way, for the same reason: see
     # test_the_settled_measurement_is_not_the_panel_s_to_override.
     assert "measure_clears" not in tray._panel_state()
-    assert tray._panel_state()["rebuild_chains"] is False
+    assert tray._panel_state()["experiments"] == []
 
-    tray._set_toggle("rebuild_chains", True)
-    assert tray._service.rebuild_chains is True
+    tray._set_toggle("experiment", ("settle_board", True))
+    assert tray._service.experiments == {"settle_board"}
 
     reloaded = PanelSettings.load(tray._settings_path)
-    assert reloaded.rebuild_chains is True
+    assert reloaded.experiment == ["settle_board"]
+
+    tray._set_toggle("experiment", ("settle_board", False))
+    assert tray._service.experiments == frozenset()
+    assert PanelSettings.load(tray._settings_path).experiment == []
 
 
-# `fit_effort` is in the list even though the tray no longer sends it: the
-# flows still have to declare and forward it, or editing the revert into
-# launch.yaml would never reach the play round it is meant to revert.
-@pytest.mark.parametrize("name", ["fit_effort", "verify_clears",
-                                  VERIFY_EXTEND_VAR])
+def test_every_settings_shape_this_file_has_had_still_loads(tmp_path):
+    """Three shapes: flags per key, one key as a string, a list of keys.
+
+    The panel has been tick boxes, then a radio, then tick boxes again, and a
+    saved file from any of those eras has to open.
+    """
+    from ttheart_sender.tray.settings import PanelSettings
+
+    path = tmp_path / "panel.json"
+    # The original tick boxes: several true at once, and both come back.
+    path.write_text(json.dumps({"settle_board": True, "fast_stroke": True}),
+                    encoding="utf-8")
+    assert PanelSettings.load(path).experiment == ["settle_board", "fast_stroke"]
+
+    # The radio era: one key as a string.
+    path.write_text(json.dumps({"experiment": "four_groups"}), encoding="utf-8")
+    assert PanelSettings.load(path).experiment == ["four_groups"]
+
+    # Today: a list.
+    path.write_text(json.dumps({"experiment": ["fast_stroke", "four_groups"]}),
+                    encoding="utf-8")
+    assert PanelSettings.load(path).experiment == ["fast_stroke", "four_groups"]
+
+    # `rebuild_chains` was a box and is now the flow's own setting.
+    path.write_text(json.dumps({"rebuild_chains": True}), encoding="utf-8")
+    assert PanelSettings.load(path).experiment == []
+
+    # A RETIRED row must not come back. `board_filter` was played and lost.
+    path.write_text(json.dumps({"experiment": ["board_filter", "fast_stroke"]}),
+                    encoding="utf-8")
+    assert PanelSettings.load(path).experiment == ["fast_stroke"]
+
+    path.write_text(json.dumps({"experiment": "not_a_switch"}), encoding="utf-8")
+    assert PanelSettings.load(path).experiment == []
+
+
+# `fit_effort` and `verify_clears` are in the list even though the tray no
+# longer sends them: the flows still have to declare and forward them, or
+# editing the revert into launch.yaml would never reach the play round it is
+# meant to revert.
+#
+# The EXPERIMENTS half is generated rather than typed. It used to be a hand
+# written list, and the list was not extended when four experiments were added
+# -- so `reject_model` reached play.yaml's `vars:` and nothing else, the tray
+# runs `resume`, and eleven rounds were played with the board filter selected
+# and the filter switched off. A hardcoded list cannot fail loudly when
+# something new is missing from it; a generated one can.
+#: Every variable that has to survive the whole chain, because the TRAY sends
+#: it and the tray runs `launch` or `resume`, never `play`. Generated from
+#: `EXPERIMENTS` rather than typed: the list this replaced was hand-written,
+#: was not extended when four experiments were added, and eleven rounds were
+#: played with the board filter selected and the filter switched off. A
+#: hardcoded list cannot fail loudly about something missing from it.
+#:
+#: `fit_effort` and `verify_clears` are not tray-sent and are here anyway --
+#: they are the two settings a person edits into a flow to revert, and the
+#: revert has to reach the round.
+TRAY_CHAIN_VARS = (["fit_effort", "verify_clears", VERIFY_EXTEND_VAR]
+                   + [e.var for e in EXPERIMENTS])
+
+
+@pytest.mark.parametrize("name", TRAY_CHAIN_VARS)
 def test_the_experiments_are_declared_and_forwarded_the_whole_chain(name):
     """run_flow re-applies each flow's own vars, so a gap anywhere loses them.
 
@@ -977,6 +1061,47 @@ def test_the_experiments_are_declared_and_forwarded_the_whole_chain(name):
             assert call.params.get("vars", {}).get(name) == f"${{{name}}}", (
                 f"{parent}.yaml must forward {name} or {child}.yaml's default wins"
             )
+
+
+def _hops():
+    flows_dir = Config().flows_dir
+    for parent, child in (("launch", "resume"), ("resume", "play")):
+        yield parent, child, load_flow_by_name(flows_dir, parent), \
+            load_flow_by_name(flows_dir, child)
+
+
+@pytest.mark.parametrize("parent,child", [("launch", "resume"), ("resume", "play")])
+def test_a_variable_declared_on_both_sides_of_a_hop_is_forwarded(parent, child):
+    """The exact shape of the bug, stated as an invariant instead of a list.
+
+    `run_flow` re-applies the called flow's own `vars:` on entry. So a variable
+    the PARENT declares and the CHILD also declares is silently reset on the
+    way down unless the parent forwards it -- the parent's value, and the
+    panel's choice behind it, is discarded with nothing said. That is how
+    `reject_model` reached play.yaml and nothing else for eleven rounds, and
+    how `verify_clears` cost about fifty.
+
+    A variable only the child declares is fine and is NOT flagged: nothing
+    upstream is trying to set it, so the child's own default is the answer.
+    That distinction is why this is generated from the overlap rather than
+    from either flow's full list.
+    """
+    flows_dir = Config().flows_dir
+    up = load_flow_by_name(flows_dir, parent)
+    down = load_flow_by_name(flows_dir, child)
+    calls = [s for s in find_steps(up.steps, "run_flow")
+             if s.params.get("flow") == child]
+    assert calls, f"{parent}.yaml no longer hands off to {child}"
+    shared = sorted(set(up.vars) & set(down.vars))
+    assert shared, f"{parent} and {child} share no variables -- has one moved?"
+    for call in calls:
+        forwarded = call.params.get("vars", {})
+        missing = [n for n in shared if forwarded.get(n) != f"${{{n}}}"]
+        assert not missing, (
+            f"{parent}.yaml declares {missing} and so does {child}.yaml, but "
+            f"does not forward them -- {child}.yaml's defaults win and the "
+            f"value set upstream is discarded silently"
+        )
 
 
 @pytest.mark.parametrize("flow_name", ["play", "resume", "launch"])
@@ -1014,14 +1139,13 @@ def test_play_reads_both_experiments_from_its_own_variables():
 # --------------------------------------------------------------------------
 # Experiments
 # --------------------------------------------------------------------------
-def test_every_experiment_ships_off():
-    """A play rule ships off with a one-line revert, and the value it reverts
-    to is the flow's own -- which is what every number in
-    docs/DATASET-FINDINGS.md was measured under."""
+def test_the_baseline_is_what_ships():
+    """No experiment armed, and every switch sending the flow's own value --
+    which is what every number in docs/DATASET-FINDINGS.md was measured
+    under."""
     app = FakeApp()
     service = AutomationService(app)
-    for spec in EXPERIMENTS:
-        assert service.experiment(spec.key) is False, spec.key
+    assert service.experiment == NO_EXPERIMENT
     service.start()
     wait_for(lambda: service.state is RunState.IDLE)
     for spec in EXPERIMENTS:
@@ -1043,25 +1167,59 @@ def test_an_unticked_box_sends_the_default_rather_than_nothing():
         assert spec.var in app.variables[0], spec.var
 
 
-def test_each_experiment_reaches_its_own_flow_variable():
+def test_each_experiment_reaches_its_own_flow_variable_and_only_its_own():
     for spec in EXPERIMENTS:
         app = FakeApp()
         service = AutomationService(app)
-        assert service.set_experiment(spec.key, True) is True
-        assert service.set_experiment(spec.key, True) is False, "no-op re-tick"
+        assert service.set_experiment(spec.key) is True
+        assert service.set_experiment(spec.key) is False, "no-op re-select"
         service.start()
         wait_for(lambda: service.state is RunState.IDLE)
         assert app.variables[0][spec.var] == spec.on, spec.key
-        # ...and nothing else moved.
+        # ...and nothing else moved. This is the whole point of the radio: a
+        # round is always attributable to at most one change.
         for other in EXPERIMENTS:
             if other.key != spec.key:
                 assert app.variables[0][other.var] == other.off, other.key
 
 
+def test_ticking_one_experiment_leaves_the_others_alone():
+    """Radio, not tick boxes. Two armed at once is a round that cannot say
+    which change was responsible for what it shows."""
+    app = FakeApp()
+    service = AutomationService(app)
+    service.set_experiment("settle_board")
+    service.set_experiment("settle_board")
+    assert service.experiment == "settle_board"
+    service.start()
+    wait_for(lambda: service.state is RunState.IDLE)
+    sent = app.variables[0]
+    armed = [e.key for e in EXPERIMENTS if sent[e.var] == e.on]
+    assert armed == ["settle_board"]
+
+
+def test_the_baseline_is_reachable_again():
+    """Unticking everything is the baseline, and the baseline is what every
+    experiment is compared against."""
+    service = AutomationService(FakeApp())
+    service.set_experiment("fast_stroke")
+    assert service.set_experiment("fast_stroke", False) is True
+    assert service.experiments == frozenset()
+    assert not any(service.experiment_states.values())
+
+    service.set_experiment("fast_stroke")
+    service.set_experiment("four_groups")
+    assert service.clear_experiments() is True
+    assert service.experiments == frozenset()
+    assert service.clear_experiments() is False, "already baseline"
+
+
 def test_an_unknown_experiment_is_ignored():
     service = AutomationService(FakeApp())
-    assert service.set_experiment("no_such_switch", True) is False
-    assert "no_such_switch" not in service.experiments
+    service.set_experiment("settle_board")
+    assert service.set_experiment("no_such_switch") is False
+    assert service.experiment == "settle_board", (
+        "a typo must not silently disarm the running experiment")
 
 
 def test_a_live_run_keeps_the_experiment_it_started_with():
@@ -1069,13 +1227,13 @@ def test_a_live_run_keeps_the_experiment_it_started_with():
     service = AutomationService(app)
     service.start()
     app.entered.wait(5)
-    service.set_experiment("board_filter", True)
+    service.set_experiment("settle_board")
     app.release.set()
     wait_for(lambda: service.state is RunState.IDLE)
-    assert app.variables[0]["reject_model"] == ""
+    assert app.variables[0]["settle_board"] is False
     service.start()
     wait_for(lambda: len(app.variables) == 2)
-    assert app.variables[1]["reject_model"] == "models/reject.onnx"
+    assert app.variables[1]["settle_board"] is True
 
 
 def test_every_experiment_names_a_variable_the_flow_declares():
@@ -1108,3 +1266,183 @@ def test_settled_rules_are_not_sent_by_the_tray():
     wait_for(lambda: service.state is RunState.IDLE)
     for settled in ("fit_effort", "verify_clears", "character"):
         assert settled not in app.variables[0], settled
+
+# --------------------------------------------------------------------------
+# A/B: alternate the armed experiment, round by round
+# --------------------------------------------------------------------------
+def test_the_ab_box_is_off_by_default_and_sends_no_alternation():
+    """Off is the baseline: the armed row on for every round, as before."""
+    app = FakeApp()
+    service = AutomationService(app)
+    assert service.ab_experiment is False
+    service.start()
+    wait_for(lambda: service.state is RunState.IDLE)
+    assert app.variables[0][AB_VAR] == ""
+    assert app.variables[0][AB_OFF_VAR] == ""
+
+
+def test_the_ab_box_composes_with_the_ticked_experiment():
+    """The thing a radio row could not do.
+
+    The experiment rows are mutually exclusive, so "A/B the board filter"
+    cannot be one of them -- selecting it would unselect the board filter.
+    This is the check that the two controls stack: the row still sends its ON
+    value, and `ab` names it.
+    """
+    app = FakeApp()
+    service = AutomationService(app)
+    service.set_experiment("settle_board")
+    service.set_ab_experiment(True)
+    service.start()
+    wait_for(lambda: service.state is RunState.IDLE)
+    sent = app.variables[0]
+    assert sent["settle_board"] is True, (
+        "the armed row must still send its ON value -- that is what the A/B "
+        "alternates AWAY from on the off rounds")
+    assert sent[AB_VAR] == "settle_board"
+    assert sent[AB_OFF_VAR] == "False"
+
+
+@pytest.mark.parametrize("spec", EXPERIMENTS, ids=lambda s: s.key)
+def test_the_off_value_comes_from_the_armed_row_not_a_guess(spec):
+    """`step_px` off is 8, not an empty value.
+
+    An A/B that guessed the off-value would alternate 12 against 0 and measure
+    a stroke length nobody chose. Deriving the pair from the row is what makes
+    every row A/B-able without a second table to keep in step.
+    """
+    app = FakeApp()
+    service = AutomationService(app)
+    service.set_experiment(spec.key)
+    service.set_ab_experiment(True)
+    service.start()
+    wait_for(lambda: service.state is RunState.IDLE)
+    sent = app.variables[0]
+    assert sent[AB_VAR] == spec.var
+    assert sent[AB_OFF_VAR] == str(spec.off)
+    assert sent[spec.var] == spec.on
+
+
+def test_ticked_with_nothing_armed_alternates_nothing():
+    """There is no experiment to alternate, and the baseline is not one."""
+    app = FakeApp()
+    service = AutomationService(app)
+    service.set_ab_experiment(True)
+    assert service.experiment == NO_EXPERIMENT
+    service.start()
+    wait_for(lambda: service.state is RunState.IDLE)
+    assert app.variables[0][AB_VAR] == ""
+
+
+def test_a_live_run_keeps_the_ab_setting_it_started_with():
+    """Like every other switch: it decides what the NEXT run is handed."""
+    app = FakeApp(block=True)
+    service = AutomationService(app)
+    service.set_experiment("settle_board")
+    service.set_ab_experiment(True)
+    service.start()
+    wait_for(lambda: service.state is RunState.RUNNING)
+    service.set_ab_experiment(False)
+    assert app.variables[0][AB_VAR] == "settle_board"
+    app.release.set()
+    wait_for(lambda: service.state is RunState.IDLE)
+
+
+def test_the_ab_box_is_not_an_experiment_row():
+    """If it ever becomes one, the radio makes it unselectable with a rule."""
+    assert not any(spec.var in (AB_VAR, AB_OFF_VAR) for spec in EXPERIMENTS)
+
+
+def test_two_experiments_can_be_armed_and_it_is_said_out_loud():
+    """The radio made this unreachable. Ticks make it reachable and LOUD.
+
+    A round played with two rules armed cannot say which was responsible --
+    the thirty-fifth round lost 18 rounds to that. The constraint did not go
+    away when the control changed; it moved to the record.
+    """
+    app = FakeApp()
+    notes = []
+    service = AutomationService(
+        app, on_notify=lambda t, m, e: notes.append((t, m)))
+    service.set_experiment("settle_board")
+    assert not notes, "one armed is the ordinary case and says nothing"
+    service.set_experiment("four_groups")
+    assert service.experiments == {"settle_board", "four_groups"}
+    assert notes, "arming a second rule must not be silent"
+    assert "cannot attribute" in notes[0][1]
+
+
+def test_both_armed_rules_reach_their_own_flow_variables():
+    app = FakeApp()
+    service = AutomationService(app)
+    service.set_experiment("settle_board")
+    service.set_experiment("four_groups")
+    service.start()
+    wait_for(lambda: service.state is RunState.IDLE)
+    sent = app.variables[0]
+    assert sent["settle_board"] is True
+    assert sent["kinds"] == 4
+    assert sent["step_px"] == 8, "an unticked row still sends its default"
+
+
+def test_the_ab_refuses_to_alternate_when_two_are_armed():
+    """Alternating one while the other stays on for every round produces a
+    corpus that reads like a clean A/B and is not one."""
+    app = FakeApp()
+    service = AutomationService(app)
+    service.set_experiment("settle_board")
+    service.set_experiment("four_groups")
+    service.set_ab_experiment(True)
+    service.start()
+    wait_for(lambda: service.state is RunState.IDLE)
+    assert app.variables[0][AB_VAR] == "", (
+        "an ambiguous A/B must alternate nothing rather than pick one of two")
+
+
+def test_the_singular_experiment_answers_only_when_one_is_armed():
+    service = AutomationService(FakeApp())
+    assert service.experiment == NO_EXPERIMENT
+    service.set_experiment("settle_board")
+    assert service.experiment == "settle_board"
+    service.set_experiment("four_groups")
+    assert service.experiment == NO_EXPERIMENT, (
+        "returning the 'first' of two would answer downstream questions "
+        "wrongly rather than not at all")
+
+
+def test_the_board_filter_is_no_longer_offered():
+    """It was played and it lost -- 143 rounds, cleared -18.5 (p=0.036),
+    collapsed rounds 1.4% -> 12.5% (p=0.009). A row for it would invite a
+    round spent re-finding that, the same reason the character model has
+    none. The code and the corpus stay; the invitation goes."""
+    assert not any(spec.key == "board_filter" for spec in EXPERIMENTS)
+    assert not any(spec.var == "reject_model" for spec in EXPERIMENTS)
+
+
+def test_the_panel_note_says_what_the_radio_used_to_enforce():
+    from ttheart_sender.tray.panel import experiment_note
+    assert experiment_note([]) == "baseline round"
+    assert experiment_note(["settle_board"]) == "1 experiment armed"
+    assert "cannot say which" in experiment_note(["settle_board", "four_groups"])
+
+
+def test_a_row_with_no_evidence_says_so_in_the_label():
+    """Three states, not two: played-and-lost leaves the panel, unproven gets
+    a row, and never-played-with-the-reason-withdrawn gets a MARKED row.
+
+    Deleting these would claim they had lost, which no round has said.
+    Leaving them unmarked would invite five hours of play for a question
+    nobody has. The label is where a person actually looks, so the status
+    goes there and not only in the note."""
+    import re
+    for spec in EXPERIMENTS:
+        assert spec.note.strip(), f"{spec.key} must say where it stands"
+        if "(no evidence)" in spec.label:
+            continue                       # marked, and the note says why
+        # Unmarked means "there is a case". Then the note has to CONTAIN the
+        # case -- a number somebody measured, not an assertion that one
+        # exists. Every row that ever lost was proposed with a story and no
+        # digits in it.
+        assert re.search(r"\d", spec.note), (
+            f"{spec.key} is offered as a live option with no measurement in "
+            f"its note. Cite the number or mark the label '(no evidence)'.")

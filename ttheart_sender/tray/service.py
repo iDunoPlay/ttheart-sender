@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from enum import Enum
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence
 
@@ -74,8 +75,12 @@ STUCK_CHECK_VAR = "stuck_check"
 #: from the tray without ticking it silently turned the measurement off and
 #: the round came back unmeasurable. One home: the flow.
 
-#: Flow variable behind "Rebuild chains from marks" -- `play_tsum`'s
-#: `verify_extend`.
+#: `verify_extend` is NOT sent by the tray and no longer has a box. It was one,
+#: and the box had been ticked for 248 consecutive rounds -- the whole corpus.
+#: When the experiments became a radio group, choosing any other one silently
+#: unticked it, and the 18 rounds that followed measured two changes at once.
+#: It now lives in `flows/*.yaml` at `true`, which is what the baseline is.
+#: Kept as a name because the flows still have to declare and forward it.
 VERIFY_EXTEND_VAR = "verify_extend"
 
 
@@ -105,35 +110,109 @@ class Experiment(NamedTuple):
     note: str       #: what a round should show if it is working
 
 
+#: What "no experiment" is called. Not a sixth Experiment row, because it has
+#: no variable of its own: it is the absence of all of them, and every switch
+#: sends its `off` value under it.
+NO_EXPERIMENT = ""
+
 #: Every switch under "Experiments" in the panel, in the order they appear.
 #:
-#: Deliberately NOT including the character model. It is measured, and the
-#: measurement is that it loses: -10.9% tsums cleared per drag, because naming
-#: the fifth of a board it can read splits characters whose buried members keep
-#: a colour id. See docs/IDENTITY.md. A box for it would invite a round to be
-#: spent re-finding that.
+#: **They are RADIO buttons, and that is a correctness point.** Each one
+#: changes a different part of the pipeline, so a round played with two of them
+#: armed cannot say which was responsible for whatever it shows -- the house
+#: rule at the top of flows/play.yaml, made structural instead of advisory. A
+#: tick box asks the player to remember; a radio makes arming two impossible.
+#:
+#: Three rules deliberately NOT here:
+#:
+#: * The **board filter** (`reject_model`). It had a row, it was played, and
+#:   it lost: 143 rounds on one build, alternating, 72 ON against 71 OFF.
+#:   Cleared 256.9 against 275.4 (p=0.036), FEVER 41.2% against 47.1%
+#:   (p=0.030), and rounds that never reached FEVER at all went from 1.4% to
+#:   12.5% (p=0.009). It did exactly what it was built for -- dead drags fell
+#:   48% -- and lost anyway. A row for it would invite a round spent
+#:   re-finding that, which is the same reason the character model has none.
+#:   The code, the model and the corpus all stay; only the invitation goes.
+#:
+#: * The **character model**. It is measured, and the measurement is that it
+#:   loses: -10.9% tsums cleared per drag, because naming the fifth of a board
+#:   it can read splits characters whose buried members keep a colour id. See
+#:   docs/IDENTITY.md. A row for it would invite a round spent re-finding that.
+#: * **`verify_extend`**. It was a row here, and that was a mistake with a
+#:   cost. It had been ticked for 248 consecutive rounds -- the whole corpus --
+#:   so choosing any OTHER experiment silently switched it off too, and the
+#:   next 18 rounds measured two changes at once. It now lives in
+#:   `flows/*.yaml` at `true`, which is what the baseline actually is, and
+#:   reverts by editing that line the way `fit_effort` does.
+#:
+#: The general rule this pair illustrates: a row here must be OFF in the
+#: corpus the experiment will be compared against. Anything already on is part
+#: of the baseline, and putting it in a radio group turns every other row into
+#: a two-variable experiment.
+#: WHY A ROW SAYS "(no evidence)" AND IS STILL HERE.
+#:
+#: There are three states a rule can be in, and only two of them used to have
+#: a home. A rule that has been PLAYED AND LOST leaves the panel entirely --
+#: the character model and the board filter both did, because a row for one
+#: invites a round spent re-finding a settled answer. A rule that is UNPROVEN
+#: gets a row, which is what this table is for.
+#:
+#: The third state had no name until 2026-09-05: **the rule was never played,
+#: and the reason for proposing it has since been withdrawn.** All three rows
+#: below are in it. Deleting them would claim they had lost, which is not
+#: true and no round has said so. Leaving them unmarked would invite five
+#: hours of play for a question nobody currently has. So they are marked, and
+#: the label is where a person actually looks.
 EXPERIMENTS: tuple = (
     Experiment(
-        "rebuild_chains", VERIFY_EXTEND_VAR, True, False,
-        "Rebuild chains from marks",
-        "chains the marks rebuilt, and whether they cleared"),
-    Experiment(
-        "board_filter", "reject_model", "models/reject.onnx", "",
-        "Skip detections that are board",
-        "`dragged` falling while `cleared` holds"),
+        "chain_ranker", "chain_model", "models/chain.onnx", "",
+        "Pick the chain the game will accept",
+        "THE ONLY ROW WITH EVIDENCE BEHIND IT. Offline, on rounds it never "
+        "trained on: 0.876 AUC per member against `adjacency`'s 0.500, a "
+        "calibrated expected total (2.274 predicted, 2.310 actual), and "
+        "+0.109 accepted members a press that survives scoring by a second "
+        "independently trained model. Never played. Watch accepted members "
+        "per press, then `cleared`; +4.7% needs ~136 rounds an arm."),
     Experiment(
         "settle_board", "settle_board", True, False,
-        "Wait for the board, not the screen",
-        "`played` rising; revert if `cleared %` falls with it"),
+        "Wait for the board, not the screen (no evidence)",
+        "PREMISE WITHDRAWN. It was proposed because score was said to track "
+        "chains played at r=+0.91 -- five rounds. Over the 140 scored rounds "
+        "of the clean single-build baseline that is -0.17, so more chains per "
+        "round is not the objective. The wait is still the biggest slice of a "
+        "round, so this may yet pay for some other reason; it has no case "
+        "today."),
     Experiment(
         "fast_stroke", "step_px", 12, 8,
-        "Faster stroke",
-        "`played` rising; revert if drags start failing"),
+        "Faster stroke (no evidence)",
+        "PREMISE WITHDRAWN, the same one as `settle_board`: it is the second "
+        "throughput lever, and throughput is not what the 140-round baseline "
+        "says the score is made of."),
     Experiment(
         "four_groups", "kinds", 4, 0,
-        "Force 4 colour groups",
-        "`cleared %` rising"),
+        "Force 4 colour groups (no evidence)",
+        "SCORED ON A DISQUALIFIED METRIC. The +3-4% that motivated it was "
+        "simulated tsums-cleared-per-drag, which the twenty-sixth round "
+        "disqualified when an ORACLE grouping scored BELOW the shipped rule "
+        "on it. Never played."),
 )
+
+
+#: The two variables that turn the armed experiment into an A/B.
+#:
+#: NOT an `EXPERIMENTS` row, and that is the point. The rows are a radio group
+#: because two rules armed at once cannot be told apart -- but this is not a
+#: rule, it is a way of RUNNING one, and it has to compose with whichever row
+#: is armed rather than replace it. A row for it would make "A/B the board
+#: filter" unselectable, because selecting it would unselect the board filter.
+#:
+#: Both values are derived from the armed row, so the pair cannot drift: `ab`
+#: takes that row's `var` and `ab_off` takes its `off`. That matters for
+#: `step_px`, whose off-value is 8 rather than an empty one -- an A/B that
+#: guessed the off-value would alternate 12 against 0 and measure nothing
+#: anybody chose.
+AB_VAR = "ab"
+AB_OFF_VAR = "ab_off"
 
 
 class RunState(Enum):
@@ -155,8 +234,8 @@ class AutomationService:
         return_heart_minutes: Optional[Sequence[int]] = None,
         claim_pattern: str = CLAIM_PATTERN_DEFAULT,
         restart_when_stuck: bool = False,
-        rebuild_chains: bool = False,
-        experiments: Optional[Dict[str, bool]] = None,
+        experiment: Optional[str] = None,
+        ab_experiment: bool = False,
         on_change: Optional[Callable[[], None]] = None,
         on_notify: Optional[Callable[[str, str, bool], None]] = None,
     ) -> None:
@@ -173,11 +252,14 @@ class AutomationService:
         # be a row in EXPERIMENTS, not five edits across three files, and a
         # switch that exists in the table but nowhere else is the failure this
         # avoids.
-        self._experiments: Dict[str, bool] = {
-            e.key: bool(experiments.get(e.key, False)) if experiments else False
-            for e in EXPERIMENTS
-        }
-        self._experiments["rebuild_chains"] = bool(rebuild_chains)
+        # One selection, not a set. See EXPERIMENTS.
+        # A SET, because the panel is tick boxes again. See `experiments`.
+        want = experiment if experiment is not None else ()
+        if isinstance(want, str):
+            want = (want,) if want else ()
+        valid = {e.key for e in EXPERIMENTS}
+        self._experiments = {k for k in want if k in valid}
+        self._ab_experiment = bool(ab_experiment)
         self._state = RunState.IDLE
         #: What the live run is called -- the mode's label, or "Buy tsum" for
         #: a one-off job, so the panel can say what it is waiting on.
@@ -287,6 +369,28 @@ class AutomationService:
     def toggle_play(self) -> bool:
         return self.set_play(not self.play)
 
+    @property
+    def ab_experiment(self) -> bool:
+        """Whether the armed experiment alternates round by round."""
+        with self._lock:
+            return self._ab_experiment
+
+    def set_ab_experiment(self, enabled: bool) -> bool:
+        """Alternate the armed experiment ON/OFF between rounds, or do not.
+
+        Off is the baseline: the armed row is on for every round, which is what
+        every experiment before this one was played as. On makes the run its
+        own control -- `scripts/ab_eval.py` reads the arms back out.
+        """
+        enabled = bool(enabled)
+        with self._lock:
+            if self._ab_experiment is enabled:
+                return False
+            self._ab_experiment = enabled
+        log.info("A/B the armed experiment %s", "on" if enabled else "off")
+        self._on_change()
+        return True
+
     def set_restart_when_stuck(self, enabled: bool) -> bool:
         """Arm or disarm the stuck watchdog for the next Start.
 
@@ -304,44 +408,97 @@ class AutomationService:
         self._on_change()
         return True
 
-    def experiment(self, key: str) -> bool:
-        """Is this experiment armed?"""
+    @property
+    def experiments(self) -> frozenset:
+        """Every armed experiment's key. Empty is the baseline."""
         with self._lock:
-            return bool(self._experiments.get(key, False))
+            return frozenset(self._experiments)
 
-    def set_experiment(self, key: str, enabled: bool) -> bool:
-        """Arm or disarm one experiment. A live run keeps what it started with.
+    @property
+    def experiment_states(self) -> Dict[str, bool]:
+        """Every switch and whether it is ticked, for the panel's rows.
+
+        Named apart from `experiments` on purpose: it used to BE `experiments`,
+        and when the set-valued property arrived below it the later definition
+        won silently. `e.key in armed` then tested a dict's KEYS, every row
+        read as armed, and a baseline run sent every experiment's ON value.
+        Caught by the suite; the lesson is that two properties differing only
+        in what they return is a shadowing waiting to happen.
+        """
+        armed = self.experiments
+        return {e.key: (e.key in armed) for e in EXPERIMENTS}
+
+    @property
+    def experiment(self) -> str:
+        """The armed experiment when there is EXACTLY one, else "".
+
+        Not a convenience. Several things downstream -- the A/B pair most of
+        all -- are only answerable when one rule is under test, and returning
+        the "first" of two would answer them wrongly rather than not at all.
+        """
+        with self._lock:
+            return (next(iter(self._experiments))
+                    if len(self._experiments) == 1 else NO_EXPERIMENT)
+
+    def set_experiment(self, key: str, enabled: bool = True) -> bool:
+        """Tick or untick one experiment. Nothing ticked is the baseline.
+
+        These were tick boxes, then a radio group, and are tick boxes again at
+        the player's request. The radio existed for a real reason and the
+        reason has not gone away: **a round played with two rules armed cannot
+        say which was responsible for what it shows.** The thirty-fifth round
+        lost 18 rounds to exactly that, twice over.
+
+        So the constraint is kept and moved from the control to the record.
+        Ticking a second row is allowed and is said out loud -- in the log, in
+        the panel's own line, and through a notification -- rather than being
+        made unreachable. Nothing downstream guesses: `experiment` answers only
+        when exactly one is armed, so the A/B pair goes empty rather than
+        picking one of two.
 
         Returns False when nothing changed, so a repaint driven by the panel
-        does not loop back through `_on_change`.
+        does not loop back through `_on_change`. A live run keeps what it
+        started with either way.
         """
         spec = next((e for e in EXPERIMENTS if e.key == key), None)
         if spec is None:
             log.warning("unknown experiment %r -- ignored", key)
             return False
-        enabled = bool(enabled)
         with self._lock:
-            if self._experiments.get(key) is enabled:
+            armed = set(self._experiments)
+            if (key in armed) == bool(enabled):
                 return False
-            self._experiments[key] = enabled
-        log.info("%s %s (%s=%s)", spec.label, "on" if enabled else "off",
-                 spec.var, spec.on if enabled else spec.off)
+            armed.add(key) if enabled else armed.discard(key)
+            self._experiments = armed
+        if not armed:
+            log.info("Experiments: none -- baseline round")
+        else:
+            log.info("Experiment %s: %s (%s=%s). Armed: %s",
+                     "on" if enabled else "off", spec.label, spec.var,
+                     spec.on if enabled else spec.off,
+                     ", ".join(sorted(armed)))
+        if len(armed) > 1:
+            log.warning(
+                "%d experiments armed at once (%s). A round cannot say which "
+                "of them was responsible for what it shows -- this is the "
+                "shape that cost the thirty-fifth round 18 rounds.",
+                len(armed), ", ".join(sorted(armed)))
+            self._on_notify(
+                "Two experiments armed",
+                f"{len(armed)} rules are on at once. A round played this way "
+                f"cannot attribute its result to either of them.", False)
         self._on_change()
         return True
 
-    @property
-    def experiments(self) -> Dict[str, bool]:
+    def clear_experiments(self) -> bool:
+        """Back to the baseline -- the round every recorded number is against."""
         with self._lock:
-            return dict(self._experiments)
-
-    @property
-    def rebuild_chains(self) -> bool:
-        """Kept as its own name because it predates the table and the panel,
-        the settings file and several tests all say `rebuild_chains`."""
-        return self.experiment("rebuild_chains")
-
-    def set_rebuild_chains(self, enabled: bool) -> bool:
-        return self.set_experiment("rebuild_chains", enabled)
+            if not self._experiments:
+                return False
+            self._experiments = set()
+        log.info("Experiments: none -- baseline round")
+        self._on_change()
+        return True
 
 
     def set_return_heart(self, enabled: bool) -> bool:
@@ -413,12 +570,46 @@ class AutomationService:
             # place, which happens to be the same value today -- and would stop
             # being so the moment a default changed, turning an unticked box
             # into a silent opt-in.
-            **{e.var: (e.on if armed.get(e.key) else e.off)
+            **{e.var: (e.on if e.key in armed else e.off)
                for e in EXPERIMENTS},
+            # Derived from the armed row, never typed. Empty when nothing is
+            # armed or the box is off, which is the baseline: `_ab_arm`
+            # refuses an empty name and the round plays exactly as before.
+            **self._ab_variables(armed),
         }
 
+    def _ab_variables(self, armed) -> Dict[str, Any]:
+        """`ab` and `ab_off` for the one armed row, or the pair that means "no".
+
+        Deliberately silent when two rows are armed. Alternating one of them
+        while the other stays on for every round produces a corpus that reads
+        like a clean A/B and is not one, and that is worse than no A/B at all.
+        """
+        if not self.ab_experiment:
+            return {AB_VAR: "", AB_OFF_VAR: ""}
+        if len(armed) > 1:
+            log.warning("A/B is on with %d experiments armed -- alternating "
+                        "nothing, because a corpus that looks like a clean A/B "
+                        "and is not one is worse than none", len(armed))
+            return {AB_VAR: "", AB_OFF_VAR: ""}
+        for spec in EXPERIMENTS:
+            if spec.key in armed:
+                return {AB_VAR: spec.var, AB_OFF_VAR: str(spec.off)}
+        # Ticked with nothing armed. There is no experiment to alternate, and
+        # saying so beats alternating the baseline against itself.
+        log.info("A/B is on but no experiment is armed -- nothing to alternate")
+        return {AB_VAR: "", AB_OFF_VAR: ""}
+
     def start(self) -> bool:
-        """Run the selected mode. Does nothing if a run is already going."""
+        """Run the selected mode. Does nothing if a run is already going.
+
+        **Never refuses a press.** A cooldown used to sit here, meant to stop
+        the run being restarted seconds after the cursor safety had ended it.
+        It was wrong on its own evidence: those restarts were already known to
+        be explicit `start()` calls, and refusing an explicit press is exactly
+        what must not happen. It made the first click after every cursor-stop
+        do nothing, so Run appeared to need pressing twice.
+        """
         mode = self.mode
         # Snapshot the overrides here so a mid-run toggle cannot change what
         # this run was started with.

@@ -358,7 +358,7 @@ class DatasetWriter:
         for name in ("played", "dragged", "cleared", "checked", "rejected",
                      "stalled", "trimmed", "abandoned", "verified",
                      "settle_s", "settles", "settle_timeouts",
-                     "fever_frames", "frames", "reason"):
+                     "fever_frames", "frames", "reason", "ab", "ab_arm"):
             value = getattr(report, name, None) if report is not None else None
             if value is not None:
                 row[name] = round(value, 3) if isinstance(value, float) else value

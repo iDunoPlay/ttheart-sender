@@ -169,7 +169,7 @@ class _SizeSpy:
         return out
 
 
-def test_every_forward_uses_one_fixed_batch_size(monkeypatch, tmp_path):
+def test_the_buffers_are_sized_at_the_cap_before_any_board(monkeypatch, tmp_path):
     """The workaround for the crash that took the app down mid-round.
 
     OpenCV 5.0.0 sizes a dnn net's buffers on the FIRST batch and does not grow
@@ -178,9 +178,16 @@ def test_every_forward_uses_one_fixed_batch_size(monkeypatch, tmp_path):
     batch of 1 then 46 dies on the 46.
 
     Live this is guaranteed: a round's first frame is the board still filling
-    (~11 tsums) and a settled board is ~45. So the batch must never vary, and
-    that is what this pins -- not that inference is correct, but that the net
-    is never shown two different shapes.
+    (~11 tsums) and a settled board is ~45. So the buffers must be sized at the
+    maximum BEFORE the first board, and no board may ever exceed it. Those two
+    are what this pins -- not that inference is correct, but that the net is
+    never asked to GROW.
+
+    It does not pin that the batch never varies. It used to: every forward was
+    padded to 64. Measured on cv2 5.0.0, a net warmed at 64 then fed 41, 33,
+    47, 12, 58, 1, 64, 40, 5 and 44 survives all of them and answers
+    bit-identically to the padded version, and the padding was 43% of every
+    forward on a ~41-detection board.
     """
     spy = _SizeSpy()
     onnx = tmp_path / "m.onnx"
@@ -199,13 +206,17 @@ def test_every_forward_uses_one_fixed_batch_size(monkeypatch, tmp_path):
         model.apply(board, ts, 20.0)
 
     assert spy.sizes, "the model must actually have run"
-    assert set(spy.sizes) == {tsum.CHARACTER_BATCH}, (
-        f"every forward must use exactly {tsum.CHARACTER_BATCH} crops, "
-        f"got {sorted(set(spy.sizes))}")
+    assert spy.sizes[0] == tsum.CHARACTER_BATCH, (
+        f"the buffers must be sized at {tsum.CHARACTER_BATCH} by the warm-up "
+        f"before any board is read; the first forward was {spy.sizes[0]}")
+    assert max(spy.sizes) <= tsum.CHARACTER_BATCH, (
+        f"no forward may exceed {tsum.CHARACTER_BATCH} crops -- that is the "
+        f"grow that kills the process; got {sorted(set(spy.sizes))}")
+    assert 70 not in spy.sizes, "a board over the cap must go round again"
 
 
-def test_padding_answers_are_discarded(monkeypatch, tmp_path):
-    """A short batch is padded with zeros -- those rows must not be named."""
+def test_a_short_board_is_sent_at_its_own_size(monkeypatch, tmp_path):
+    """No padding: a five-tsum board costs five rows, and names five."""
     spy = _SizeSpy()
     onnx = tmp_path / "m.onnx"
     onnx.write_bytes(b"x")
@@ -221,5 +232,9 @@ def test_padding_answers_are_discarded(monkeypatch, tmp_path):
           for i in range(5)]
     named = model.apply(board, ts, 20.0)
 
-    assert named == 5, "only the real crops count, not the 59 padded rows"
+    assert named == 5
     assert model.seen == 5
+    # sizes[0] is the warm-up; the board itself is one forward of exactly 5.
+    assert spy.sizes[1:] == [5], (
+        f"a 5-crop board must be one forward of 5, not padded; "
+        f"got {spy.sizes[1:]}")

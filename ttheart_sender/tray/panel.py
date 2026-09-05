@@ -53,6 +53,18 @@ ID_CLEAR_LOGS = 2017
 ID_CLEAR_DATA = 2018
 #: One id per row of `service.EXPERIMENTS`, so adding an experiment is a row
 #: in that table and nothing here. Based well clear of the fixed ids.
+def experiment_note(armed) -> str:
+    """The line under the tick boxes. Says the thing the radio used to enforce."""
+    armed = sorted(armed)
+    if not armed:
+        return "baseline round"
+    if len(armed) == 1:
+        return "1 experiment armed"
+    return (f"{len(armed)} armed -- a round cannot say which one did it")
+
+
+ID_EXPERIMENT_AB = 2598
+ID_EXPERIMENT_NOTE = 2599
 ID_EXPERIMENT_BASE = 2600
 #: A label rather than a control, but it is rewritten on every refresh, so it
 #: needs an id to be found again.
@@ -377,13 +389,24 @@ class ControlPanel:
         # each is only worth turning on for a run that is also collecting: the
         # comparison is what makes them mean anything.
         #
-        # ONE AT A TIME. They touch different parts of the pipeline and
-        # flipping two at once says nothing about which was at fault -- the
-        # house rule at the top of flows/play.yaml.
+        # TICK BOXES. They were a radio group, for a real reason: a round
+        # played with two rules armed cannot say which was responsible, and
+        # the thirty-fifth round lost 18 rounds to that shape. The constraint
+        # is kept and moved out of the control -- ticking a second row is
+        # allowed and is said out loud, in the log, in the line below and in a
+        # notification. Nothing ticked is the baseline, so "None" needs no row
+        # of its own any more: unticking everything IS the baseline.
         y += GAP
-        y = self._add_static("Experiments (one at a time)", y)
+        y = self._add_static("Experiments", y)
         for index, spec in enumerate(EXPERIMENTS):
-            y = self._add_check(ID_EXPERIMENT_BASE + index, spec.label, y)
+            y = self._add_check(ID_EXPERIMENT_BASE + 1 + index, spec.label, y)
+        y = self._add_check(ID_EXPERIMENT_AB,
+                            "Alternate it round by round (A/B)", y)
+        # Reads "baseline" until something is ticked, and warns the moment two
+        # are: the panel is where the player is looking when they tick it.
+        state = self._add_static("baseline round", y, ident=ID_EXPERIMENT_NOTE)
+        y = state
+        y += ROW + GAP
 
         y += SECTION_GAP
         y = self._add_line(y)
@@ -579,6 +602,22 @@ class ControlPanel:
             self._controls[ident] = hwnd
         return y + height
 
+    def _add_radio(self, ident: int, label: str, y: int, *,
+                   first: bool = False) -> int:
+        """One full-width radio in a vertical group.
+
+        WS_GROUP goes on the FIRST of the group for the reason the Mode and
+        Claim radios carry it: an auto-radio clears its siblings up to the next
+        WS_GROUP, so without it picking an experiment would also put out the
+        selected mode.
+        """
+        self._add_control(
+            ident, "BUTTON", label,
+            BS_AUTORADIOBUTTON | (win32con.WS_GROUP if first else 0),
+            MARGIN + INDENT, y, PANEL_WIDTH - 2 * MARGIN - INDENT, ROW,
+        )
+        return y + ROW
+
     def _add_check(self, ident: int, label: str, y: int, *, bold: bool = False) -> int:
         hwnd = self._add_control(ident, "BUTTON", label, BS_AUTOCHECKBOX,
                                  MARGIN, y, PANEL_WIDTH - 2 * MARGIN, ROW)
@@ -676,9 +715,11 @@ class ControlPanel:
         for index, (key, _label, _flag) in enumerate(CLAIM_PATTERNS):
             self._set_check(ID_CLAIM_BASE + index, key == pattern)
         self._set_check(ID_COLLECT_DATA, state.get("collect_data", False))
+        armed = set(state.get("experiments", ()) or ())
+        self._set_check(ID_EXPERIMENT_AB, bool(state.get("ab_experiment", False)))
         for index, spec in enumerate(EXPERIMENTS):
-            self._set_check(ID_EXPERIMENT_BASE + index,
-                            bool(state.get(spec.key, False)))
+            self._set_check(ID_EXPERIMENT_BASE + 1 + index, spec.key in armed)
+        self._set_text(ID_EXPERIMENT_NOTE, experiment_note(armed))
         purchase = state.get("purchase", {})
         for index, (key, _label, default) in enumerate(PURCHASE_BOXES):
             self._set_check(ID_PURCHASE_BASE + index, purchase.get(key, default))
@@ -831,9 +872,12 @@ class ControlPanel:
                 self._on_toggle("restart_when_stuck", self._get_check(ident))
             elif ident == ID_COLLECT_DATA:
                 self._on_toggle("collect_data", self._get_check(ident))
-            elif ID_EXPERIMENT_BASE <= ident < ID_EXPERIMENT_BASE + len(EXPERIMENTS):
-                spec = EXPERIMENTS[ident - ID_EXPERIMENT_BASE]
-                self._on_toggle(spec.key, self._get_check(ident))
+            elif ident == ID_EXPERIMENT_AB:
+                self._on_toggle("ab_experiment", self._get_check(ident))
+            elif ID_EXPERIMENT_BASE < ident <= ID_EXPERIMENT_BASE + len(EXPERIMENTS):
+                spec = EXPERIMENTS[ident - ID_EXPERIMENT_BASE - 1]
+                self._on_toggle("experiment",
+                                (spec.key, bool(self._get_check(ident))))
             elif ident == ID_RETURN_HEART:
                 self._on_toggle("return_heart", self._get_check(ident))
             elif ident == ID_AUTO_UPDATE:

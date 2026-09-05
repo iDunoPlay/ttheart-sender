@@ -110,6 +110,44 @@ vars:
   reject_model: ""
   reject_floor: 0.10
 
+  # `chain_model` -- PICK THE CHAIN THE GAME WILL ACCEPT, NOT THE LONGEST ONE.
+  #
+  # The bot has always sorted candidates by (is_base, length). Over 7,352
+  # proposed members the game accepts 97.9% of first members and 19.1% of
+  # sevenths, and once it refuses one it refuses 86% of what follows -- so
+  # longest-first optimises the end of the chain that does not survive.
+  #
+  # This scores each candidate as EXPECTED ACCEPTED MEMBERS and plays the best.
+  # Offline, on rounds the model never trained on: the per-member model reads
+  # 0.876 AUC against `adjacency`'s 0.500, the expected total is calibrated
+  # (predicted 2.274 against 2.310 actually accepted), and re-ranking is worth
+  # +0.109 accepted members a press -- which survives being scored by a second,
+  # independently trained model, so it is not an argmax flattering itself.
+  #
+  # NEVER PLAYED. +0.109 on 2.31 is +4.7%, and this corpus needs ~136 rounds an
+  # arm to resolve that on accepted-per-press, ~204 on `cleared`. OFF; set to
+  # models/chain.onnx to arm it, revert by clearing the line. Watch accepted
+  # members per press and `cleared`; the board filter is the reminder that a
+  # good offline number is not a good round.
+  chain_model: ""
+  chain_bonus: 0.0
+
+  # A/B: alternate one option between rounds, one on and the next off.
+  # `ab` names the play option to alternate and `ab_off` is the value it takes
+  # on its OFF rounds; the ON value is whatever that option is already set to
+  # above. Empty = no A/B, which is the default and the baseline.
+  #
+  # To run the board-filter experiment: set `reject_model` to
+  # models/reject.onnx, `ab` to reject_model, and leave `ab_off` empty. Revert
+  # by clearing `ab`.
+  #
+  # The arm is chosen INSIDE the play loop, not here, so no flow hop can drop
+  # it -- and it records itself, because what changes is the option's own
+  # value and every sample carries the whole option set. Read the result with
+  # `scripts/ab_eval.py`.
+  ab: ""
+  ab_off: ""
+
   # `settle_board` -- WAIT FOR THE BOARD, NOT FOR THE WHOLE SCREEN.
   #
   # Aimed at the biggest number in a round, which nobody had measured until
@@ -118,10 +156,16 @@ vars:
   # board to stop moving. Detection is 17% of a round. Everything after the
   # decision is 83%.
   #
-  # And throughput is what scores. Over the five rounds that have both a score
-  # and telemetry, score tracks CHAINS PLAYED (r=+0.91) and not mean chain
-  # length (r=+0.06) -- so more chains per round is the objective, and this
-  # wait is what caps it.
+  # THE PREMISE ABOVE DID NOT SURVIVE. It read: "score tracks CHAINS PLAYED
+  # (r=+0.91) and not mean chain length (r=+0.06), so more chains per round is
+  # the objective". That was five rounds. Over the 140 scored rounds of the
+  # clean single-build baseline of 2026-09-05 it FLIPS SIGN -- chains played
+  # correlates -0.17 with score, cleared +0.77 and FEVER +0.73. More chains per
+  # round is not the objective, and the five-round number was noise.
+  #
+  # Left armed and documented rather than deleted: the wait itself is still the
+  # biggest slice of a round, and this may yet pay for a reason other than the
+  # one it was proposed for. It is simply no longer next in line.
   #
   # The wait compares two whole frames. The score counter ticks, the round
   # timer runs and the FEVER meter fills -- continuously, and all of them
@@ -166,13 +210,32 @@ vars:
   # 60 takes real tsums out of the middle of chains.
   bowl_reject: 40
 
-  # On a `verify_reach` check, rebuild the chain from what the game marked
-  # instead of only trimming the proposal to it. WIRED TO THE TRAY BOX
-  # "Rebuild chains from marks", which is why it stays a variable.
-  # It beats the trim -- 22 of 22 added members cleared, +5.7 to +6.3% at three
-  # different reading costs -- but it is INERT while `verify_reach` is 0,
-  # because there is no check to rebuild from. Turn that back to 260 first.
-  verify_extend: false
+  # `verify_extend` -- REBUILD A CHECKED CHAIN FROM WHAT THE GAME MARKED,
+  # instead of only trimming it. Rides on the `verify_reach` check that is
+  # already paid for, so it costs no capture of its own.
+  #
+  # ON, and this is where it stops being an experiment. It was the panel's
+  # "Rebuild chains from marks" box and it was ticked for **248 consecutive
+  # rounds** -- every round in docs/DATASET-FINDINGS.md from the twenty-ninth
+  # onward. When the panel became a radio group, choosing any other experiment
+  # silently unticked it, and the 18 rounds that followed are the only ones
+  # ever played without it.
+  #
+  # WHAT THOSE 18 ROUNDS SAY, and it is not what the clear rate suggests:
+  #     clear rate     76.5% on  vs  61.8% off   p=0.009   REAL
+  #     tsums CLEARED  272   on  vs  259.5 off   p=0.49    no difference
+  #     tsums dragged  372   on  vs  403   off   p=0.11
+  #     score          508k  on  vs  387k  off   p=0.25
+  # It does not clear more. It drags LESS for the same clears, so the rate
+  # moves because the denominator falls. On score -- the objective, per the
+  # thirtieth round -- 18 rounds cannot tell.
+  #
+  # It is here rather than in the radio because it was on for the whole
+  # corpus, so it IS the baseline: leaving it as one experiment among five
+  # meant every other experiment silently turned it off as well, and no
+  # comparison after that could say which change it was measuring. Revert by
+  # editing this line, the way `fit_effort` is reverted. Round 35.
+  verify_extend: true
 
   # Reach in px past which a chain is checked against the game's marks before
   # being dragged. 0 turns every check off, and the rebuild with it.
@@ -285,6 +348,10 @@ steps:
         character_min_visible: "${character_min_visible}"
         reject_model: "${reject_model}"
         reject_floor: "${reject_floor}"
+        ab: "${ab}"
+        ab_off: "${ab_off}"
+        chain_model: "${chain_model}"
+        chain_bonus: "${chain_bonus}"
   - find_click:
       template: cancel_button
       timeout: 6.5
