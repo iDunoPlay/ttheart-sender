@@ -154,7 +154,7 @@ def test_a_collected_round_writes_its_own_conditions(monkeypatch, tmp_path):
     chain = tsum.Chain(kind=1, colour=(0, 0, 0), nodes=[0, 1, 2])
     centres = np.tile(np.array([[50.0, 130.0, 190.0]], np.float32), (12, 1))
 
-    monkeypatch.setattr(tsum, "_settle", lambda drv, max_wait=0.0: frame)
+    monkeypatch.setattr(tsum, "_settle", lambda drv, max_wait=0.0, tol=2.5, region=None, out=None: frame)
     monkeypatch.setattr(tsum, "detect", lambda crop, **kw: (tsums, 24.0, centres))
     monkeypatch.setattr(tsum, "find_chains", lambda *a, **kw: [chain])
     monkeypatch.setattr(tsum, "purity_filter",
@@ -266,7 +266,7 @@ def test_a_measuring_round_hands_over_its_own_answer(monkeypatch, tmp_path):
                        r=24.0, kind=1, colour=(0, 0, 0)) for i in range(30)]
     chain = tsum.Chain(kind=1, colour=(0, 0, 0), nodes=[0, 1, 2])
 
-    monkeypatch.setattr(tsum, "_settle", lambda drv, max_wait=0.0: frame)
+    monkeypatch.setattr(tsum, "_settle", lambda drv, max_wait=0.0, tol=2.5, region=None, out=None: frame)
     monkeypatch.setattr(tsum, "detect",
                         lambda crop, **kw: (tsums, 24.0, np.zeros((12, 3), np.float32)))
     monkeypatch.setattr(tsum, "find_chains", lambda *a, **kw: [chain])

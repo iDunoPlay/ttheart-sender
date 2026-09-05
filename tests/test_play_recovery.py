@@ -60,7 +60,7 @@ def board(monkeypatch):
              for i in range(30)]
     chain = tsum.Chain(kind=1, colour=(0, 0, 0), nodes=[0, 1, 2])
 
-    monkeypatch.setattr(tsum, "_settle", lambda drv, max_wait=0.0: frame)
+    monkeypatch.setattr(tsum, "_settle", lambda drv, max_wait=0.0, tol=2.5, region=None, out=None: frame)
     monkeypatch.setattr(tsum, "detect",
                         lambda crop, **kw: (tsums, 25.0, np.zeros((12, 3), np.float32)))
     monkeypatch.setattr(tsum, "find_chains", lambda *a, **kw: [chain])

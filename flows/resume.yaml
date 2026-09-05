@@ -41,13 +41,15 @@ vars:
   # per-frame colour fit gets (3 = the steadiest measured, and the default
   # since the thirteenth round; 1 reverts, and this line is where you do it --
   # it has no panel box, deliberately); `verify_clears` re-reads the board
-  # after each drag to count what actually left it, for no extra capture;
-  # `verify_extend` rebuilds a checked chain from what the game marked
-  # instead of only trimming it. The last two are the panel's "Measure tsums
-  # cleared" and "Rebuild chains from marks" boxes, and the tray overrides
-  # those two only.
+  # after each drag to count what actually left it, for no extra capture, and
+  # is ON EVERYWHERE -- it is the ruler every rule in play.yaml is priced with,
+  # and a `false` here silently overrides play.yaml's `true` on the way down.
+  # That is not hypothetical: it is why ~50 collected rounds came back with no
+  # `cleared` at all. `verify_extend` rebuilds a checked chain from what the
+  # game marked instead of only trimming it, and is the panel's "Rebuild chains
+  # from marks" box -- the only one of these the tray still overrides.
   fit_effort: 3
-  verify_clears: false
+  verify_clears: true
   verify_extend: false
 
 steps:

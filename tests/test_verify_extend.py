@@ -92,7 +92,7 @@ def board(monkeypatch):
                  for (x, y), k in zip(pts, kinds)]
         return tsums, 25.0, np.zeros((12, 3), np.float32)
 
-    monkeypatch.setattr(tsum, "_settle", lambda drv, max_wait=0.0: frame)
+    monkeypatch.setattr(tsum, "_settle", lambda drv, max_wait=0.0, tol=2.5, region=None, out=None: frame)
     monkeypatch.setattr(tsum, "detect", detect)
     monkeypatch.setattr(tsum, "find_chains",
                         lambda *a, **kw: [tsum.Chain(1, (0, 0, 0), list(CHAIN))])

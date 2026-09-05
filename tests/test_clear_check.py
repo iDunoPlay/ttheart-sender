@@ -111,7 +111,7 @@ class Templates:
 
 def _run_loop(monkeypatch, before, after, tsums, nodes, **over):
     chain = tsum.Chain(kind=1, colour=(0, 0, 0), nodes=list(nodes))
-    monkeypatch.setattr(tsum, "_settle", lambda drv, max_wait=0.0: before)
+    monkeypatch.setattr(tsum, "_settle", lambda drv, max_wait=0.0, tol=2.5, region=None, out=None: before)
     monkeypatch.setattr(tsum, "detect",
                         lambda crop, **kw: (tsums, 24.0, np.zeros((12, 3), np.float32)))
     monkeypatch.setattr(tsum, "find_chains", lambda *a, **kw: [chain])

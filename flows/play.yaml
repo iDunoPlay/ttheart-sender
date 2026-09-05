@@ -50,6 +50,115 @@ vars:
   # Try 4. Revert to 0. Costs ~2ms a frame. Rounds 23-24.
   kinds: 0
 
+  # `character` -- NAME THE CHARACTER INSTEAD OF CLUSTERING ITS COLOUR.
+  #
+  # A classifier trained on 3,791 hand-labelled crops, held out by session:
+  # 97.5% accurate on the 15 well-populated classes. What it replaces is a
+  # per-frame k-means `kind`, which agrees with the game about a confirmed
+  # partner 37% of the time. That is not a tuning difference.
+  #
+  # HYBRID, and that is the safety of it. A crop the model is unsure of keeps
+  # the k-means `kind` it already had, so a character nobody has labelled plays
+  # exactly as it does today and a labelled one plays better. Costs ~11ms on a
+  # 46-tsum board against a ~100ms decision.
+  #
+  # WHAT IT CANNOT DO, measured against the game's own marks over 94 sessions
+  # no labelled crop came from: above 0.55 visible it agrees with the confirmed
+  # character 74% of the time, and BELOW 0.55 it is at the 12.5% chance rate --
+  # at unchanged confidence the whole way down. `character_min_visible` is what
+  # holds that line; do not lower it without re-running scripts/mark_probe.py.
+  # The median detection on a board shows 0.41, so this names about a fifth of
+  # it and leaves the rest to k-means on purpose.
+  #
+  # OFF until a round says otherwise -- this has never been played, and the
+  # thirtieth round found score turns on FEVER share rather than on clear rate,
+  # so a better identity may not move the score at all. Set the path to arm it;
+  # revert to "". Requires models/character.onnx (+ .json), built by
+  # `scripts/classify.py --split random --onnx models/character.onnx`.
+  # Round 31.
+  character: ""
+  character_confidence: 0.85
+  character_min_visible: 0.55
+
+  # `reject_model` -- DROP DETECTIONS THAT ARE BOARD, NOT A TSUM.
+  #
+  # The player's own report: some detections "shouldn't be detected as it is
+  # background or unknown object, which is invalid for the gameplay". A false
+  # detection carries a `kind` like any other, so `adjacency` will chain it and
+  # the stroke passes over empty bowl -- a chain slot spent on nothing, and one
+  # more `dragged` that never clears.
+  #
+  # Trained on 705 crops labelled `board` on purpose. The label is clean: over
+  # the whole corpus the game marked 0.0% of them and none was ever a chain
+  # head. Held out by session it reads 0.998 AUC and drops ~2% of a board.
+  #
+  # WHAT IT COST TO GET RIGHT, because the failure is not obvious. The board is
+  # printed with empty tsum-shaped SLOTS, and a tsum the game has linked is
+  # drawn as a flat SILHOUETTE -- same outline, same flat fill. Trained on
+  # `board` alone the net scored 1.000 AUC and threw away game-confirmed tsums
+  # at 20.8% against 16.6%. Marked detections had to be harvested as positives
+  # before its rejections stopped being enriched for real tsums.
+  #
+  # WHAT IS STILL UNKNOWN. After that fix its rejections are confirmed by the
+  # game 15.4% of the time against a 17.2% base rate -- no longer harmful, and
+  # only just better than chance. That test can rule a filter OUT and cannot
+  # certify one, so this is where the offline work stops.
+  #
+  # OFF. Set to models/reject.onnx to arm it; revert to "". Watch `dragged`
+  # falling while `cleared` holds, which is the whole claim. If `cleared` falls
+  # with it, it is eating real tsums -- revert. Round 34.
+  reject_model: ""
+  reject_floor: 0.10
+
+  # `settle_board` -- WAIT FOR THE BOARD, NOT FOR THE WHOLE SCREEN.
+  #
+  # Aimed at the biggest number in a round, which nobody had measured until
+  # now. Over 26 logged rounds the gap between one chain and the next averages
+  # 839ms: 144ms of it is thinking and 695ms is the stroke and the wait for the
+  # board to stop moving. Detection is 17% of a round. Everything after the
+  # decision is 83%.
+  #
+  # And throughput is what scores. Over the five rounds that have both a score
+  # and telemetry, score tracks CHAINS PLAYED (r=+0.91) and not mean chain
+  # length (r=+0.06) -- so more chains per round is the objective, and this
+  # wait is what caps it.
+  #
+  # The wait compares two whole frames. The score counter ticks, the round
+  # timer runs and the FEVER meter fills -- continuously, and all of them
+  # OUTSIDE the board -- so it can sit at its 0.9s cap long after the tsums
+  # have stopped falling. `cleared_by_drag` already records this about
+  # whole-frame diffs; this applies the same fix to the wait.
+  #
+  # OFF until a round says otherwise, and the round now reports the number to
+  # judge it on: `waited Ns for the board to settle (Nms a drag, N% hit the
+  # cap)`. Watch for `played N chains` rising. If chains rise but `cleared %`
+  # falls, it is dragging on a board still in motion -- revert to false.
+  settle_board: false
+
+  # `step_px` -- HOW FAR THE CURSOR MOVES BETWEEN INTERPOLATION STEPS.
+  #
+  # The second throughput lever, after `settle_board`. The stroke sleeps
+  # `per_step` (4ms) at every step, and a step is `step_px` along the path -- so
+  # a 4-member chain with ~90px legs walks ~38 steps and spends ~165ms sleeping
+  # before any of the other per-step cost. Doubling this halves that.
+  #
+  # WHY IT IS WORTH A LOOK. Measured over 21 rounds that recorded clears:
+  #     clears/second vs CHAINS/second      r = +0.978
+  #     clears/second vs mean chain length  r = +0.169
+  # Throughput is the whole of it, and chain length is a wash -- longer chains
+  # clear more per drag at a worse rate and the two cancel (clear% vs length
+  # r = -0.733). So the way to clear more is more drags per second, and 83% of
+  # a drag cycle is the stroke and the settle wait.
+  #
+  # NOT the same risk as `per_step`. Slowing per_step is what the stall
+  # detector does when a drag fails to register, and it self-corrects. A step
+  # that is too LONG fails differently: the drag still registers, but the
+  # pointer can skip past a tsum, so members go unaccepted and nothing says so.
+  # WHAT TO WATCH: `cleared N (M%)` must HOLD. If chains rise and the clear
+  # share falls, the stroke is skipping members -- revert to 8.
+  # Try 12 before 16. Revert to 8.
+  step_px: 8
+
   # Throw away detections that landed on the bowl rather than on a tsum, by Lab
   # distance from the board's own colour. 0 = off.
   # 40 RATHER THAN 60 BECAUSE A PLAYED ROUND SAID SO: offline f1 puts 60 a
@@ -167,8 +276,15 @@ steps:
         fit_effort: "${fit_effort}"
         verify_reach: "${verify_reach}"
         verify_clears: "${verify_clears}"
+        settle_board: "${settle_board}"
+        step_px: "${step_px}"
         verify_extend: "${verify_extend}"
         kinds: "${kinds}"
+        character: "${character}"
+        character_confidence: "${character_confidence}"
+        character_min_visible: "${character_min_visible}"
+        reject_model: "${reject_model}"
+        reject_floor: "${reject_floor}"
   - find_click:
       template: cancel_button
       timeout: 6.5

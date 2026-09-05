@@ -14,6 +14,7 @@ ttheart_sender/config.py for the exact rule.
 from __future__ import annotations
 
 import argparse
+import re
 import shutil
 import subprocess
 import sys
@@ -22,6 +23,26 @@ from typing import List
 
 ROOT = Path(__file__).resolve().parent
 NAME = "ttheart-sender"
+
+
+def _version() -> str:
+    """The version, read as text rather than imported.
+
+    ``ttheart_sender/version.py`` is deliberately import-free so setuptools can
+    read the literal without executing it, and this reads it the same way --
+    importing the package here would pull in its dependencies just to build.
+    """
+    src = (ROOT / "ttheart_sender" / "version.py").read_text(encoding="utf-8")
+    m = re.search(r"""^__version__\s*=\s*['"]([^'"]+)['"]""", src, re.M)
+    return m.group(1) if m else "unknown"
+
+
+#: What a one-file build is called. The version is in the FILE NAME rather than
+#: only inside the binary, because a lone .exe is the thing that gets copied to
+#: another machine -- and two of them side by side in a downloads folder are
+#: otherwise indistinguishable. That is not hypothetical here: rounds were
+#: collected on a build that predated a fix, and nothing about the file said so.
+ONEFILE_NAME = f"{NAME}_v{_version()}"
 ENTRY = ROOT / "ttheart_tray.py"
 ICON = ROOT / "ttheart_sender" / "tray" / "assets" / "tray-running.ico"
 
@@ -52,7 +73,7 @@ def build(*, onefile: bool, console: bool, clean: bool, with_data: bool = False)
         "PyInstaller",
         "--noconfirm",
         "--name",
-        NAME,
+        ONEFILE_NAME if onefile else NAME,
         "--onefile" if onefile else "--onedir",
         "--console" if console else "--windowed",
         "--distpath",
@@ -96,7 +117,8 @@ def build(*, onefile: bool, console: bool, clean: bool, with_data: bool = False)
     target = (ROOT / "dist" / f"{NAME}-portable") if onefile else (ROOT / "dist" / NAME)
     target.mkdir(parents=True, exist_ok=True)
     if onefile:
-        shutil.move(str(ROOT / "dist" / f"{NAME}.exe"), str(target / f"{NAME}.exe"))
+        shutil.move(str(ROOT / "dist" / f"{ONEFILE_NAME}.exe"),
+                    str(target / f"{ONEFILE_NAME}.exe"))
     # A one-file build is meant to be one file, so the editable copies are
     # opt-in there -- emitting them by default would recreate the very folder
     # the user asked to get rid of.
@@ -121,7 +143,7 @@ def _copy_editable_data(target: Path) -> None:
 
 
 def _report(target: Path, onefile: bool, with_data: bool) -> None:
-    exe = target / f"{NAME}.exe"
+    exe = target / f"{ONEFILE_NAME if onefile else NAME}.exe"
     size = exe.stat().st_size / (1024 * 1024) if exe.exists() else 0.0
     print("\n" + "=" * 66)
     print(f"Built {exe}  ({size:.1f} MB)")

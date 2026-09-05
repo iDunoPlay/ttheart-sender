@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import threading
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence
 
 from ..exceptions import TTHeartError
 from .modes import DEFAULT_MODE, MODES, Mode, get_mode
@@ -75,12 +75,65 @@ STUCK_CHECK_VAR = "stuck_check"
 #: the round came back unmeasurable. One home: the flow.
 
 #: Flow variable behind "Rebuild chains from marks" -- `play_tsum`'s
-#: `verify_extend`. Rides on the `verify_reach` check that is already being
-#: paid for and spends its answer on the partners the game named as well as
-#: the ones it refused. A play rule, and an unproven one: it assumes the game
-#: accepts a member it marked, which `verify_clears` in the flow is
-#: what measures.
+#: `verify_extend`.
 VERIFY_EXTEND_VAR = "verify_extend"
+
+
+class Experiment(NamedTuple):
+    """One unproven play rule, and the two values its tick box chooses between.
+
+    **What belongs here is exactly what a played round has not yet settled.**
+    A rule the rounds have decided gets one home in `flows/*.yaml` and no box
+    -- `fit_effort` and `verify_clears` are both here in spirit and neither is
+    in this table, for the reason written above them: the panel has the last
+    word in `_variables()`, so a settled setting that is ALSO sent from the
+    tray cannot be reverted by editing the flow. The revert would appear to do
+    nothing, silently, and only when driven from the tray.
+
+    The value is not always a boolean, because a flow variable is not always a
+    switch. `step_px` picks between two distances and `kinds` between two group
+    counts; the box still reads as on/off because that is the only question
+    being asked of it -- run the round the new way, or the way every number in
+    docs/DATASET-FINDINGS.md was taken.
+    """
+
+    key: str        #: the PanelSettings field and the panel-state key
+    var: str        #: the flow variable it writes
+    on: Any         #: value sent when the box is ticked
+    off: Any        #: value sent when it is not -- the flow's own default
+    label: str      #: what the box says
+    note: str       #: what a round should show if it is working
+
+
+#: Every switch under "Experiments" in the panel, in the order they appear.
+#:
+#: Deliberately NOT including the character model. It is measured, and the
+#: measurement is that it loses: -10.9% tsums cleared per drag, because naming
+#: the fifth of a board it can read splits characters whose buried members keep
+#: a colour id. See docs/IDENTITY.md. A box for it would invite a round to be
+#: spent re-finding that.
+EXPERIMENTS: tuple = (
+    Experiment(
+        "rebuild_chains", VERIFY_EXTEND_VAR, True, False,
+        "Rebuild chains from marks",
+        "chains the marks rebuilt, and whether they cleared"),
+    Experiment(
+        "board_filter", "reject_model", "models/reject.onnx", "",
+        "Skip detections that are board",
+        "`dragged` falling while `cleared` holds"),
+    Experiment(
+        "settle_board", "settle_board", True, False,
+        "Wait for the board, not the screen",
+        "`played` rising; revert if `cleared %` falls with it"),
+    Experiment(
+        "fast_stroke", "step_px", 12, 8,
+        "Faster stroke",
+        "`played` rising; revert if drags start failing"),
+    Experiment(
+        "four_groups", "kinds", 4, 0,
+        "Force 4 colour groups",
+        "`cleared %` rising"),
+)
 
 
 class RunState(Enum):
@@ -103,6 +156,7 @@ class AutomationService:
         claim_pattern: str = CLAIM_PATTERN_DEFAULT,
         restart_when_stuck: bool = False,
         rebuild_chains: bool = False,
+        experiments: Optional[Dict[str, bool]] = None,
         on_change: Optional[Callable[[], None]] = None,
         on_notify: Optional[Callable[[str, str, bool], None]] = None,
     ) -> None:
@@ -115,7 +169,15 @@ class AutomationService:
         )
         self._claim_pattern = normalize_claim_pattern(claim_pattern)
         self._restart_when_stuck = bool(restart_when_stuck)
-        self._rebuild_chains = bool(rebuild_chains)
+        # One dict rather than a field per switch: adding an experiment should
+        # be a row in EXPERIMENTS, not five edits across three files, and a
+        # switch that exists in the table but nowhere else is the failure this
+        # avoids.
+        self._experiments: Dict[str, bool] = {
+            e.key: bool(experiments.get(e.key, False)) if experiments else False
+            for e in EXPERIMENTS
+        }
+        self._experiments["rebuild_chains"] = bool(rebuild_chains)
         self._state = RunState.IDLE
         #: What the live run is called -- the mode's label, or "Buy tsum" for
         #: a one-off job, so the panel can say what it is waiting on.
@@ -242,27 +304,44 @@ class AutomationService:
         self._on_change()
         return True
 
-    @property
-    def rebuild_chains(self) -> bool:
+    def experiment(self, key: str) -> bool:
+        """Is this experiment armed?"""
         with self._lock:
-            return self._rebuild_chains
+            return bool(self._experiments.get(key, False))
 
-    def set_rebuild_chains(self, enabled: bool) -> bool:
-        """Arm or disarm rebuilding checked chains from the game's marks.
+    def set_experiment(self, key: str, enabled: bool) -> bool:
+        """Arm or disarm one experiment. A live run keeps what it started with.
 
-        Only ever fires on a drag that already bought a `verify_reach` check,
-        so it costs no capture of its own -- and, like the rest, a live run
-        keeps the variables it started with.
+        Returns False when nothing changed, so a repaint driven by the panel
+        does not loop back through `_on_change`.
         """
+        spec = next((e for e in EXPERIMENTS if e.key == key), None)
+        if spec is None:
+            log.warning("unknown experiment %r -- ignored", key)
+            return False
         enabled = bool(enabled)
         with self._lock:
-            if self._rebuild_chains is enabled:
+            if self._experiments.get(key) is enabled:
                 return False
-            self._rebuild_chains = enabled
-        log.info("Rebuild chains from marks %s (%s=%s)",
-                 "on" if enabled else "off", VERIFY_EXTEND_VAR, enabled)
+            self._experiments[key] = enabled
+        log.info("%s %s (%s=%s)", spec.label, "on" if enabled else "off",
+                 spec.var, spec.on if enabled else spec.off)
         self._on_change()
         return True
+
+    @property
+    def experiments(self) -> Dict[str, bool]:
+        with self._lock:
+            return dict(self._experiments)
+
+    @property
+    def rebuild_chains(self) -> bool:
+        """Kept as its own name because it predates the table and the panel,
+        the settings file and several tests all say `rebuild_chains`."""
+        return self.experiment("rebuild_chains")
+
+    def set_rebuild_chains(self, enabled: bool) -> bool:
+        return self.set_experiment("rebuild_chains", enabled)
 
 
     def set_return_heart(self, enabled: bool) -> bool:
@@ -322,13 +401,20 @@ class AutomationService:
 
     def _variables(self) -> Optional[Dict[str, Any]]:
         """Overrides for the next run. The panel always has the last word."""
+        armed = self.experiments
         return {
             PLAY_CHANCE_VAR: self._chance(),
             RETURN_HEART_VAR: self.return_heart,
             RETURN_HEART_MINUTES_VAR: self.return_heart_minutes,
             CLAIM_ALL_VAR: claim_all_flag(self.claim_pattern),
             STUCK_CHECK_VAR: self.restart_when_stuck,
-            VERIFY_EXTEND_VAR: self.rebuild_chains,
+            # Every experiment sends a value either way, never only when armed.
+            # Sending nothing when off would leave the flow's own default in
+            # place, which happens to be the same value today -- and would stop
+            # being so the moment a default changed, turning an unticked box
+            # into a silent opt-in.
+            **{e.var: (e.on if armed.get(e.key) else e.off)
+               for e in EXPERIMENTS},
         }
 
     def start(self) -> bool:

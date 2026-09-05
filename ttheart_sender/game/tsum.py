@@ -587,6 +587,25 @@ def _face_lab(bgr: np.ndarray, tsums: Sequence["Tsum"], radius: float,
     return out
 
 
+#: Least of a tsum that must be showing before the character model is asked.
+#:
+#: **The training set's own rule, which the runtime never knew.** `crops.py`
+#: wrote its crops at `v >= 0.55` and every one of the 3,791 labelled crops is
+#: above it, while the median detection on a real board shows 0.41 -- so 78% of
+#: the board is a picture the model has not seen a single example of.
+#:
+#: Asked anyway, it does not hedge. Measured against the game's own marks over
+#: 94 sessions no labelled crop came from, it agrees with the character the
+#: game confirmed 74% of the time above 0.55 and 0-28% below it, against a
+#: 12.5% chance rate -- at a mean confidence of 0.75-0.88 the whole way down.
+#: Confidence does not fall where competence does, so `--character-confidence`
+#: alone cannot catch this and never could.
+#:
+#: Below the floor a tsum keeps its k-means `kind`, which agrees with the game
+#: 37% of the time. That is not good, but it is more than twice what the model
+#: manages there, and it does not arrive dressed as certainty.
+CHARACTER_MIN_VISIBLE = 0.55
+
 #: Where a character id starts, so it cannot collide with a k-means `kind`.
 #: The two live in the same field on purpose -- `adjacency` and `find_chains`
 #: ask only whether two `kind`s are equal, so a character id drops in without
@@ -631,17 +650,152 @@ CHARACTER_BATCH = 64
 _CHARACTER_CACHE: dict = {}
 
 
-def load_character_model(path, confidence: float) -> "CharacterModel":
+def load_character_model(path, confidence: float,
+                         min_visible: float = CHARACTER_MIN_VISIBLE
+                         ) -> "CharacterModel":
     """The shared model for this path, loaded at most once per process."""
-    key = (str(path), round(float(confidence), 4))
+    key = (str(path), round(float(confidence), 4), round(float(min_visible), 4))
     model = _CHARACTER_CACHE.get(key)
     if model is None:
-        model = CharacterModel(path, confidence)
+        model = CharacterModel(path, confidence, min_visible)
         _CHARACTER_CACHE[key] = model
     # Counters are per round, the net is not.
-    model.named = model.seen = 0
+    model.named = model.seen = model.buried = 0
     model.failed = ""
     return model
+
+
+def _character_crop(bgr, t, radius: float, size: int):
+    """The picture a crop-trained model was shown, or None.
+
+    Must match `scripts/crops.py` exactly -- window 1.0 radii, saved at 64px,
+    and REFUSED when the frame edge would clip it. A crop the edge clips is a
+    sliver stretched to a square, which the training set excluded; feeding one
+    in at play time asks the model about a picture it has never seen one
+    example of.
+
+    Module level, and shared by every model that reads a crop, so a change to
+    the rule cannot reach one of them and not the other.
+    """
+    half = max(4, int(round(radius)))
+    h, w = bgr.shape[:2]
+    x0, y0 = int(t.x) - half, int(t.y) - half
+    x1, y1 = int(t.x) + half + 1, int(t.y) + half + 1
+    if x0 < 0 or y0 < 0 or x1 > w or y1 > h:
+        return None
+    patch = bgr[y0:y1, x0:x1]
+    if patch.size == 0 or min(patch.shape[:2]) < 4:
+        return None
+    # 64 then `size`, not straight to `size`: the training crops were written
+    # to disk at 64 and upsampled from there, and a single resize would hand
+    # the model a sharper image than it ever trained on.
+    small = cv2.resize(patch, (64, 64), interpolation=cv2.INTER_AREA)
+    return cv2.resize(small, (size, size), interpolation=cv2.INTER_LINEAR)
+
+
+class RejectModel:
+    """Drops detections that are the board rather than a tsum.
+
+    The player labelled 705 crops `board` on purpose, and the label is clean:
+    across the whole corpus the game marked **0.0%** of them and none was ever
+    a chain head. A patch of bowl cannot be confirmed as a character, so that
+    zero is what a real negative looks like. Trained on it, held out by
+    session, the net reads 0.998 AUC.
+
+    **What it cannot settle, and neither can anyone.** The board is printed
+    with empty tsum-shaped SLOTS, and a tsum the game has linked into a chain
+    is drawn as a flat SILHOUETTE -- same outline, same flat fill, same dark
+    border. From one 64px square they are the same picture. Trained on `board`
+    alone the net threw away game-confirmed tsums at 20.8% against 16.6% for
+    the ones it kept; the marks are what fixed it, harvested as positives so
+    the linked state is labelled rather than inferred from an outline it
+    shares with the board.
+
+    After that, its rejections are confirmed by the game at 15.4% against a
+    17.2% base rate -- no longer enriched for real tsums, but only just below
+    chance. **That test can rule a filter out and cannot certify one**, which
+    is why this ships off and a played round decides.
+    """
+
+    #: Below this the detection is dropped. Chosen from the measured trade
+    #: rather than rounded to a half: at 0.10 the model rejects 2.2% of a board
+    #: and those are the least likely to be real; raising it rejects more and
+    #: the ones it adds are progressively more often confirmed tsums.
+    FLOOR = 0.10
+
+    def __init__(self, path, floor: float = FLOOR):
+        meta = json.loads(Path(str(path)).with_suffix(".json")
+                          .read_text(encoding="utf-8"))
+        self.net = cv2.dnn.readNetFromONNX(str(path))
+        self.size = int(meta.get("size", 96))
+        self.mean = np.asarray(meta.get("mean", [0.485, 0.456, 0.406]), np.float32)
+        self.std = np.asarray(meta.get("std", [0.229, 0.224, 0.225]), np.float32)
+        self.floor = float(floor)
+        self.seen = self.dropped = 0
+        self.failed = ""
+
+    def keep(self, bgr: np.ndarray, tsums: Sequence["Tsum"],
+             radius: float) -> list["Tsum"]:
+        """The detections worth playing, in their original order.
+
+        A crop the frame edge clips is KEPT, not dropped. The model has never
+        seen one, and refusing a tsum at the board's rim because the picture
+        of it is awkward would quietly shrink the playable board -- the same
+        mistake `CharacterModel` made by being asked about crops the training
+        set had excluded.
+        """
+        if self.net is None or not tsums:
+            return list(tsums)
+        self.seen += len(tsums)
+        idx, batch = [], []
+        for i, t in enumerate(tsums):
+            c = _character_crop(bgr, t, radius, self.size)
+            if c is not None:
+                idx.append(i)
+                batch.append(c)
+        if not batch:
+            return list(tsums)
+        blob = np.stack(batch).astype(np.float32) / 255.0
+        blob = (blob - self.mean) / self.std
+        blob = np.ascontiguousarray(blob.transpose(0, 3, 1, 2), dtype=np.float32)
+        try:
+            outs = []
+            for i in range(0, len(blob), CHARACTER_BATCH):
+                chunk = blob[i:i + CHARACTER_BATCH]
+                n = len(chunk)
+                if n < CHARACTER_BATCH:
+                    pad = np.zeros((CHARACTER_BATCH,) + chunk.shape[1:], np.float32)
+                    pad[:n] = chunk
+                    chunk = pad
+                self.net.setInput(np.ascontiguousarray(chunk))
+                outs.append(np.asarray(self.net.forward(), np.float32)[:n].copy())
+            logits = np.concatenate(outs)
+        except cv2.error as exc:
+            # Off for the rest of the round rather than taking the round with
+            # it, and said once: a filter that quietly stops filtering looks
+            # exactly like one that was never on.
+            self.failed = str(exc)
+            self.net = None
+            return list(tsums)
+        if logits.ndim != 2 or logits.shape[0] != len(batch):
+            self.failed = f"model returned {logits.shape} for {len(batch)} crops"
+            self.net = None
+            return list(tsums)
+        logits = logits - logits.max(axis=1, keepdims=True)
+        prob = np.exp(logits)
+        prob /= prob.sum(axis=1, keepdims=True)
+        drop = {i for i, p in zip(idx, prob[:, 1]) if float(p) < self.floor}
+        self.dropped += len(drop)
+        return [t for i, t in enumerate(tsums) if i not in drop]
+
+    def summary(self) -> str:
+        if not self.seen:
+            return ""
+        out = (f"board filter dropped {self.dropped}/{self.seen} detections "
+               f"({self.dropped / self.seen:.0%}) below {self.floor:.2f}")
+        if self.failed:
+            out += f" -- SWITCHED OFF mid-round: {self.failed}"
+        return out
 
 
 class CharacterModel:
@@ -664,7 +818,25 @@ class CharacterModel:
     decision. No new dependency: OpenCV is already bundled.
     """
 
-    def __init__(self, path, confidence: float = 0.85):
+    #: Least of a tsum that must be showing before the model is asked at all.
+    #: See :data:`CHARACTER_MIN_VISIBLE`.
+    #:
+    #: **This is the training set's own rule, which the runtime never knew.**
+    #: `crops.py` wrote its crops at `v >= 0.55` and every one of the 3,791
+    #: labelled crops is above it, while the median detection on a real board
+    #: shows 0.41 -- so 78% of the board is a picture the model has not seen a
+    #: single example of. Asked anyway, it does not hedge: measured against the
+    #: game's own marks on 94 sessions no labelled crop came from, it agrees
+    #: with the character the game confirmed 74% of the time above 0.55 and
+    #: 0-28% below it, against a 12.5% chance rate -- at a mean confidence of
+    #: 0.75-0.88 the whole way down. Confidence does not fall where competence
+    #: does, so `confidence` alone cannot catch this and never could.
+    #:
+    #: Below the floor the tsum keeps its k-means `kind`, which agrees with the
+    #: game 37% of the time. That is not good, but it is more than twice what
+    #: the model manages there, and it does not come dressed as certainty.
+    def __init__(self, path, confidence: float = 0.85,
+                 min_visible: float = CHARACTER_MIN_VISIBLE):
         meta_path = Path(str(path)).with_suffix(".json")
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         self.net = cv2.dnn.readNetFromONNX(str(path))
@@ -673,6 +845,11 @@ class CharacterModel:
         self.mean = np.asarray(meta.get("mean", [0.485, 0.456, 0.406]), np.float32)
         self.std = np.asarray(meta.get("std", [0.229, 0.224, 0.225]), np.float32)
         self.confidence = float(confidence)
+        self.min_visible = float(min_visible)
+        #: Counted so the end-of-round line can say how much of the board was
+        #: never offered to the model, rather than lumping it in with crops it
+        #: saw and declined.
+        self.buried = 0
         #: Counted per round and reported, because a model that names nothing
         #: is indistinguishable from one that is switched off.
         self.named = 0
@@ -681,29 +858,14 @@ class CharacterModel:
         self.failed = ""
 
     def _crop(self, bgr, t, radius):
-        """The same picture the training set held, or None.
+        """The picture the training set held, or None.
 
-        Must match `scripts/crops.py` exactly -- window 1.0 radii, saved at
-        64px, and REFUSED when the frame edge would clip it. A crop the edge
-        clips is a sliver stretched to a square, which the training set
-        excluded; feeding one in at play time asks the model about a picture
-        it has never seen a single example of.
+        Delegates to :func:`_character_crop`, which `RejectModel` also uses:
+        both are trained on crops written by the same extractor, so a change to
+        the window, the 64px round trip or the edge refusal must reach both or
+        neither.
         """
-        half = max(4, int(round(radius)))
-        h, w = bgr.shape[:2]
-        x0, y0 = int(t.x) - half, int(t.y) - half
-        x1, y1 = int(t.x) + half + 1, int(t.y) + half + 1
-        if x0 < 0 or y0 < 0 or x1 > w or y1 > h:
-            return None
-        patch = bgr[y0:y1, x0:x1]
-        if patch.size == 0 or min(patch.shape[:2]) < 4:
-            return None
-        # 64 then `size`, not straight to `size`: the training crops were
-        # written to disk at 64 and upsampled from there, and a single resize
-        # would hand the model a sharper image than it ever trained on.
-        small = cv2.resize(patch, (64, 64), interpolation=cv2.INTER_AREA)
-        return cv2.resize(small, (self.size, self.size),
-                          interpolation=cv2.INTER_LINEAR)
+        return _character_crop(bgr, t, radius, self.size)
 
     def probabilities(self, bgr: np.ndarray, tsums: Sequence["Tsum"],
                       radius: float) -> tuple[list[int], np.ndarray]:
@@ -717,7 +879,13 @@ class CharacterModel:
         """
         if self.net is None:
             return [], np.zeros((0, 0), np.float32)
-        usable = [(i, self._crop(bgr, t, radius)) for i, t in enumerate(tsums)]
+        # The visibility floor first, so a buried tsum is never cropped, never
+        # batched and never scored. Refusing it here rather than discarding its
+        # answer later is what keeps the two counters meaning different things.
+        showing = [(i, t) for i, t in enumerate(tsums)
+                   if radius <= 0 or t.r / radius >= self.min_visible]
+        self.buried += len(tsums) - len(showing)
+        usable = [(i, self._crop(bgr, t, radius)) for i, t in showing]
         usable = [(i, c) for i, c in usable if c is not None]
         self.seen += len(tsums)
         if not usable:
@@ -783,6 +951,10 @@ class CharacterModel:
         out = (f"character model named {self.named}/{self.seen} detections "
                f"({self.named / self.seen:.0%}); the rest kept their colour "
                f"cluster")
+        if self.buried:
+            out += (f", {self.buried} of them never asked "
+                    f"({self.buried / self.seen:.0%} under "
+                    f"{self.min_visible:.2f} visible)")
         if self.failed:
             out += f" -- SWITCHED OFF mid-round: {self.failed}"
         return out
@@ -1763,6 +1935,25 @@ class PlayReport:
     """
 
     played: int = 0
+    #: Time spent waiting for the board to stop moving, and how often that wait
+    #: hit its cap. Measured because it is the biggest number in a round and
+    #: nobody had looked: over 26 logged rounds the gap between chains averages
+    #: 839ms, of which only 144ms is thinking. The other 695ms is the stroke
+    #: and this wait, and until they are separated neither can be tuned.
+    settle_s: float = 0.0
+    settles: int = 0
+    settle_timeouts: int = 0
+    #: Frames read while FEVER was up, and frames read at all.
+    #:
+    #: THE NUMBER THE SCORE ACTUALLY TURNS ON. Over 15 rounds carrying both a
+    #: score and telemetry, score tracks the share of a round spent in FEVER at
+    #: r=+0.81, and mean chain length at r=-0.01. The two catastrophic rounds
+    #: in that set -- 9,841 and 25,065 against a normal 600-900k -- are the two
+    #: that never entered FEVER at all. Nothing in the loop optimised for it and
+    #: nothing reported it, so a round could collapse by two orders of magnitude
+    #: with every other number looking ordinary.
+    fever_frames: int = 0
+    frames: int = 0
     #: Total tsums dragged through. Not a result: with the clear check off it
     #: is the length of the chains proposed, and the game rejects some of them
     #: outright -- a 3-chain it only marks two of pops nothing at all.
@@ -1817,6 +2008,14 @@ class PlayReport:
             # is the waste, and it is the only figure here worth tuning for.
             share = f" ({100 * self.cleared / self.dragged:.0f}%)" if self.dragged else ""
             chains += f", cleared {self.cleared}{share}"
+        if self.frames:
+            chains += (f", FEVER on {100 * self.fever_frames / self.frames:.0f}% "
+                       f"of frames")
+        if self.settles:
+            cap = (f", {100 * self.settle_timeouts / self.settles:.0f}% hit the cap"
+                   if self.settle_timeouts else "")
+            chains += (f", waited {self.settle_s:.0f}s for the board to settle "
+                       f"({1000 * self.settle_s / self.settles:.0f}ms a drag{cap})")
         out = f"{chains}, {self.stalled} drag(s) did not register"
         if self.rejected:
             out += f", {self.rejected} the game would not accept"
@@ -2454,7 +2653,8 @@ def walk_path(points: Sequence[tuple[int, int]], *, step_px: float = 8.0,
     return walked
 
 
-def _settle(drv: Driver, *, max_wait: float, tol: float = 2.5):
+def _settle(drv: Driver, *, max_wait: float, tol: float = 2.5,
+            region: Optional[tuple] = None, out: Optional[dict] = None):
     """Wait for the board to stop moving, then return the frame it stopped on.
 
     Cleared tsums drop and the pile collapses; detecting mid-fall gives
@@ -2462,15 +2662,45 @@ def _settle(drv: Driver, *, max_wait: float, tol: float = 2.5):
     costs ~5ms, so this is faster than any fixed delay big enough to be safe --
     it returns the instant the board is still. Capped, because FEVER animates
     continuously and would otherwise wait forever.
+
+    `region` restricts the comparison to the board. It matters more than it
+    looks: measured over 26 logged rounds, **83% of a round is stroke and
+    waiting and only 17% is thinking**, so this wait -- not detection -- is
+    what sets how many chains a round gets to play. And :func:`cleared_by_drag`
+    already records why a whole-frame diff is the wrong instrument for asking
+    whether the BOARD moved: "the score counter ticks, the timer runs, the
+    FEVER meter fills and idle tsums jiggle, so the mean across the crop clears
+    the threshold whether or not anything popped." Every one of those lives
+    outside the board rect, and each of them can hold this at its cap while the
+    tsums have long since stopped falling.
+
+    `out` collects what it did -- `waited`, and whether it `timed_out` -- so a
+    round can report the cost instead of leaving it to be guessed at.
     """
-    frame = prev = drv.grab()
-    deadline = time.perf_counter() + max_wait
+    started = time.perf_counter()
+
+    def view(f):
+        if region is None:
+            return f
+        x, y, w, h = region
+        return f[y:y + h, x:x + w]
+
+    frame = drv.grab()
+    prev = view(frame)
+    deadline = started + max_wait
     while time.perf_counter() < deadline:
         drv.check_stop()
         frame = drv.grab()
-        if float(np.mean(cv2.absdiff(frame, prev))) < tol:
+        now = view(frame)
+        if float(np.mean(cv2.absdiff(now, prev))) < tol:
+            if out is not None:
+                out["waited"] = time.perf_counter() - started
+                out["timed_out"] = False
             return frame
-        prev = frame
+        prev = now
+    if out is not None:
+        out["waited"] = time.perf_counter() - started
+        out["timed_out"] = True
     return frame  # timed out: the newest frame is still the best guess
 
 
@@ -2682,13 +2912,29 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
 
     # Loaded here, with the palette, so a bad path fails before a round starts
     # rather than in the middle of one.
+    rejector = None
+    if getattr(opts, "reject_model", ""):
+        try:
+            rejector = RejectModel(opts.reject_model,
+                                   float(getattr(opts, "reject_floor",
+                                                 RejectModel.FLOOR)))
+            say(f"    board filter: dropping detections below "
+                f"{rejector.floor:.2f}")
+        except (OSError, ValueError, KeyError, cv2.error) as exc:
+            raise SystemExit(
+                f"could not load --reject-model {opts.reject_model}: {exc}")
+
     characters = None
     if getattr(opts, "character", ""):
         try:
+            min_visible = float(getattr(opts, "character_min_visible",
+                                        CHARACTER_MIN_VISIBLE))
             characters = load_character_model(opts.character,
-                                              opts.character_confidence)
+                                              opts.character_confidence,
+                                              min_visible)
             say(f"    character model: {len(characters.classes)} classes, "
                 f"naming above {opts.character_confidence:.2f} confidence "
+                f"and {min_visible:.2f} visible "
                 f"({', '.join(characters.classes[:6])}"
                 f"{'...' if len(characters.classes) > 6 else ''})")
         except (OSError, ValueError, KeyError, cv2.error) as exc:
@@ -2776,12 +3022,21 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
     #: Set when the last pass ended without touching the board, so the next one
     #: can skip waiting for movement that cannot have happened.
     no_settle = False
+    #: Filled in from the first frame and reused: the board does not move.
+    settle_rect: Optional[tuple] = None
 
     try:
         while True:
             drv.check_stop()
-            frame = (drv.grab() if opts.dry_run or palette is None or no_settle
-                     else _settle(drv, max_wait=opts.settle))
+            if opts.dry_run or palette is None or no_settle:
+                frame = drv.grab()
+            else:
+                probe_settle: dict = {}
+                frame = _settle(drv, max_wait=opts.settle, out=probe_settle,
+                                region=settle_rect if opts.settle_board else None)
+                report.settle_s += probe_settle.get("waited", 0.0)
+                report.settles += 1
+                report.settle_timeouts += bool(probe_settle.get("timed_out"))
             no_settle = False
 
             # Asked before anything on this frame is touched: once the round is
@@ -2841,6 +3096,9 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
                 if locked is None:
                     radius = opts.radius
             bx, by, bw, bh = _board_rect(frame.shape, opts.board, fever=fever.active)
+            settle_rect = (bx, by, bw, bh)
+            report.frames += 1
+            report.fever_frames += bool(fever.active)
             crop = frame[by:by + bh, bx:bx + bw]
 
             # A measured layout knows the tsum size outright, so there is
@@ -2954,6 +3212,13 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
                         say(f"    no radius lock yet after {unlocked_frames} frames "
                             f"below {opts.radius_cover:.2f} coverage -- "
                             f"running unlocked (lower --radius-cover to change that)")
+
+            # BEFORE identity and before any chain is built: a detection that
+            # is board is not a tsum of any character, and leaving it in place
+            # to be grouped and then chained is what spends a chain slot on a
+            # stroke over empty bowl.
+            if rejector is not None:
+                tsums = rejector.keep(crop, tsums, radius)
 
             if characters is not None:
                 characters.apply(crop, tsums, radius)
@@ -3455,17 +3720,26 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
         say(f"stopped -- {report.describe()}")
         raise
     finally:
+        # BEFORE the close, and that ordering is the whole point: `close()`
+        # writes `round.json` from this report, and the assignment used to sit
+        # after the `finally` block. Every round record ever written therefore
+        # said `played: 0` while the log line beside it said 89 chains, and
+        # anything derived from it -- mean chain length, chains per second,
+        # the throughput half of every score correlation -- was silently
+        # taken against a zero.
+        report.played = played
         # An aborted round's samples are as good as a finished one's, so the
         # file is closed on every way out rather than only the tidy one.
         if samples is not None:
-            samples.close()
+            samples.close(report)
             if samples.summary():
                 say(samples.summary())
 
-    report.played = played
     say(report.describe())
     if characters is not None and characters.summary():
         say("    " + characters.summary())
+    if rejector is not None and rejector.summary():
+        say("    " + rejector.summary())
     return report
 
 
@@ -5670,6 +5944,24 @@ def add_play_args(play, *, merge_default: bool):
                            "at -- a wrong name is worse than no name, because "
                            "`adjacency` believes it and a chain dies at its "
                            "first wrong member")
+    play.add_argument("--reject-model", default="",
+                      help="ONNX that says whether a detection is a tsum at "
+                           "all, dropping the ones that are board. Trained on "
+                           "705 crops a person labelled `board`, verified "
+                           "against the game's own marks: it confirmed 0.0%% "
+                           "of them. Empty by default -- see flows/play.yaml")
+    play.add_argument("--reject-floor", type=float, default=RejectModel.FLOOR,
+                      help="drop a detection whose probability of being a tsum "
+                           "is below this")
+    play.add_argument("--character-min-visible", type=float,
+                      default=CHARACTER_MIN_VISIBLE,
+                      help="least of a tsum that must be showing before the "
+                           "model is asked at all. The labelled crops are ALL "
+                           "above 0.55 and the median board detection shows "
+                           "0.41, so below the floor the model is answering "
+                           "about pictures it has no example of -- and it does "
+                           "so at full confidence, which is why the softmax "
+                           "floor above cannot catch it. 0 asks about everything")
     play.add_argument("--recolour", type=float, default=0.0,
                       help="re-decide identity by sampling each FACE once and "
                            "merging groups closer than this in Lab, instead of "
@@ -5705,6 +5997,19 @@ def add_play_args(play, *, merge_default: bool):
                            "3.23 at 6 -- an interior optimum, +4.6%% at its "
                            "best against a paired 2 s.e. of 0.047. Real, and "
                            "small. Try 4. Costs ~2ms a frame",
+                      )
+    play.add_argument("--settle-board", action="store_true",
+                      help="wait only for the BOARD to stop moving, not the "
+                           "whole screen. The score counter, the timer and the "
+                           "FEVER meter animate continuously and all sit "
+                           "outside the board, so a whole-frame wait can hold "
+                           "at its cap long after the tsums have stopped "
+                           "falling -- and that wait is the biggest number in "
+                           "a round: 83%% of the gap between chains is stroke "
+                           "and waiting, against 17%% thinking. Score tracks "
+                           "CHAINS PLAYED (r=+0.91 over five rounds), not "
+                           "chain length, so this is aimed at the thing that "
+                           "scores. OFF until a round says otherwise",
                       )
     play.add_argument("--purity", type=float, default=35.0,
                       help="drop chain members whose colour is this far (Lab) "

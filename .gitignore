@@ -45,3 +45,7 @@ desktop.ini
 # keeping.
 /models/*.onnx
 /models/*.pt
+# ...and the sidecar that carries a model's class order and held-out sessions.
+# Useless without the weights beside it, and actively misleading committed on
+# its own: it names 26 classes for a file nobody has.
+/models/character.json

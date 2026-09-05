@@ -127,7 +127,7 @@ def rig(monkeypatch):
         """Play `frames` frames, turning FEVER on before frame `arm_at`."""
         seen = {"n": 0}
         frame = np.zeros(shape, np.uint8)
-        monkeypatch.setattr(tsum, "_settle", lambda drv, max_wait=0.0: frame)
+        monkeypatch.setattr(tsum, "_settle", lambda drv, max_wait=0.0, tol=2.5, region=None, out=None: frame)
 
         def stop_when(_frame):
             seen["n"] += 1

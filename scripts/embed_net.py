@@ -255,11 +255,11 @@ def augment(b, train: bool):
     return b.clamp(0.0, 1.0)
 
 
-def as_batch(crops, idx, size, mean, std, train):
+def as_batch(crops, idx, size, mean, std, train, dev=None):
     import torch
     import torch.nn.functional as F
 
-    b = torch.from_numpy(crops[idx]).float().permute(0, 3, 1, 2) / 255.0
+    b = torch.from_numpy(crops[idx]).to(dev).float().permute(0, 3, 1, 2) / 255.0
     b = augment(b, train)
     if size != CROP:
         b = F.interpolate(b, size=(size, size), mode="bilinear", align_corners=False)
@@ -296,6 +296,13 @@ def main() -> int:
                          "sessions is a shape that memorises rounds: the first "
                          "attempt scored +10%% on sessions it had trained on "
                          "and -6.6%% on ones it had not")
+    ap.add_argument("--device", default="auto",
+                    help="auto | cpu | cuda. `auto` takes the GPU when the "
+                         "installed torch has CUDA in it -- the default wheel "
+                         "is CPU-only and will silently train on 8 threads "
+                         "while an idle GPU sits beside it. Play-time "
+                         "inference is `cv2.dnn` on CPU either way; this only "
+                         "moves training.")
     ap.add_argument("--sessions", type=int, default=0,
                     help="train on only this many sessions, for a data-scaling "
                          "curve. 0 uses all of them")
@@ -306,6 +313,14 @@ def main() -> int:
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
+    dev = torch.device(
+        "cuda" if (args.device == "auto" and torch.cuda.is_available())
+        else "cpu" if args.device == "auto" else args.device)
+    if dev.type == "cuda":
+        print(f"device: {torch.cuda.get_device_name(0)}")
+    else:
+        why = "" if torch.version.cuda else "  (this torch is a CPU-only build)"
+        print(f"device: cpu{why}")
 
     crops, pairs, sess = build(args.dir, args.aura, args.tol, args.cache,
                                args.seed)
@@ -337,16 +352,16 @@ def main() -> int:
     print(f"{len(uniq)} sessions -> {len(uniq) - n_test} train / {n_test} test")
     print(f"{int(tr.sum())} train pairs, {int(te.sum())} test pairs")
 
-    mean = torch.tensor([0.485, 0.456, 0.406])
-    std = torch.tensor([0.229, 0.224, 0.225])
-    net = build_net(args.backbone, args.dim)
+    mean = torch.tensor([0.485, 0.456, 0.406], device=dev)
+    std = torch.tensor([0.229, 0.224, 0.225], device=dev)
+    net = build_net(args.backbone, args.dim).to(dev)
     opt = torch.optim.Adam(net.parameters(), lr=args.lr,
                            weight_decay=args.weight_decay)
     tr_pairs = pairs[tr]
     te_pairs = pairs[te]
 
     def embed(idx, train):
-        return net(as_batch(crops, idx, args.size, mean, std, train))
+        return net(as_batch(crops, idx, args.size, mean, std, train, dev))
 
     def evaluate():
         net.eval()
@@ -356,7 +371,7 @@ def main() -> int:
                 p = te_pairs[i:i + 256]
                 a = embed(p[:, 0], False)
                 b = embed(p[:, 1], False)
-                sims.append((a * b).sum(1).numpy())
+                sims.append((a * b).sum(1).cpu().numpy())
                 same.append(p[:, 2])
         if not sims:
             return 0.0
@@ -383,7 +398,7 @@ def main() -> int:
             a = embed(p[:, 0], True)
             b = embed(p[:, 1], True)
             sim = (a * b).sum(1)
-            y = torch.from_numpy(p[:, 2]).float()
+            y = torch.from_numpy(p[:, 2]).to(dev).float()
             # Positives pulled to 1; negatives pushed below `margin` and then
             # left alone, so the loss stops spending on pairs already apart.
             loss = (y * (1.0 - sim)
@@ -422,14 +437,14 @@ def main() -> int:
     torch.save(net.state_dict(), pt)          # BEFORE export: the exporter has
     print(f"weights -> {pt}")                 # killed a finished run before
 
-    net.eval()
+    net.eval().cpu()          # ONNX export and cv2.dnn are CPU-side
     dummy = torch.zeros(BATCH_FIXED, 3, args.size, args.size)
     torch.onnx.export(net, dummy, str(args.out), dynamo=False,
                       input_names=["x"], output_names=["e"], opset_version=17)
     args.out.with_suffix(".json").write_text(json.dumps({
         "dim": args.dim, "size": args.size, "batch": BATCH_FIXED,
         "window": WINDOW, "crop": CROP,
-        "mean": mean.tolist(), "std": std.tolist(),
+        "mean": mean.cpu().tolist(), "std": std.cpu().tolist(),
         "auc": round(float(best), 4),
         # The sessions this net never saw. Written here rather than left to be
         # recomputed, because any later evaluation that scores it on a training

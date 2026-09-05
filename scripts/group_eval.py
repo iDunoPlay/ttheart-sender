@@ -58,6 +58,7 @@ import argparse
 import json
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 
 import cv2
@@ -162,7 +163,7 @@ class Embedder:
 
 def methods(bgr, tsums, radius, saved_kind, model, embedder=None):
     """Every candidate's id-per-tsum for one board."""
-    n = len(tsums)
+    n = n_tsums = len(tsums)      # `n` is rebound below; `n_tsums` is not
     out = {"kmeans": np.asarray(saved_kind, np.int64)}
 
     lab = T._face_lab(bgr, tsums, radius)
@@ -174,6 +175,16 @@ def methods(bgr, tsums, radius, saved_kind, model, embedder=None):
     out["grid5"] = kgroups(grid, GROUPS)
     out["grid6"] = kgroups(grid, 6)
 
+    if model is None:
+        if embedder is not None:
+            emb, keep = embedder.embed(bgr, tsums, radius)
+            if emb is not None:
+                for k in (3, 4, 5):
+                    ids = np.full(n, UNKNOWN, np.int64)
+                    ids[keep] = kgroups(emb, k)
+                    out[f"embed{k}"] = ids
+        return out, 0
+
     idx, prob = model.probabilities(bgr, tsums, radius)
     # `named`: the production rule -- rename where sure, else keep the cluster.
     named = np.asarray(saved_kind, np.int64).copy()
@@ -182,6 +193,37 @@ def methods(bgr, tsums, radius, saved_kind, model, embedder=None):
         if float(p[b]) >= model.confidence:
             named[i] = T.CHARACTER_KIND + b
     out["named"] = named
+
+    # `merge`: use the model to JOIN k-means clusters, never to rename a tsum.
+    #
+    # `named` renames the crops the model is sure of and leaves the rest with
+    # their cluster id, which SPLITS a character in two -- its visible members
+    # get a character id and its buried ones keep a colour id. That shows up
+    # directly as ids/board rising above k-means', and a chain needs its
+    # group to be whole far more than it needs the group to be correctly
+    # named. This does the opposite: a cluster gets one vote for whichever
+    # character its confident members agree on, and clusters voting for the
+    # same character become one. It can only ever REDUCE the id count, and it
+    # asks the model nothing about a tsum it cannot see.
+    votes = {}
+    for i, p in zip(idx, prob):
+        b = int(p.argmax())
+        if float(p[b]) >= model.confidence:
+            votes.setdefault(int(saved_kind[i]), Counter())[b] += 1
+    winner = {}
+    for cluster, tally in votes.items():
+        (best, top), = tally.most_common(1)
+        # A split vote is a cluster holding two characters, not a cluster with
+        # a noisy label. Merging on a plurality would then drag a second
+        # character in behind the first.
+        if top >= 2 and top >= 0.75 * sum(tally.values()):
+            winner[cluster] = best
+    merged = np.asarray(saved_kind, np.int64).copy()
+    for i in range(n_tsums):
+        c = int(saved_kind[i])
+        if c in winner:
+            merged[i] = T.CHARACTER_KIND + winner[c]
+    out["merge"] = merged
 
     # Fingerprint methods. sqrt of the softmax: the raw vector is spiky enough
     # that two crops of one character agreeing on the top class but differing
@@ -304,19 +346,34 @@ def main() -> int:
                          "it cannot see at all")
     args = ap.parse_args()
 
-    model = T.CharacterModel(args.model, args.confidence)
+    # The character model is a measured regression (-24%) and no longer ships,
+    # so its absence is the normal case rather than an error. Its rows are
+    # kept for as long as it is worth being able to reproduce that number.
+    model = None
+    if args.model and Path(args.model).exists():
+        model = T.CharacterModel(args.model, args.confidence)
+    else:
+        print(f"no character model at {args.model} -- skipping its rows")
     embedder = Embedder(args.embed) if args.embed else None
     only = None
     if args.held_out:
-        if not args.embed:
-            print("--held-out needs --embed: the split lives in the model")
+        # Either learned method's split will do, and both are stored inside
+        # their own artifact for exactly this. `--embed` wins when both are
+        # given, because the embedding rows are the ones that need it most --
+        # but the character model needs it just as badly, and requiring an
+        # embedding to score a classifier meant the classifier's rows were
+        # only ever measured on rounds it had trained on.
+        src = args.embed or args.model
+        if not src:
+            print("--held-out needs --embed or --model: the split lives in "
+                  "the artifact")
             return 1
-        meta = json.loads(args.embed.with_suffix(".json").read_text(encoding="utf-8"))
+        meta = json.loads(Path(src).with_suffix(".json").read_text(encoding="utf-8"))
         only = set(meta.get("test_sessions") or [])
         if not only:
-            print("that model records no test_sessions -- retrain to record them")
+            print(f"{src} records no test_sessions -- retrain to record them")
             return 1
-        print(f"held-out only: {len(only)} sessions the embedding never saw")
+        print(f"held-out only: {len(only)} sessions {Path(src).name} never saw")
     scores, boards, unread, total = {}, 0, 0, 0
     t0 = time.perf_counter()
 
@@ -371,11 +428,19 @@ def main() -> int:
         return 1
 
     print(f"{boards} boards, {total} tsums, {time.perf_counter() - t0:.0f}s")
-    print(f"{unread} crops ({unread / total:.1%}) the frame edge clipped -- "
-          f"unreadable, left ungrouped\n")
+    # Two different refusals, and they used to be reported as one. The frame
+    # edge clips a handful of crops at the board's rim; the visibility floor
+    # refuses the ~78% of a board that is buried, and that is the number worth
+    # seeing -- it is the ceiling on anything the model can contribute.
+    print(f"{unread} of {total} crops ({unread / total:.1%}) never reached the "
+          f"model: buried below {T.CHARACTER_MIN_VISIBLE:.2f} visible, or "
+          f"clipped by the frame edge.")
+    print(f"So it grouped {total - unread} ({1 - unread / total:.1%}) of the "
+          f"board, and a chain needs its whole group.")
+    print("")
     print("   method  agreement     base    lift  ids/grp  ids/board   cleared")
     print("   " + "-" * 66)
-    for name in ("kmeans", "named", "colour2", "colour3", "colour4", "colour5",
+    for name in ("kmeans", "named", "merge", "colour2", "colour3", "colour4", "colour5",
                  "colour6", "colour7", "grid5", "grid6", "model5", "both5",
                  "embed3", "embed4", "embed5"):
         if name in scores:
@@ -386,7 +451,7 @@ def main() -> int:
     base = np.asarray(scores["kmeans"].cleared, np.float64)
     print(f"\n  vs kmeans, same {len(base)} drags "
           f"(paired mean difference +/- 2 s.e.):")
-    for name in ("named", "colour3", "colour4", "colour5", "grid5", "model5",
+    for name in ("named", "merge", "colour3", "colour4", "colour5", "grid5", "model5",
                  "embed3", "embed4", "embed5"):
         if name not in scores:
             continue

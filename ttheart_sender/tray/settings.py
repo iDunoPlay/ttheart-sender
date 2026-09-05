@@ -156,7 +156,15 @@ class PanelSettings:
     #: -- replayed it clears +6% over the trim at an identical reading cost,
     #: in all three cost columns, but it rests on the game accepting a member
     #: it marked, and "Measure tsums cleared" has still not settled that.
+    #: The panel's "Experiments" switches. Every one of these is a play rule
+    #: no played round has settled yet, and every one ships OFF -- the value
+    #: each reverts to is the flow's own, which is what every number in
+    #: docs/DATASET-FINDINGS.md was measured under.
     rebuild_chains: bool = False
+    board_filter: bool = False
+    settle_board: bool = False
+    fast_stroke: bool = False
+    four_groups: bool = False
     purchase: Dict[str, bool] = field(default_factory=_default_purchase)
 
     # -- conversion ------------------------------------------------------

@@ -21,6 +21,7 @@ import win32con
 import win32gui
 
 from ..version import __version__
+from .service import EXPERIMENTS
 from .settings import (
     CLAIM_PATTERN_DEFAULT,
     CLAIM_PATTERNS,
@@ -50,7 +51,9 @@ ID_UPDATE = 2012
 ID_RESTART_STUCK = 2016
 ID_CLEAR_LOGS = 2017
 ID_CLEAR_DATA = 2018
-ID_REBUILD_CHAINS = 2021
+#: One id per row of `service.EXPERIMENTS`, so adding an experiment is a row
+#: in that table and nothing here. Based well clear of the fixed ids.
+ID_EXPERIMENT_BASE = 2600
 #: A label rather than a control, but it is rewritten on every refresh, so it
 #: needs an id to be found again.
 ID_UPDATE_STATUS = 2013
@@ -368,12 +371,19 @@ class ControlPanel:
         # separating from the toggles that only change how a round is played.
         y = self._add_check(ID_COLLECT_DATA, "Data collection", y, bold=True)
 
-        # The two switches under it are the ones a collection is currently
-        # being gathered to judge -- unproven by a played round, which is what
-        # "Experiments" says. They are here rather than with Auto Play because
+        # The switches under it are the ones a collection is currently being
+        # gathered to judge -- unproven by a played round, which is what
+        # "Experiments" means. They sit here rather than with Auto Play because
         # each is only worth turning on for a run that is also collecting: the
         # comparison is what makes them mean anything.
-        y = self._add_check(ID_REBUILD_CHAINS, "Rebuild chains from marks", y)
+        #
+        # ONE AT A TIME. They touch different parts of the pipeline and
+        # flipping two at once says nothing about which was at fault -- the
+        # house rule at the top of flows/play.yaml.
+        y += GAP
+        y = self._add_static("Experiments (one at a time)", y)
+        for index, spec in enumerate(EXPERIMENTS):
+            y = self._add_check(ID_EXPERIMENT_BASE + index, spec.label, y)
 
         y += SECTION_GAP
         y = self._add_line(y)
@@ -666,7 +676,9 @@ class ControlPanel:
         for index, (key, _label, _flag) in enumerate(CLAIM_PATTERNS):
             self._set_check(ID_CLAIM_BASE + index, key == pattern)
         self._set_check(ID_COLLECT_DATA, state.get("collect_data", False))
-        self._set_check(ID_REBUILD_CHAINS, bool(state.get("rebuild_chains", False)))
+        for index, spec in enumerate(EXPERIMENTS):
+            self._set_check(ID_EXPERIMENT_BASE + index,
+                            bool(state.get(spec.key, False)))
         purchase = state.get("purchase", {})
         for index, (key, _label, default) in enumerate(PURCHASE_BOXES):
             self._set_check(ID_PURCHASE_BASE + index, purchase.get(key, default))
@@ -819,8 +831,9 @@ class ControlPanel:
                 self._on_toggle("restart_when_stuck", self._get_check(ident))
             elif ident == ID_COLLECT_DATA:
                 self._on_toggle("collect_data", self._get_check(ident))
-            elif ident == ID_REBUILD_CHAINS:
-                self._on_toggle("rebuild_chains", self._get_check(ident))
+            elif ID_EXPERIMENT_BASE <= ident < ID_EXPERIMENT_BASE + len(EXPERIMENTS):
+                spec = EXPERIMENTS[ident - ID_EXPERIMENT_BASE]
+                self._on_toggle(spec.key, self._get_check(ident))
             elif ident == ID_RETURN_HEART:
                 self._on_toggle("return_heart", self._get_check(ident))
             elif ident == ID_AUTO_UPDATE:

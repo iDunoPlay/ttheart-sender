@@ -27,6 +27,7 @@ from ttheart_sender.tray.service import (
     RETURN_HEART_MINUTES_VAR,
     RETURN_HEART_VAR,
     STUCK_CHECK_VAR,
+    EXPERIMENTS,
     VERIFY_EXTEND_VAR,
     AutomationService,
     RunState,
@@ -45,15 +46,27 @@ DEFAULT_MARKS = list(RETURN_HEART_MINUTES_DEFAULT)
 
 
 def overrides(chance=PLAY_CHANCE_OFF, timed=False, marks=None, claim_all=False,
-              stuck_check=False, verify_extend=False):
-    """What a run started from the panel should be handed."""
+              stuck_check=False, verify_extend=False, **armed):
+    """What a run started from the panel should be handed.
+
+    Every experiment is present in the dict whether or not it is armed, and
+    that is the point of building the expectation from `EXPERIMENTS` rather
+    than listing the variables: an unticked box sends the flow's own default
+    explicitly. Sending nothing would leave whatever the flow declares, which
+    is the same value today and would stop being so the moment a default
+    changed -- turning an unticked box into a silent opt-in.
+
+    `verify_extend` keeps its own keyword because it predates the table and a
+    dozen tests already pass it by name.
+    """
+    armed.setdefault("rebuild_chains", verify_extend)
     return {
         PLAY_CHANCE_VAR: chance,
         RETURN_HEART_VAR: timed,
         RETURN_HEART_MINUTES_VAR: DEFAULT_MARKS if marks is None else list(marks),
         CLAIM_ALL_VAR: claim_all,
         STUCK_CHECK_VAR: stuck_check,
-        VERIFY_EXTEND_VAR: verify_extend,
+        **{e.var: (e.on if armed.get(e.key) else e.off) for e in EXPERIMENTS},
     }
 
 
@@ -966,6 +979,27 @@ def test_the_experiments_are_declared_and_forwarded_the_whole_chain(name):
             )
 
 
+@pytest.mark.parametrize("flow_name", ["play", "resume", "launch"])
+def test_the_ruler_is_on_in_every_flow_that_declares_it(flow_name):
+    """`verify_clears` must be TRUE in all of them, not just in play.yaml.
+
+    The flows chain -- launch runs resume runs play -- and each one passes its
+    own `verify_clears` down as an override. So `false` in launch.yaml silently
+    beat play.yaml's `true`, and because the tray starts launch or resume
+    rather than play, that was every tray-driven round. About 50 collected
+    rounds came back with no `cleared` in them at all: the one number every
+    rule in play.yaml is priced with, missing, with nothing saying so.
+
+    The test above checks the variable EXISTS in each flow, and that is exactly
+    what let this through. This one checks its value.
+    """
+    flow = load_flow_by_name(Config().flows_dir, flow_name)
+    assert flow.vars.get("verify_clears") is True, (
+        f"{flow_name}.yaml sets verify_clears="
+        f"{flow.vars.get('verify_clears')!r}; a false anywhere in the chain "
+        f"turns the measurement off in every flow downstream of it")
+
+
 def test_play_reads_both_experiments_from_its_own_variables():
     """The options `play_tsum` is handed, not merely the vars block."""
     flow = load_flow_by_name(Config().flows_dir, "play")
@@ -975,3 +1009,102 @@ def test_play_reads_both_experiments_from_its_own_variables():
     assert options.get("fit_effort") == "${fit_effort}"
     assert options.get("verify_clears") == "${verify_clears}"
     assert options.get("verify_extend") == "${verify_extend}"
+
+
+# --------------------------------------------------------------------------
+# Experiments
+# --------------------------------------------------------------------------
+def test_every_experiment_ships_off():
+    """A play rule ships off with a one-line revert, and the value it reverts
+    to is the flow's own -- which is what every number in
+    docs/DATASET-FINDINGS.md was measured under."""
+    app = FakeApp()
+    service = AutomationService(app)
+    for spec in EXPERIMENTS:
+        assert service.experiment(spec.key) is False, spec.key
+    service.start()
+    wait_for(lambda: service.state is RunState.IDLE)
+    for spec in EXPERIMENTS:
+        assert app.variables[0][spec.var] == spec.off, spec.key
+
+
+def test_an_unticked_box_sends_the_default_rather_than_nothing():
+    """Sending nothing would leave whatever the flow declares. That is the same
+    value today, and would stop being so the moment a default changed -- which
+    turns an unticked box into a silent opt-in nobody would see."""
+    app = FakeApp()
+    service = AutomationService(app)
+    service.start()
+    # Waited on properly: `start()` runs the flow off the calling thread, so a
+    # predicate that is already true returns before the run has recorded
+    # anything and leaves a live thread behind for the next test to trip over.
+    wait_for(lambda: service.state is RunState.IDLE)
+    for spec in EXPERIMENTS:
+        assert spec.var in app.variables[0], spec.var
+
+
+def test_each_experiment_reaches_its_own_flow_variable():
+    for spec in EXPERIMENTS:
+        app = FakeApp()
+        service = AutomationService(app)
+        assert service.set_experiment(spec.key, True) is True
+        assert service.set_experiment(spec.key, True) is False, "no-op re-tick"
+        service.start()
+        wait_for(lambda: service.state is RunState.IDLE)
+        assert app.variables[0][spec.var] == spec.on, spec.key
+        # ...and nothing else moved.
+        for other in EXPERIMENTS:
+            if other.key != spec.key:
+                assert app.variables[0][other.var] == other.off, other.key
+
+
+def test_an_unknown_experiment_is_ignored():
+    service = AutomationService(FakeApp())
+    assert service.set_experiment("no_such_switch", True) is False
+    assert "no_such_switch" not in service.experiments
+
+
+def test_a_live_run_keeps_the_experiment_it_started_with():
+    app = FakeApp(block=True)
+    service = AutomationService(app)
+    service.start()
+    app.entered.wait(5)
+    service.set_experiment("board_filter", True)
+    app.release.set()
+    wait_for(lambda: service.state is RunState.IDLE)
+    assert app.variables[0]["reject_model"] == ""
+    service.start()
+    wait_for(lambda: len(app.variables) == 2)
+    assert app.variables[1]["reject_model"] == "models/reject.onnx"
+
+
+def test_every_experiment_names_a_variable_the_flow_declares():
+    """A box that writes a variable `play.yaml` never reads is a box that does
+    nothing, and it would look exactly like one that does."""
+    import yaml
+    flow = yaml.safe_load(
+        (Config().flows_dir / "play.yaml").read_text(encoding="utf-8"))
+    for spec in EXPERIMENTS:
+        assert spec.var in flow["vars"], spec.var
+        assert flow["vars"][spec.var] == spec.off, (
+            f"{spec.var}: the flow's default and the box's off-value are the "
+            f"same setting and must not drift apart")
+
+
+def test_the_character_model_is_not_offered_as_an_experiment():
+    """It is measured, and the measurement is that it loses: -10.9% tsums
+    cleared per drag. See docs/IDENTITY.md. A box would invite a round to be
+    spent re-finding that."""
+    assert not any(spec.var == "character" for spec in EXPERIMENTS)
+
+
+def test_settled_rules_are_not_sent_by_the_tray():
+    """`_variables()` gives the panel the last word, so a settled setting that
+    is ALSO sent from here cannot be reverted by editing the flow -- the revert
+    would appear to do nothing, silently, and only from the tray."""
+    app = FakeApp()
+    service = AutomationService(app)
+    service.start()
+    wait_for(lambda: service.state is RunState.IDLE)
+    for settled in ("fit_effort", "verify_clears", "character"):
+        assert settled not in app.variables[0], settled

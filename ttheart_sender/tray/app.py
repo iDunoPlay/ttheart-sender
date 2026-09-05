@@ -25,7 +25,7 @@ from ..version import __version__
 from .icon import MenuItem, TrayIcon
 from .modes import DEFAULT_MODE, MODES
 from .panel import ControlPanel
-from .service import AutomationService, RunState
+from .service import EXPERIMENTS, AutomationService, RunState
 from ..housekeeping import clear_dataset, clear_logs
 from .settings import PanelSettings, settings_path
 from .updater import UpdateService
@@ -77,7 +77,8 @@ class TrayApp:
             return_heart_minutes=self._settings.return_heart_minutes,
             claim_pattern=self._settings.claim_pattern,
             restart_when_stuck=self._settings.restart_when_stuck,
-            rebuild_chains=self._settings.rebuild_chains,
+            experiments={e.key: bool(getattr(self._settings, e.key, False))
+                         for e in EXPERIMENTS},
             on_change=self._on_change,
             on_notify=self._on_notify,
         )
@@ -172,7 +173,7 @@ class TrayApp:
             "return_heart_minutes": self._service.return_heart_minutes,
             "claim_pattern": self._service.claim_pattern,
             "restart_when_stuck": self._service.restart_when_stuck,
-            "rebuild_chains": self._service.rebuild_chains,
+            **self._service.experiments,
             "purchase": dict(self._settings.purchase),
             "auto_update": self._settings.auto_update,
             "update_status": self._updater.status_text(),
@@ -202,9 +203,12 @@ class TrayApp:
         elif name == "restart_when_stuck":
             self._service.set_restart_when_stuck(value)
             self._settings.restart_when_stuck = self._service.restart_when_stuck
-        elif name == "rebuild_chains":
-            self._service.set_rebuild_chains(value)
-            self._settings.rebuild_chains = self._service.rebuild_chains
+        elif any(name == e.key for e in EXPERIMENTS):
+            # Read BACK off the service rather than storing `value`: the
+            # service is what a live run reads, and if it refused the change
+            # the settings file must not claim otherwise.
+            self._service.set_experiment(name, value)
+            setattr(self._settings, name, self._service.experiment(name))
         elif name == "auto_update":
             self._updater.set_auto(value)
             self._settings.auto_update = self._updater.auto

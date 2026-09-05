@@ -213,6 +213,8 @@ class DatasetWriter:
         #: `record` runs inside `after_press` of the very drag whose outcome
         #: arrives moments later. So take the first and refuse the rest.
         self._outcome_seen = False
+        #: When the session folder was opened, for the round record below.
+        self._started: Optional[float] = None
 
     # -- lifecycle -------------------------------------------------------
     def _open(self) -> bool:
@@ -239,6 +241,7 @@ class DatasetWriter:
             if not readme.exists() or readme.read_text(encoding="utf-8") != README:
                 readme.write_text(README, encoding="utf-8")
             self._file = (self.dir / "samples.jsonl").open("a", encoding="utf-8")
+            self._started = time.time()
             log.info("collecting detection samples into %s", self.dir)
             return True
         except OSError as exc:
@@ -319,13 +322,51 @@ class DatasetWriter:
             self._pending.update(fields)
             self._outcome_seen = True
 
-    def close(self) -> None:
+    def close(self, report: Any = None) -> None:
         self._flush()
         if self._file is not None:
             try:
                 self._file.close()
             finally:
                 self._file = None
+        self._write_round(report)
+
+    def _write_round(self, report: Any = None) -> None:
+        """One record per round, beside the samples it produced.
+
+        WHY THIS EXISTS. The results screen is saved by the flow and the
+        samples are written here, and until now nothing connected them -- the
+        score for a round could only be recovered by matching wall-clock times
+        by hand, which is not a pipeline. This writes the round's own totals
+        next to its samples, with the times that bound it, so a score can be
+        joined to a round mechanically and the join can say how close it was
+        rather than being assumed.
+
+        Best-effort like every other write here: a round must never be lost to
+        a failure in recording it.
+        """
+        if self.dir is None or self._started is None:
+            return
+        row: dict[str, Any] = {
+            "schema": SCHEMA,
+            "version": __version__,
+            "session": self.dir.name,
+            "started": round(self._started, 3),
+            "ended": round(time.time(), 3),
+            "samples": self.written,
+        }
+        for name in ("played", "dragged", "cleared", "checked", "rejected",
+                     "stalled", "trimmed", "abandoned", "verified",
+                     "settle_s", "settles", "settle_timeouts",
+                     "fever_frames", "frames", "reason"):
+            value = getattr(report, name, None) if report is not None else None
+            if value is not None:
+                row[name] = round(value, 3) if isinstance(value, float) else value
+        try:
+            (self.dir / "round.json").write_text(
+                json.dumps(row, indent=2), encoding="utf-8")
+        except OSError as exc:
+            log.debug("could not write round.json: %s", exc)
 
     # -- capture ---------------------------------------------------------
     def wants(self) -> bool:

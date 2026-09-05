@@ -2473,3 +2473,835 @@ been judged on `cleared`, a proxy for a score this project has never recorded,
 and the next thing built should not be a fourth. The question to answer is
 whether clearing more tsums scores more at all -- and it cannot be asked until
 the number stops being thrown away every round.
+
+## Twenty-sixth round: the link rule is weak, and the yardstick is broken
+
+Two findings, and the second one retracts things this document has been
+asserting.
+
+### `adjacency` is a poor predictor of what the game links
+
+`adjacency()` decides every edge the chain builder can use, from two hand-set
+numbers: `link_px` (105) and `block` (1.25). The game has answered the same
+question **80,417 times** in the corpus -- holding a tsum lights up what it will
+link to -- so the rule can be scored rather than assumed. Held out by session:
+
+| rule | AUC |
+|---|---:|
+| `adjacency` as it ships | **0.557** |
+| learned, geometry only | 0.691 |
+| learned, geometry + face colour | 0.714 |
+| learned, + a CNN over both crops | **0.794** |
+
+Geometry alone, learned from the same inputs the shipped rule uses, is worth
++0.134 AUC over the hand-set thresholds.
+
+**And appearance does carry signal here** -- +0.080 over colour -- which
+contradicts what the twenty-fifth round concluded. The difference is not the
+pictures, it is what is asked of them. Identity-by-clustering compounds a weak
+pair judgement into a partition and the errors multiply; a direct pairwise
+"will these two link" is used as-is. The same crops, at 32px, on 80k pairs
+instead of 10k, answer a question they can actually answer. 16 seconds on the
+GPU.
+
+### The gameplay metric does not survive its own sanity check
+
+Turning that into tsums cleared per drag went wrong twice, and the second time
+is disqualifying.
+
+**First**, the model scored **+44.8%** against today's rule -- until the
+candidate set was required to be *walkable*. A chain is a path: it hops tsum to
+tsum, so a partner is only usable if a route reaches it. Today's rule was being
+scored on a connected component while the model was scored on a free-floating
+set. Constrained to what a chain could actually draw, +44.8% becomes **-3.6%**.
+The entire gain was partners the chain can never reach.
+
+**Second**, and fatally: an ORACLE was added -- exactly the marked tsums
+reachable through marked tsums, which is what a perfect identity rule would
+offer and which nothing can beat. It scores **2.29 against today's 2.63**.
+
+A perfect rule cannot be worse than a guess. So the metric is wrong, not the
+oracle. The cause is that marks are a noisy, incomplete reading of the true
+same-character set -- they are detected at 8x a per-board noise floor and
+plainly miss members -- so the oracle is confined to a fragmented subset while
+`kind`, wrong 60% of the time, forms larger components that reach further
+across the board and pick up marked tsums along the way.
+
+### What this retracts
+
+`expected_cleared` over marks cannot rank linking rules, and both versions of
+it are affected:
+
+* **`kinds: 4` at +4.0% is withdrawn.** The partition-based score in rounds
+  23-24 said +4.0%; the reach-aware score here says -4.8%; and the reach-aware
+  score fails the oracle check. Two offline metrics disagree and neither is
+  sound, so the honest position is that **nothing offline knows whether `kinds`
+  helps**. It stays at 0 until a played round says otherwise.
+* The same caution applies to every `cleared/drag` figure in rounds 23-25. The
+  *rankings within one metric* were computed correctly; what is now in doubt is
+  whether the metric tracks a round.
+
+### What survives, and what to do
+
+The AUC results stand -- they are ordinary held-out classification, not a
+constructed gameplay proxy -- and they say the shipped link rule is weak.
+Nothing about that can be cashed in without a yardstick.
+
+Which is the point. Four vision models and three offline metrics have now been
+built on top of `cleared`, a proxy for a score this project has never recorded,
+and the only one that broke its own sanity check is the most carefully built of
+them. **The round is the only sound yardstick left**, and it is now
+instrumented: score capture, `verify_clears` fixed across the whole flow chain,
+and the settle cost reported per round.
+
+No further offline modelling until a played round provides ground truth.
+
+## Twenty-seventh round: throughput is the whole of it
+
+The eight rounds on v1.11.1b came back with `cleared` in them -- the first
+since the flow chain was fixed -- at **77.4%** over 474 dragged tsums, against
+68.4% across the older corpus. That is the measurement working again, not a
+gain: those rounds ran at the shipped settings.
+
+### The link model is real, checked against something it never saw
+
+The twenty-sixth round disqualified the mark-based gameplay metric, which left
+the link model unvalidated. `cleared` settles it: measured after the fact from
+the pixels, never used in training, and it cannot be gamed by proposing more,
+because the population is the members the bot ALREADY dragged -- all of them
+same-`kind` and adjacent, so anything that separates them is something the
+shipped rule does not know.
+
+Over 347 held-out drags, 1,222 dragged members, 65.3% of which cleared:
+
+| signal | AUC |
+|---|---:|
+| link model P(link) | **0.706** |
+| distance from the head | 0.679 |
+| position in the chain | 0.670 |
+| face colour distance | 0.568 |
+
+The model is real. It is also mostly geometry: distance alone is 0.679 of the
+0.706, and the face colour that four identity models were built on is 0.568.
+
+### The two curves that matter
+
+Over the whole corpus, 5,140 dragged members, 62.4% cleared:
+
+| distance from head | cleared | | position in chain | cleared |
+|---|---:|---|---|---:|
+| 0-60px | 82.8% | | 1st | 78.2% |
+| 60-105 | 76.6% | | 2nd | 72.0% |
+| 105-150 | 67.5% | | 3rd | 59.5% |
+| 150-200 | 54.4% | | 4th | 48.5% |
+| 200-260 | 46.8% | | 5th | 40.1% |
+| 260-320 | 39.8% | | 7th | 34.6% |
+| 400+ | 25.7% | | 10th | 30.0% |
+
+Both decay smoothly and neither has a knee, so there is no distance to cap at
+-- which is the answer to whether `verify_reach` should come back as a hard
+geometric limit. It should not.
+
+### What actually sets the score
+
+Twenty-one rounds recorded both a clear count and a measurable span:
+
+    clears/second  vs  CHAINS/second       r = +0.978
+    clears/second  vs  mean chain length   r = +0.169
+    clear %        vs  mean chain length   r = -0.733
+
+**Clears per second is chains per second, and nothing else.** Chain length is a
+wash: a longer chain clears more members at a worse rate and the two cancel
+almost exactly. That is an independent confirmation of the five-round score
+result (score vs chains played r=+0.91, vs mean length r=+0.06) on four times
+the rounds and a different measurement, and together they say the objective is
+throughput.
+
+Which puts the target where the twenty-fifth round's timing analysis already
+put it: **839ms between chains, of which 144ms is thinking**. Detection is 17%
+of a round. Every rule this project has tuned lives in that 17%.
+
+### Ruled out on the way
+
+Windows sleep granularity. `per_step` asks for 4ms and a plausible story was
+that the OS was rounding it up to 15, which would have accounted for the whole
+stroke on its own. Measured: 4.29ms for a requested 4.00ms, 1.1x across every
+interval tried. Not it.
+
+That leaves the 695ms split roughly between the stroke (~320ms for a mean
+chain: 38 interpolation steps, two holds) and the settle wait (~375ms).
+
+### What is staged
+
+Both levers are in `flows/play.yaml`, both off, and both need a played round:
+
+* **`settle_board: true`** -- wait for the board rather than the whole screen.
+  Aimed at the ~375ms.
+* **`step_px: 12`** -- the stroke walks 8px per sleep today; a 4-member chain
+  spends ~165ms of pure sleeping. Aimed at the ~320ms.
+
+They fail differently and that decides the order. A settle that returns too
+early drags a moving board and `cleared %` falls immediately and visibly. A
+step that is too long still registers as a drag but can skip past a tsum, so
+members go unaccepted with nothing saying so -- the same silent shape as the
+FEVER radius collapse. **Test `settle_board` first**, and watch `cleared %`
+either way: if chains rise and the clear share falls, revert.
+
+## Twenty-eighth round: the bad rounds are long-chain rounds, not untrained ones
+
+Reported from live play: rounds go badly when characters appear that "have not
+been trained". Worth taking seriously -- the variance is real and large, from
+32% cleared to 98% -- but training status cannot be the cause, because
+`character` is empty and has been since it measured -24%. Every tsum on every
+board goes through the same colour clustering. Something else drives it.
+
+### It is not how separable the colours are
+
+The obvious candidate first: clustering cannot separate characters that are not
+separated, so a board of look-alikes should play badly. Measured over 104
+sessions, board colour separability as between-group over within-group spread
+of face colour at the 4 groups the game allows:
+
+    clear% vs colour separation   r = -0.187      (and the wrong sign)
+    clear% vs distinct kinds      r = +0.148
+
+No. A board of similar-looking characters is not what a bad round is.
+
+### It is chain length, and the relationship is strong
+
+    clear% vs mean chain length   r = -0.713   over 104 sessions
+
+| mean chain length | sessions | cleared |
+|---|---:|---:|
+| 3.5-4.0 | 27 | 80% |
+| 4.0-4.5 | 25 | 76% |
+| 4.5-5.0 | 15 | 70% |
+| 5.0-6.0 | 17 | 59% |
+| 6.0+ | 13 | 52% |
+
+And within a single chain the same decay appears by position: 1st member 78%,
+3rd 59%, 5th 40%, 10th 30%. A long chain is one that has run out of genuine
+partners and kept going, so the tail is members the game refuses.
+
+**Which way the causation runs matters and is not settled.** A board where
+clustering merges two characters produces both a long chain and a low clear
+rate, so length may be a symptom rather than a cause -- capping it would then
+produce shorter chains that still fail, and buy nothing.
+
+### And it may not cost anything
+
+    clears/second vs mean chain length   r = +0.169   (21 timed rounds)
+
+Flat. The reason is the fixed cost: think, settle and the stop check come to
+~340ms per cycle whatever the chain does, so a longer chain amortises them
+better at the same time as it clears at a worse rate, and the two roughly
+cancel. A 5th member clearing at 40% still returns more per millisecond of
+stroke than the round's average.
+
+So a low clear rate looks like a bad round and may not be one. **The clear rate
+is not the objective and never was** -- it is a proxy that has now twice
+disagreed with throughput, which is itself only a proxy for score.
+
+### What this settles and what it does not
+
+Settled: **more labelling is not required, and neither is more identity data.**
+That is now closed five ways -- a learned palette, hand-made descriptors
+(0.561 AUC), a supervised classifier (-24% in play), a metric-learning
+embedding (-6.6% held out), and a data-scaling curve at +0.0092 AUC per
+doubling. Face colour distance predicts what actually clears at 0.568 AUC
+against distance-from-head at 0.679: geometry already beats colour at the job
+colour was being trained for.
+
+Not settled, and now the only question worth collecting for: **does a low clear
+rate cost score?** Two rounds carry both numbers. Ten would answer it, and they
+arrive for free with any round played on a build that captures the results
+screen.
+
+## Twenty-ninth round: the score is joined to the round that earned it
+
+Task 1 of the ground-truth pipeline, and the thing every task after it was
+waiting on. The two halves existed and nothing connected them: `flows/play.yaml`
+saves the results screen into the debug directory named by wall-clock time, and
+`DatasetWriter` writes a round's samples into its own session folder. Recovering
+what a round scored meant matching timestamps by eye, which is fine for five
+rounds and is not a pipeline.
+
+* `DatasetWriter.close(report)` now writes **`round.json`** beside the samples:
+  session id, the times that bound the round, and the play loop's own totals
+  including the settle cost.
+* **`scripts/rounds_table.py`** joins a results frame to the round that had just
+  ended when it was taken, and **prints the gap it matched on** -- 12-19s across
+  every join so far, consistent enough to audit. It falls back to parsing the
+  play log for rounds from builds that predate `round.json`, so the whole
+  history is joinable rather than only future rounds.
+* Anything unreadable is `null` and counted. `read_results.py` already refuses a
+  digit it is unsure of; this carries the refusal through instead of filling the
+  gap.
+
+### The first reward numbers, and a correction
+
+Seven rounds now carry a score.
+
+| played | dragged | clear% | score | coins |
+|---:|---:|---:|---:|---:|
+| 106 | 562 | -- | 837,142 | 870 |
+| 86 | 360 | -- | 495,714 | 449 |
+| 82 | 371 | -- | 435,384 | 259 |
+| 116 | 486 | -- | 1,162,485 | 1,186 |
+| 113 | 528 | -- | 763,658 | 700 |
+| 89 | 372 | 85% | 935,833 | 702 |
+| 83 | 344 | 84% | 815,859 | 758 |
+
+    score vs chains played   r = +0.636      (was +0.906 at n=5)
+    score vs tsums dragged   r = +0.408
+    coins vs score           r = +0.949
+
+**The headline result from round 27 has weakened.** "Score tracks chains
+played" was r=+0.906 on five rounds; two more rounds take it to +0.636, which
+at n=7 is not significant. It is still the best predictor available and the
+sign has not moved, but it was reported with more confidence than five rounds
+could support, and the honest position now is that the objective is *probably*
+throughput and is not established.
+
+Coins remain proportional to score (r=+0.949), so either can serve as the
+reward.
+
+**Only two rounds carry both a score and a clear rate**, so the question that
+matters -- does a low clear rate cost score -- is still unanswered. It needs
+about ten, and they now arrive automatically.
+
+### Leakage, closed properly
+
+Round 24's failure was a split that lived in a script rather than in the model:
++10% on sessions trained on, -6.6% on sessions not. `link_net.py` now writes
+`train_sessions` and `test_sessions` into every artifact alongside the weights,
+as `embed_net.py` already did. Verified on the current model: 113 train, 38
+test, **0 overlap**.
+
+## Thirtieth round: the score is FEVER, and `cleared` was the right proxy after all
+
+Eleven rounds now carry both a score and telemetry, which is the first time the
+gameplay question could be asked at all. Two of the answers overturn earlier
+rounds of this document.
+
+### `cleared` is validated. Rounds 26 and 28 were too pessimistic.
+
+    score vs tsums CLEARED    r = +0.922
+    score vs clear RATE       r = +0.838
+    score vs chains played    r = +0.806
+    score vs tsums DRAGGED    r = -0.508
+
+The twenty-sixth round disqualified a mark-based gameplay metric and, from
+that, cast doubt on `cleared` itself; the twenty-eighth called the clear rate
+"not the objective and never was". **Total tsums cleared is in fact the single
+best predictor of score available**, and the whole `cleared`-based programme
+was aimed correctly. What was wrong was the *offline proxies for* cleared, not
+cleared.
+
+Note the sign on `dragged`: **-0.508**. Dragging more tsums is not better, and
+the worst round in the set dragged the most of any round in it.
+
+### What a collapsed round looks like
+
+Two rounds scored **9,841** and **25,065** against a normal 600,000-900,000 --
+two orders of magnitude down. Both readings were checked against the screen and
+are correct. Their telemetry:
+
+| round | FEVER frames | mean proposed | clear% | score |
+|---|---:|---:|---:|---:|
+| 221431 | **0** | 8.9 | 23% | 9,841 |
+| 222053 | **0** | 4.8 | 44% | 25,065 |
+| every other round | 5-9 | 3.6-4.8 | 65-95% | 243k-942k |
+
+**Both collapsed rounds never entered FEVER.** Across 15 matched rounds:
+
+    score vs FEVER share        r = +0.808
+    score vs mean chain length  r = -0.014
+
+Chain length does not matter to the score at all. FEVER is most of it. The
+causal chain is a threshold, not a slope: identity merges, chains grow long and
+stop clearing, the FEVER meter never fills, and the round loses ~99% of its
+score while `played` and `dragged` both look perfectly ordinary.
+
+That is also why round 27's "clears/second is chains/second" and round 28's
+"chain length is a wash" were both true and both beside the point. They were
+measured against clears, which is linear; the score is not.
+
+### And FEVER is where the bot is at its best
+
+    FEVER    2126 dragged   1638 cleared   77.0%
+    NORMAL   5193 dragged   3352 cleared   64.5%
+
+Over every sampled drag in the corpus. FEVER is not a weakness to be defended
+against -- it is the most productive part of a round, and the objective is to
+reach it and stay in it.
+
+### What changed
+
+`PlayReport` now counts FEVER frames and the end-of-round line reports
+**`FEVER on N% of frames`**, which also lands in `round.json`. Nothing in this
+project has ever optimised for it, and until now nothing reported it -- a round
+could collapse by 100x with every other number on the line looking normal.
+
+No gameplay rule changed this round. What changed is that the number the score
+turns on is now visible on every round, which is the precondition for tuning
+anything against it.
+
+### The next question, and it is a different one
+
+Not "how do we clear more" but **"how do we reach FEVER more reliably"**. The
+15 rounds put FEVER share between 0% and 75%, so the variance is enormous and
+two rounds in fifteen lost almost everything. Whether that is recoverable
+in-round -- detect the collapse and change behaviour -- or preventable is not
+yet known, and is the first thing worth measuring.
+
+## Thirty-first round: identity works, and 78% of the board has no identity to read
+
+The player asked for label training directly: "there's tsum you never asked me
+to differentiate and it play on board, and the performance drop because of
+that... those dark tsum is not detecting very well".
+
+The first half of that is right and the fix is cheap. The second half turned
+out to be a much larger problem than a missing class, and the two are not the
+same problem at all.
+
+### Supervised identity works. Colour clustering never could.
+
+Trained on the 3,791 hand-labelled crops, held out **by session**:
+
+    15 classes, 30% of sessions held out
+      accuracy on the crops it named   97.5%
+      coverage at reject 0.50          98.3%
+      worst confusion  CheshireCat -> Sebastian (9 of 113)
+
+Against the alternatives this project has measured: a per-frame k-means `kind`
+agrees with the game about a confirmed partner **37%** of the time, and the
+self-supervised pairwise embedding reached **0.647 AUC**. Naming characters
+from labels is not a marginal improvement over clustering colour, it is a
+different quality of answer, and the player's instinct that "use color to
+differentiate the tsum is not the best solution" was correct.
+
+Trained on the GPU: **29 seconds** for 25 epochs on a 3070. `classify.py` was
+CPU-only and now takes `--device`, keeps the BEST epoch rather than the last,
+and writes its train/test session lists into the artifact.
+
+### But it is 97.5% on 22% of the board
+
+Every one of the 3,791 labelled crops shows **0.55 or more** of a tsum --
+`crops.py` filtered at that line when it extracted them, and nothing
+downstream knew. The median detection on a real board shows **0.41**:
+
+    visible   share of the board
+    < 0.55            78%
+    >= 0.55           22%
+
+So the model was trained on the least occluded fifth of the board and is asked
+at play time about all of it.
+
+### The game's own marks say what happens there
+
+When the bot holds a tsum, the game lights up every tsum that is the same
+character and reachable. `marked` is therefore ground truth about identity
+that nobody wrote down, on sessions nobody labelled, at every visibility. Name
+the head where the model is on solid ground, and ask what it calls each
+confirmed partner -- they must agree.
+
+Over **94 sessions no labelled crop came from** (`scripts/mark_probe.py`):
+
+    partner visible      n    agrees  mean conf
+      0.00-0.30         48      10.4%      0.75
+      0.30-0.35         34       0.0%      0.80
+      0.35-0.40         23      13.0%      0.75
+      0.40-0.45         45      20.0%      0.77
+      0.45-0.50         31      12.9%      0.84
+      0.50-0.55         29      27.6%      0.88
+      0.55-0.65         78      74.4%      0.96
+      0.65-1.00         55      65.5%      0.94
+
+    chance rate (always the commonest head class): 12.5%
+
+Above the training set's own line the model is right about three quarters of
+the time. Below it, **it is at the chance rate** -- and the mean confidence
+never falls below 0.75. Confidence does not track competence here, so
+`--character-confidence` cannot catch it and no setting of it ever could. At a
+0.90 reject floor the model still names 61.5% of partners and is right 52.6%
+of the time.
+
+This is what "the dark tsum is not detecting very well" is, measured. It is
+not that dark characters are hard; it is that most of a board is buried, and a
+crop centred on a 30%-visible tsum is mostly a picture of whatever is lying on
+top of it.
+
+### Training on buried crops does not fix it -- tested, and it does not
+
+The marks give a way to label buried crops for free: the game says a partner
+is the same character as the head, so a partner at 0.28 visible inherits a
+name that could never have been read off it. Where the head is itself a crop a
+person already labelled, the name is human and no model is involved at all.
+
+614 such crops were harvested from the first half of the corpus (68% of them
+below 0.55 visible), added to training, and the model re-probed on the second
+half.
+
+**It made no difference.** Scored on one fixed set of groups with one fixed set
+of head names (`--head-model`, so both models are judged on the same rounds):
+
+                         baseline    + 614 buried crops
+    all partners            36.0%          33.3%
+    at reject 0.80          49.0%          50.6%
+    at reject 0.90          53.0%          53.7%
+
+A first run appeared to show +4.9pp overall and a much better reject curve.
+That run let each model choose the groups it felt sure enough about, so the
+two tables were computed over different rounds. Pinning the groups erased the
+whole effect. **The gain was population selection, not skill** -- recorded here
+because it was nearly reported as a result.
+
+So the answer to the question `harvest` was built to ask is the unwelcome one:
+the low bands stayed flat because the picture is not there to read. This is
+not a labelling gap. More labels of buried tsums will not close it.
+
+### What shipped
+
+`CHARACTER_MIN_VISIBLE = 0.55` -- the character model is no longer asked about
+a tsum showing less than the training set's own cut-off. Below the floor a
+tsum keeps its k-means `kind`, which agrees with the game 37% of the time:
+poor, but more than twice what the model manages down there, and it does not
+arrive dressed as certainty. Exposed as `--character-min-visible`; 0 restores
+the old behaviour. The end-of-round line now says how much of the board was
+never asked, so "named 20% of detections" cannot be mistaken for a model that
+looked and declined.
+
+### What labelling would actually buy, and it is not what was asked for
+
+Not buried crops -- more **classes**, and more **rounds per class**:
+
+* 7 of 38 classes come from a **single round**: Donald, Flounder, Cleo,
+  Oliver, Flik, Lotso, Sisu. A class that exists in one session cannot be both
+  trained and scored under any session split, which is why the wider run shows
+  them at 0.0% recall. That number is arithmetic, not a finding, and
+  `classify.py` now says so out loud instead of printing it beside real ones.
+* **Beast**, the equipped base tsum, has **7 crops**. The character the whole
+  round is played for is the least labelled thing in the set.
+* **94 of 172 sessions** have never had a single crop labelled.
+
+`scripts/label_gaps.py` turns that into a small ask: run the classifier over
+the unlabelled sessions, keep only the crops it refuses to name, and write one
+contact sheet per group. 3,157 triaged crops produced **326 unnamed** in 8
+sheets. Naming 8 sheets is the whole job; the rest of the corpus needs nobody.
+
+### Two things this does not claim
+
+The probe's head names come from the model, so a mistaken head mislabels a
+whole group and every number above is a floor rather than an estimate. A
+systematically wrong head would drag every band down together, and the bands
+do not move together -- but that is an argument, not a control.
+
+And nothing here has been played. Every number is offline. Whether the
+visibility floor changes score, coins, or FEVER share is unmeasured, and after
+the thirtieth round's finding that score turns on FEVER rather than on clear
+rate, an identity improvement that does not move FEVER may not move the score
+at all.
+
+## Thirty-second round: the classifier is accurate and cannot be used
+
+The player labelled the sheets: **6 new characters** -- Stitch, Lucifer,
+StreetwearStitch, CheesetheMouse, Monstro, Mike -- and Alien went 15 crops to
+54. The set is now 3,958 crops over 44 classes.
+
+### The new characters work
+
+Retrained at `--min-class 20 --split random`, held out by session:
+
+    31 classes, 105 sessions, 73 train / 32 test
+      Lucifer            100.0% recall   100.0% precision
+      Stitch             100.0%          100.0%
+      StreetwearStitch   100.0%          100.0%
+
+      accuracy over the 29 classes that had training crops:  97.5%
+      accuracy including the 2 that had none:                89.8%
+
+Both numbers are printed now, because Donald (2 rounds) and Flounder (1 round)
+had every one of their sessions land in the held-out half. A class that cannot
+be trained scores 0% by arithmetic, and quoting only the number it drags down
+would report the model failing at something it was never shown.
+
+The unnamed share of the corpus fell from 326 crops in 8 sheets to **153 in 3**.
+
+### The visibility cliff did not move, on fresh data
+
+    partner visible      n    agrees
+      0.00-0.30         30      10.0%
+      0.30-0.35         21       4.8%
+      0.40-0.45         26      30.8%
+      0.55-0.65         51      74.5%
+      0.65-1.00         35      62.9%
+
+    chance rate: 19.5%
+
+Six new classes, 167 new labels, and the shape is identical to the thirty-first
+round's. This is the second independent confirmation that the floor is a
+property of the picture and not of the label set.
+
+### And that is why it cannot ship
+
+`group_eval.py` scores a grouping in tsums cleared per drag, over 407 held-out
+boards the classifier never trained on:
+
+    method   agreement    lift   ids/board   cleared
+    kmeans       39.9%   1.47x      7.29       3.32
+    named        31.5%   1.56x      8.59       2.96     -10.9%  REAL
+    merge        39.9%   1.47x      7.28       3.32      +0.0%  noise
+
+Read `lift` and `ids/board` together. The model **knows more per group** than
+k-means does -- 1.56x against 1.47x -- and still **clears less**, because it
+raises the number of distinct ids on a board from 7.29 to 8.59.
+
+The mechanism is the hybrid rule itself. `named` renames the crops the model
+is sure of and leaves the rest with their colour cluster, so a character's
+visible members get a character id while its buried ones keep a colour id --
+and one character becomes two groups. A chain needs its group WHOLE far more
+than it needs the group correctly named.
+
+`merge` was written to do the opposite: let a cluster vote for a character and
+join clusters that vote alike, so the count can only fall. It changed nothing
+(7.28 vs 7.29) for a simple reason printed above the table:
+
+    13976 of 16547 crops (84.5%) never reached the model: buried below 0.55
+    visible, or clipped by the frame edge.
+    So it grouped 2571 (15.5%) of the board.
+
+At roughly five readable tsums per board spread over seven clusters, there is
+almost never a cluster with two confident votes to merge on.
+
+### What this settles
+
+The character model is **97.5% accurate and unusable**, and those are not in
+tension. It reads a sixth of the board; a chain is built from whole groups;
+touching a sixth of the board can fragment a group but cannot complete one.
+`character` stays at `""` in `flows/play.yaml`.
+
+This retires a line of work rather than parking it. Three separate attempts --
+the pairwise embedding (0.647 AUC), the mark-harvested buried crops (no
+effect), and now a 97.5% supervised classifier (-10.9% cleared) -- have all
+run into the same wall, and it is not an accuracy wall. **Identity is not the
+bottleneck. Occlusion is.** Anything that wants to improve grouping has to
+work on pictures that contain a whole tsum, and 78% of a board does not.
+
+The one thing that would change this is a different picture: a crop window or
+a detector that recovers a buried tsum's own pixels from what is visible of
+it. That is a detection problem, not a labelling one, and no amount of
+labelling reaches it.
+
+### Not measured
+
+None of this has been played. `colour4` shows +3.1% in the table above, but
+this is the same simulated `cleared` column the twenty-sixth round disqualified
+with an ORACLE that scored *below* the shipped rule, so a few percent here is
+not evidence. The -10.9% is quoted because its mechanism is visible directly in
+`ids/board`, which is a count and not a simulation.
+
+## Thirty-third round: "left unlabelled" is not a label, and the game said so
+
+The player labelled 4,906 crops across 48 classes -- Monstro 5 to 321, Beast 9
+to 24, six more characters named -- and left 763 with a clear reason:
+*"shouldn't be detected as it is background or unknown object, which is invalid
+for the gameplay."*
+
+That is a detection complaint, not an identity one, and `docs/IDENTITY.md` §9
+had said detection was the only thing left that could move the score. It also
+looked easy: the leftovers are MORE visible than the labelled crops (median
+0.68 against 0.64), so they are not slivers of a buried tsum.
+
+### The model that looked perfect
+
+`scripts/reject_net.py`, binary, held out by session:
+
+    best held-out AUC 0.9990
+    floor 0.50: rejects 96.6% of the fakes, loses 0.8% of real tsums
+
+On real boards it removed ~2.4 detections from a board of 40, and the rejected
+crops looked exactly right: flat navy board, the board's own slot graphic,
+off-board black. A montage of the most confidently rejected high-visibility
+detections contained not one recognisable tsum.
+
+### The game disagreed
+
+`marked` lists the tsums the game itself confirmed are the head's character. A
+patch of bowl cannot be in it. So, over 118 held-out sessions:
+
+    floor 0.50    rejected 7.1% of detections
+                  of those, GAME-CONFIRMED   36.28%
+                  of the ones it KEPT        15.74%
+
+**The detections it threw away were confirmed by the game at more than twice
+the rate of the ones it kept.** A 0.999 AUC model, pointed at the opposite of
+what it was built for.
+
+### What the junk actually was
+
+A montage of "rejected but game-confirmed" answered it in one look: brilliant
+white-blue glowing balls, and flat tsum-shaped silhouettes in pink, mauve and
+teal.
+
+**That is the game's own link highlight.** When the game marks a tsum it draws
+over it, and `_before.jpg` is captured 250ms after the press -- with the marks
+up. So a marked tsum's crop is a picture of the mark, not of the character.
+
+The player had already met these and named them honestly:
+`crops/labelled/unknown_lightball`, 167 crops. Checked against the corpus:
+
+    class                   crops   MARKED  cleared  was head
+    unknown_lightball         167    86.8%    23.4%      6.6%
+    CheshireCat               566    16.4%     8.8%      2.3%
+    Pascal                    419    14.6%     5.7%      2.6%
+    (left unlabelled)         763    21.0%     4.1%      0.8%
+
+86.8% against ~15% for a real character. `unknown_lightball` is not an object.
+It is the confirmation signal, and it had been put in the not-a-tsum list.
+
+### Fixing it was not enough
+
+Moving `unknown_lightball` to the positives and rescuing every leftover the
+game had confirmed (175 of 763) gave AUC 0.9909 -- and the sign did not flip:
+
+    rejected: 19.06% game-confirmed    kept: 16.91%    base rate: 17.20%
+
+Still above base. A model-free test -- is the crop's centre the board's own
+colour -- came out the same way at every threshold tried (25.9% to 34.0%
+confirmed among the crops it fired on, against 22.3% among those it kept).
+
+The join is sound: marked tsums share the head's `kind` 42.3% of the time
+against 26.8% for a random tsum, and sit 184px from the head against 249px. The
+marks mean what they are supposed to mean.
+
+**So the conclusion is about the label, not the model.** 21% of the leftover
+pile was game-confirmed. "Left unlabelled" is a mixture of *this is background*
+and *I cannot tell what this is*, and the second case is dominated by tsums the
+game had drawn its highlight over. An absence of a label is not a negative
+label, and no amount of cleaning made it into one.
+
+Nothing shipped. `models/reject.*` was deleted rather than kept "for later".
+
+### What did change
+
+`label_gaps.py` no longer puts a marked tsum on a contact sheet. A crop showing
+the game's highlight cannot be labelled by anyone, and asking is how
+`unknown_lightball` came to exist. `--keep-marked` restores the old behaviour
+for anyone who wants to study the marks themselves.
+
+The classifier retrained on the fuller set: **97.6%** held out by session over
+the 37 classes that had training data, 95.5% including Cleo, whose sessions all
+landed on one side of the split.
+
+### A caveat this puts on IDENTITY.md
+
+The visibility cliff in `docs/IDENTITY.md` §4 was measured on marked partners,
+and about 15% of marked detections are highlight-rendered rather than
+character-rendered. That is a confound the write-up did not know about. It is
+too small to explain a fall from 74% to the chance rate -- the cliff stands --
+but the low bands are now a floor with a known bias in them rather than a clean
+measurement, and any future re-run should exclude highlight-rendered partners.
+
+### What would actually answer the player's complaint
+
+An explicit negative class, not an inferred one. "Empty board" is a thing a
+person can pick out of a sheet in seconds and be right about, and 200 of them
+labelled deliberately are worth more than 763 inferred from silence.
+
+## Thirty-fourth round: the board has tsum-shaped holes in it
+
+The player labelled a `board` class on purpose: **705 crops**, plus enough
+other work to bring the set to 5,642 over 50 classes, with only 7 crops left
+over. The deliberate negative is what the thirty-third round asked for, and the
+first thing to do with it was check it.
+
+### The label is clean, and that is not a formality
+
+    class                   crops   MARKED  cleared   head
+    board                     705     0.0%     5.7%   0.0%
+    unknown_lightball         167    86.8%    23.4%   6.6%
+    coin                       92    66.3%    35.9%  12.0%
+    CheshireCat               566    16.4%     8.8%   2.3%
+
+The game marked **none** of the 705, and none was ever a chain head. A patch of
+bowl cannot be confirmed as a character, so that zero is what a real negative
+looks like -- and it is exactly what the inferred pile did not have.
+
+It also caught `coin` on the way past: 66.3% marked, four times a character's
+rate. Listing it as junk would have repeated the `unknown_lightball` mistake in
+a folder that looks like obvious UI.
+
+### Trained on it: 1.0000 AUC, and still wrong
+
+    board only, held out by session:  AUC 1.0000
+      floor 0.50: 99.0% of board rejected, 0.0% of real tsums lost
+
+Against the game's marks on 119 held-out sessions:
+
+    rejected: 20.81% game-confirmed    kept: 16.64%    base: 16.80%
+
+Still enriched for real tsums. Three negative sets now -- inferred, mark-cleaned
+and deliberately labelled -- all giving the same sign, which said the problem
+was not the label.
+
+It was not distance either. Marked tsums sit closer to the head (176px against
+236px), so the comparison was redone at matched distance:
+
+    distance   n      rejected   marked|rejected   marked|kept
+      0-120    4391     4.0%          33.1%           34.2%
+    120-180    5096     3.2%          21.5%           21.4%
+    240-320    6735     3.9%          16.6%           12.5%
+      320+     7716     4.4%          20.4%           10.1%
+    matched:                          21.1%           16.8%
+
+Nor a threshold artefact: the rejected-and-marked detections sit at 95.2
+against a bar of 37, as far above it as the kept ones. Nor the glow: they are
+DARK (mean L 101.9) where `unknown_lightball` is bright (218.2).
+
+### What it actually is
+
+A montage of "rejected but game-confirmed" showed flat tsum-shaped silhouettes
+in blue, dusty red and mauve, each with the dark tsum outline.
+
+**The board is printed with empty tsum-shaped SLOTS, and a tsum the game has
+linked into a chain is drawn as a flat SILHOUETTE.** Same outline, same flat
+fill, same border. From one 64px square they are the same picture -- which is
+why the player put some of them in `board` in good faith, and why a net at
+1.0000 AUC could not tell them apart either.
+
+This is not a labelling failure. It is a genuine ambiguity in the picture, and
+it is the second time this project has found one: `docs/IDENTITY.md` is about
+the first.
+
+### The marks resolve it, because they are not a picture
+
+The game only lights up a real tsum of the head's character. So marked
+detections were harvested as extra positives -- 3,000 of them, appended before
+the session split so they cannot leak -- teaching the linked state directly
+rather than leaving it to be inferred from an outline it shares with the board.
+
+    with linked positives:  AUC 0.9984
+      floor 0.10: rejects 2.2% of a board
+      rejected 15.43% game-confirmed against a 17.23% base rate
+
+The sign is finally right. It is also **only just** right, and that is the
+honest headline: the rejections are no longer enriched for real tsums, but they
+are barely below chance on the only gameplay-relevant ground truth available.
+
+### Where this stops
+
+The mark test can rule a filter OUT -- it did, twice, decisively -- and it
+**cannot certify one**. Only 17% of detections are marked in any frame, and a
+mark only ever covers the head's character, so the test is blind to most of
+what a filter does.
+
+So the offline work stops here and a played round decides. `RejectModel` ships
+in `flows/play.yaml` as `reject_model: ""` -- off, one line to arm, per the
+house rule. The claim to watch is narrow and checkable: **`dragged` should fall
+while `cleared` holds.** If `cleared` falls with it, the filter is eating real
+tsums and the revert is the same line.
+
+`_character_crop` was lifted to module level on the way through, so the reject
+model and the character model cut the same picture and a change to the window
+or the edge rule cannot reach one and not the other.

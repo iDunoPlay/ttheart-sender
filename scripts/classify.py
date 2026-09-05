@@ -67,17 +67,21 @@ def load(root: Path, min_visible: float):
     names = sorted(d.name for d in root.iterdir() if d.is_dir())
     if not names:
         return [], np.zeros(0, int), [], np.zeros(0, int)
-    sess_ids: dict[str, int] = {}
     for ci, name in enumerate(names):
         for p in sorted((root / name).glob("*.png")):
             m = NAME.match(p.stem)
             if m and float(m.group("vis")) < min_visible:
                 continue
-            sess = m.group("sess") if m else "unknown"
             paths.append(p)
             ys.append(ci)
-            sessions.append(sess_ids.setdefault(sess, len(sess_ids)))
-    return paths, np.asarray(ys), names, np.asarray(sessions)
+            # The session NAME, not an id assigned in traversal order. Ids
+            # numbered as the folders were walked made `sorted(uniq)` a walk
+            # order, so "the first 70% of sessions" was whichever sessions the
+            # alphabetically-first class happened to appear in. Names sort
+            # chronologically, so the held-out sessions are the LATER rounds --
+            # which is the question worth asking: does this generalise forward.
+            sessions.append(m.group("sess") if m else "unknown")
+    return paths, np.asarray(ys), names, np.asarray(sessions, dtype=object)
 
 
 def confusion(y, pred, names, reject=None):
@@ -166,14 +170,39 @@ def as_tensor(paths):
                                 [0.229, 0.224, 0.225])(t)
 
 
+def _logits(net, Xt, idx, dev):
+    """Held-out logits, on the CPU. One helper, so the per-epoch accuracy and
+    the final confusion matrix cannot come from two code paths that drift."""
+    import torch
+    with torch.no_grad():
+        return torch.cat([net(Xt[torch.from_numpy(idx[i:i + 256]).to(dev)]).cpu()
+                          for i in range(0, len(idx), 256)])
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dir", type=Path, default=ROOT)
+    ap.add_argument("--extra", type=Path, action="append", default=[],
+                    help="another <class>/*.png root to train on, e.g. the "
+                         "mark-harvested crops in crops/marked. Kept a "
+                         "separate flag rather than merged on disk so that "
+                         "'with them' and 'without them' is one run each, and "
+                         "so a machine label can never be mistaken for a "
+                         "person's")
     ap.add_argument("--epochs", type=int, default=12)
     ap.add_argument("--batch", type=int, default=64)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--holdout", type=float, default=0.3, help="share of SESSIONS")
+    ap.add_argument("--split", default="chronological",
+                    choices=["chronological", "random"],
+                    help="chronological holds out the LATER sessions, which is "
+                         "the harder test but strands whole characters: a tsum "
+                         "is equipped for a run of rounds, so a class can have "
+                         "every one of its sessions on one side of the cut. "
+                         "random keeps the by-session guarantee and mixes the "
+                         "runs, which is the right split for asking whether a "
+                         "character already labelled will be recognised again")
     ap.add_argument("--min-visible", type=float, default=0.0,
                     help="skip crops showing less of a tsum than this")
     ap.add_argument("--min-class", type=int, default=100,
@@ -187,6 +216,7 @@ def main() -> int:
                     choices=["mobilenet_v3_small", "resnet18"])
     ap.add_argument("--onnx", type=Path)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
     args = ap.parse_args()
 
     if not args.dir.exists():
@@ -197,6 +227,27 @@ def main() -> int:
         return 1
 
     paths, y, names, sess = load(args.dir, args.min_visible)
+    for extra in args.extra:
+        if not extra.exists():
+            print(f"no {extra} -- skipping")
+            continue
+        ep, ey, enames, esess = load(extra, args.min_visible)
+        # Re-key the extra root's class ids onto the main one's names, adding
+        # any class it has that the main root does not. Concatenating the
+        # arrays without this would silently rename every class past the first
+        # difference, which is the kind of bug that trains fine and scores
+        # nonsense.
+        merged = list(names)
+        index = {n: i for i, n in enumerate(merged)}
+        for n in enames:
+            if n not in index:
+                index[n] = len(merged); merged.append(n)
+        y = np.concatenate([np.array([index[names[v]] for v in y], int),
+                            np.array([index[enames[v]] for v in ey], int)])
+        paths = paths + ep
+        sess = np.concatenate([sess, esess])
+        names = merged
+        print(f"+{len(ep)} crops from {extra} ({len(enames)} classes)")
     if args.min_class > 1 and len(names):
         keep = {i for i, n in enumerate(names)
                 if int((y == i).sum()) >= args.min_class}
@@ -232,10 +283,17 @@ def main() -> int:
 
     import cv2
     torch.manual_seed(args.seed); np.random.seed(args.seed)
+    dev = torch.device("cuda" if (args.device == "auto" and torch.cuda.is_available())
+                       or args.device == "cuda" else "cpu")
+    print("device: " + str(dev) + (" (" + torch.cuda.get_device_name(0) + ")"
+                                   if dev.type == "cuda" else ""))
 
     uniq = sorted(set(sess.tolist()))
+    if args.split == "random":
+        rng = np.random.default_rng(args.seed)
+        uniq = [uniq[i] for i in rng.permutation(len(uniq))]
     cut = max(1, int(len(uniq) * (1 - args.holdout)))
-    train_s = set(uniq[:cut])
+    train_s, test_s = set(uniq[:cut]), set(uniq[cut:])
     tr_i = np.array([i for i, s in enumerate(sess) if s in train_s])
     te_i = np.array([i for i, s in enumerate(sess) if s not in train_s])
     if not len(te_i):
@@ -243,6 +301,33 @@ def main() -> int:
         return 1
     print(f"\nsessions: train {cut} / test {len(uniq) - cut}   "
           f"crops: train {len(tr_i)} / test {len(te_i)}")
+    print(f"  held out: {min(test_s)}"
+          + (f" .. {max(test_s)}" if len(test_s) > 1 else "")
+          + (" (chronological)" if args.split == "chronological" else " (+ others, random)"))
+
+    # A class with no crops on one side of the cut is not a result, and
+    # printing it as 0.0% recall beside real numbers is the kind of honest-
+    # looking nonsense this script exists to avoid. A tsum is equipped for a
+    # run of consecutive rounds, so under a chronological split a character
+    # can land entirely in the training half or entirely in the held-out half
+    # -- the first is never scored, the second is never learned, and only the
+    # second scores zero. Say which, rather than let the matrix imply failure.
+    tr_n = Counter(y[tr_i].tolist())
+    te_n = Counter(y[te_i].tolist())
+    unlearnable = [names[i] for i in range(len(names)) if not tr_n.get(i)]
+    unscored = [names[i] for i in range(len(names)) if not te_n.get(i)]
+    if unlearnable:
+        print("")
+        print(f"  {len(unlearnable)} class(es) have NO training crops -- every"
+              f" session they appear in fell in the held-out half, so they")
+        print(f"  cannot be recognised and their 0% recall is arithmetic, not a"
+              f" finding: {', '.join(unlearnable)}")
+    if unscored:
+        print(f"  {len(unscored)} class(es) have no held-out crops and are"
+              f" therefore UNSCORED, not perfect: {', '.join(unscored)}")
+    if unlearnable or unscored:
+        print("  Fix by labelling these characters in more rounds, or by "
+              "running --split random.")
 
     X = np.zeros((len(paths), SIZE, SIZE, 3), np.uint8)
     for i, p in enumerate(paths):
@@ -250,8 +335,8 @@ def main() -> int:
         X[i] = cv2.resize(im, (SIZE, SIZE), interpolation=cv2.INTER_LINEAR)
     Xt = torch.from_numpy(X).permute(0, 3, 1, 2).float().div_(255.0)
     norm = transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-    Xt = norm(Xt)
-    yt = torch.from_numpy(y).long()
+    Xt = norm(Xt).to(dev)
+    yt = torch.from_numpy(y).long().to(dev)
 
     if args.backbone == "resnet18":
         net = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
@@ -265,7 +350,8 @@ def main() -> int:
     # the common character and scores well on accuracy while being useless.
     freq = np.array([counts.get(i, 1) for i in range(len(names))], np.float32)
     wts = torch.from_numpy((freq.sum() / (len(names) * freq)).astype(np.float32))
-    lossf = nn.CrossEntropyLoss(weight=wts)
+    net = net.to(dev)
+    lossf = nn.CrossEntropyLoss(weight=wts.to(dev))
     opt = torch.optim.Adam(net.parameters(), lr=args.lr)
 
     def aug(b):
@@ -276,14 +362,15 @@ def main() -> int:
         ang = (torch.rand(n) * 2 - 1) * 0.35
         sc = 1.0 + (torch.rand(n) * 2 - 1) * 0.10
         cos, sin = torch.cos(ang) / sc, torch.sin(ang) / sc
-        th = torch.zeros(n, 2, 3)
-        th[:, 0, 0] = cos; th[:, 0, 1] = -sin
-        th[:, 1, 0] = sin; th[:, 1, 1] = cos
+        th = torch.zeros(n, 2, 3, device=b.device)
+        th[:, 0, 0] = cos.to(b.device); th[:, 0, 1] = -sin.to(b.device)
+        th[:, 1, 0] = sin.to(b.device); th[:, 1, 1] = cos.to(b.device)
         g = nn.functional.affine_grid(th, b.shape, align_corners=False)
         b = nn.functional.grid_sample(b, g, align_corners=False, padding_mode="border")
-        return b * (1.0 + (torch.rand(n, 1, 1, 1) * 2 - 1) * 0.2)
+        return b * (1.0 + (torch.rand(n, 1, 1, 1, device=b.device) * 2 - 1) * 0.2)
 
-    tr_t = torch.from_numpy(tr_i)
+    tr_t = torch.from_numpy(tr_i).to(dev)
+    best_acc, best_ep, keep = -1.0, 0, []
     print(f"\n{'epoch':>6}{'loss':>9}{'test acc':>10}")
     t0 = time.perf_counter()
     for ep in range(1, args.epochs + 1):
@@ -297,22 +384,45 @@ def main() -> int:
             opt.zero_grad(); loss.backward(); opt.step()
             tot += loss.item() * len(b)
         net.eval()
-        with torch.no_grad():
-            logits = torch.cat([net(Xt[torch.from_numpy(te_i[i:i + 256])])
-                                for i in range(0, len(te_i), 256)])
-        acc = float((logits.argmax(1).numpy() == y[te_i]).mean())
-        print(f"{ep:6d}{tot / len(perm):9.4f}{acc:10.1%}", flush=True)
+        acc = float((_logits(net, Xt, te_i, dev).argmax(1).numpy() == y[te_i]).mean())
+        # Keep the BEST epoch, not the last. Exporting whatever the final
+        # epoch happened to be is a mistake already made once here, on the
+        # pairwise net, and it cost a percentage point of a number that was
+        # then reported as the model's.
+        if acc > best_acc:
+            best_acc, best_ep = acc, ep
+            best_state = {k: v.detach().cpu().clone()
+                          for k, v in net.state_dict().items()}
+            keep.append(best_state)
+        print(f"{ep:6d}{tot / len(perm):9.4f}{acc:10.1%}"
+              + ("   <- best" if ep == best_ep else ""), flush=True)
     print(f"\ntrained in {time.perf_counter() - t0:.0f}s")
 
-    with torch.no_grad():
-        logits = torch.cat([net(Xt[torch.from_numpy(te_i[i:i + 256])])
-                            for i in range(0, len(te_i), 256)])
-        prob = torch.softmax(logits, 1).numpy()
+    if keep:
+        net.load_state_dict(keep[-1])
+        print(f"kept epoch {best_ep} ({best_acc:.1%}), not epoch {args.epochs}")
+    net.eval()
+    prob = torch.softmax(_logits(net, Xt, te_i, dev), 1).numpy()
     pred = prob.argmax(1)
     if args.reject > 0:
         pred = np.where(prob.max(1) >= args.reject, pred, -1)
-    print("\n== held-out confusion matrix (rows = truth) ==")
+    print("")
+    print("== held-out confusion matrix (rows = truth) ==")
     confusion(y[te_i], pred, names, reject=args.reject if args.reject > 0 else None)
+
+    # And again over the classes that HAD training data. A class whose every
+    # session landed in the held-out half scores 0% by arithmetic and drags the
+    # headline down with it, which reads as the model failing at something it
+    # was never shown. Both numbers, so neither can be quoted on its own.
+    if unlearnable:
+        ok = np.array([i for i, t in enumerate(y[te_i])
+                       if names[t] not in unlearnable])
+        if len(ok):
+            print("")
+            print(f"== the same crops, minus the {len(unlearnable)} class(es) "
+                  f"with no training data ==")
+            confusion(y[te_i][ok], pred[ok], names,
+                      reject=args.reject if args.reject > 0 else None)
 
     print("\nRead the matrix, not the accuracy. Two characters swapped for each")
     print("other is the failure this whole line of work is about; a high accuracy")
@@ -320,15 +430,30 @@ def main() -> int:
 
     if args.onnx:
         args.onnx.parent.mkdir(parents=True, exist_ok=True)
-        net.eval()
+        net.eval().cpu()
         torch.onnx.export(net, torch.zeros(1, 3, SIZE, SIZE), str(args.onnx),
                           input_names=["crop"], output_names=["logits"],
                           dynamic_axes={"crop": {0: "n"}, "logits": {0: "n"}},
                           dynamo=False)
+        torch.save({"state": net.state_dict(), "classes": names,
+                    "backbone": args.backbone},
+                   str(args.onnx.with_suffix(".pt")))
         args.onnx.with_suffix(".json").write_text(
             json.dumps({"classes": names, "size": SIZE,
                         "mean": [0.485, 0.456, 0.406],
-                        "std": [0.229, 0.224, 0.225]}, indent=2), encoding="utf-8")
+                        "std": [0.229, 0.224, 0.225],
+                        "backbone": args.backbone,
+                        "epochs": args.epochs, "best_epoch": best_ep,
+                        "held_out_accuracy": round(best_acc, 4),
+                        "min_class": args.min_class, "seed": args.seed,
+                        # Which rounds this was scored on, INSIDE the artifact.
+                        # A held-out number that lives only in a terminal
+                        # scroll cannot be re-checked later, and every analysis
+                        # that reuses these weights needs to know the sessions
+                        # it must not score itself on.
+                        "train_sessions": sorted(train_s),
+                        "test_sessions": sorted(test_s)}, indent=2),
+            encoding="utf-8")
         print(f"\nexported {args.onnx} (+ .json with the class order)")
         print("Load it with cv2.dnn.readNetFromONNX -- no torch at runtime.")
     return 0
