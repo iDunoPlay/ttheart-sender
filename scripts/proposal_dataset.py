@@ -52,10 +52,15 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import sys
 from pathlib import Path
 
 import cv2
 import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from ttheart_sender.game.tsum import Tsum  # noqa: E402
+from ttheart_sender.game.tsum import _face_lab as _runtime_face_lab  # noqa: E402
 
 #: The columns, in order. Named here so the file, the printout and `--eval`
 #: cannot drift: a feature added below without a name here fails loudly.
@@ -85,17 +90,17 @@ LEAKS = ["leak_marked"]
 
 
 def _lab_faces(bgr, tsums, radius: float):
-    """The median Lab of each tsum's face, the way `link_net.py` cuts it."""
-    out = np.zeros((len(tsums), 3), np.float32)
-    lab = cv2.cvtColor(cv2.GaussianBlur(bgr, (5, 5), 0), cv2.COLOR_BGR2LAB)
-    h, w = lab.shape[:2]
-    half = max(2, int(radius * 0.5))
-    for i, t in enumerate(tsums):
-        x, y = int(t["x"]), int(t["y"])
-        patch = lab[max(0, y - half):min(h, y + half + 1),
-                    max(0, x - half):min(w, x + half + 1)]
-        out[i] = patch.reshape(-1, 3).mean(0) if patch.size else 0
-    return out
+    """Each tsum's face colour in Lab -- THE RUNTIME'S OWN FUNCTION.
+
+    Imported from `tsum` rather than reimplemented here. The first version of
+    this file cut a 0.5r box mean while the play loop fed the model something
+    else entirely, and the model spent 312 rounds being served two constant
+    features it had been trained to read. One function, called by both, is the
+    only arrangement in which that cannot happen again -- see
+    `tests/test_chain_ranker.py::test_the_trainer_and_the_runtime_cut_the_same_colour`.
+    """
+    objs = [Tsum(t["x"], t["y"], t["r"], t["kind"], (0, 0, 0)) for t in tsums]
+    return _runtime_face_lab(bgr, objs, radius)
 
 
 def _blockers(ts, a, c, radius, block=1.25):

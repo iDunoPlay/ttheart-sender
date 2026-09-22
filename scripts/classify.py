@@ -58,13 +58,33 @@ SIZE = 96          #: crops are 64px; the backbone wants more, this is the compr
 
 #: `<session>_<sample>_<index>_v<visible>.png`, written by `crops.py`. The
 #: session prefix is what the split is made on.
-NAME = re.compile(r"^(?P<sess>.+?)_(?P<sample>\d{4})_(?P<idx>\d{2})_v(?P<vis>[\d.]+)$")
+NAME = re.compile(r"^(?P<sess>.+?)_(?P<sample>\d{4})_(?P<idx>\d{2,})_v(?P<vis>[\d.]+)$")
+
+
+#: Folders that are NOT characters, and must never become a class here.
+#:
+#: This was missing, and every character model ever built carried `board` and
+#: `junk` as identities a detection could be given. The panel readout is what
+#: finally showed it: a live round listed `board`, `junk` and
+#: `unknown_lightball` as the things it had recognised.
+#:
+#: WHY IT IS WORSE THAN A WASTED OUTPUT. `apply` writes the winning class into
+#: `kind`, and `adjacency`/`find_chains` group by `kind` -- so every detection
+#: named `board` was grouped WITH THE OTHER BOARD DETECTIONS and offered as a
+#: chain. The negatives were not merely present, they were chainable.
+#:
+#: `coin` and `unknown_lightball` are deliberately NOT here. The game confirms
+#: them at 41.3% and 72.5% against 4.9% for `Beast`, so they are real objects
+#: the game links; grouping coins with coins is what the game itself does.
+#: `board` is 5.1% and `score` 0.0%.
+NOT_CHARACTERS = ("board", "score", "junk")
 
 
 def load(root: Path, min_visible: float):
     """Paths, class ids, class names and session ids."""
     paths, ys, sessions = [], [], []
-    names = sorted(d.name for d in root.iterdir() if d.is_dir())
+    names = sorted(d.name for d in root.iterdir()
+                   if d.is_dir() and d.name not in NOT_CHARACTERS)
     if not names:
         return [], np.zeros(0, int), [], np.zeros(0, int)
     for ci, name in enumerate(names):
@@ -156,6 +176,82 @@ def augment(b):
     return b * (1.0 + (torch.rand(n, 1, 1, 1) * 2 - 1) * 0.2)
 
 
+#: Luminance weights, in the CHANNEL ORDER THE TENSORS ARE IN. `cv2.imread`
+#: returns BGR and nothing in this file swaps it, so a crop's channels are
+#: B,G,R throughout -- including where ImageNet's RGB mean/std are applied to
+#: them. That mismatch is harmless because it is applied identically in
+#: training and at play time, but it is NOT harmless here: greying a crop with
+#: RGB weights on BGR data would darken every red tsum and lighten every blue
+#: one, which is a colour change disguised as a colour removal.
+_LUMA_BGR = (0.114, 0.587, 0.299)
+
+
+def colour_jitter(b, mean, std, hue=0.5, sat=(0.3, 1.6), grey_p=0.3,
+                  val=(0.7, 1.35), con=(0.75, 1.3)):
+    """Move a batch's colour while leaving its structure exactly alone.
+
+    Why this exists: `aug` perturbs geometry and a single global brightness
+    gain, so across the whole training set a character's HUE never moves. It
+    is therefore the cheapest separating feature available and the network
+    takes it -- `scripts/colour_probe.py` measures the result at 97.9% normal
+    against 44.5% greyscale, with two dozen classes going 100% -> 0%.
+
+    Three transforms, all luminance-preserving, all applied to the batch AFTER
+    it has been un-normalised back to 0..1:
+
+    * **hue** rotated about the grey axis. Done as a 3x3 matrix rather than a
+      trip through HSV because HSV on a GPU tensor costs more than the
+      training step it decorates, and the rotation is the same operation.
+    * **saturation** scaled toward and past grey.
+    * **greyscale** outright, for a share of the batch, so the model gets
+      samples where colour carries no information at all rather than merely
+      unreliable information.
+
+    `hue` is in turns (0.5 = 180 deg either way). Structure is untouched: no
+    pixel moves, so this cannot be confused with the geometric augmentation
+    whose job is a different invariance.
+    """
+    import torch
+    n = b.shape[0]
+    dev, dt = b.device, b.dtype
+    m = torch.as_tensor(mean, device=dev, dtype=dt).view(1, 3, 1, 1)
+    s = torch.as_tensor(std, device=dev, dtype=dt).view(1, 3, 1, 1)
+    x = (b * s + m).clamp_(0.0, 1.0)          # back to 0..1, channel order kept
+
+    w = torch.as_tensor(_LUMA_BGR, device=dev, dtype=dt).view(1, 3, 1, 1)
+    grey = (x * w).sum(dim=1, keepdim=True)
+
+    # Hue: rotate the colour vector about the grey axis. cos/sin blend of the
+    # identity, the projection onto grey, and a 120-degree channel cycle --
+    # the standard luma-preserving rotation, written out because torchvision's
+    # is CPU-bound on uint8.
+    th = (torch.rand(n, 1, 1, 1, device=dev, dtype=dt) * 2 - 1) * hue * 2 * 3.14159265
+    c, sn = torch.cos(th), torch.sin(th)
+    cyc = torch.roll(x, shifts=1, dims=1)
+    cyc2 = torch.roll(x, shifts=2, dims=1)
+    x = grey + c * (x - grey) + sn * (cyc - cyc2) * 0.57735027   # 1/sqrt(3)
+
+    # Saturation, then outright greyscale for a share of the batch.
+    f = torch.empty(n, 1, 1, 1, device=dev, dtype=dt).uniform_(sat[0], sat[1])
+    x = grey + f * (x - grey)
+    if grey_p > 0:
+        g = (torch.rand(n, 1, 1, 1, device=dev) < grey_p).to(dt)
+        x = g * grey.expand_as(x) + (1 - g) * x
+
+    # Value and contrast, in 0..1 space. These are NOT redundant with the
+    # +/-20% gain `aug` already applies: that one multiplies the NORMALISED
+    # tensor, which is an affine move about each channel's ImageNet mean
+    # rather than a brightness change, and it leaves true black alone only by
+    # accident. Measured need: greying the model without these cost it 7-10
+    # points on the bright/dark rows, because a model that has stopped reading
+    # chroma reads luma instead and nothing had ever perturbed luma honestly.
+    v = torch.empty(n, 1, 1, 1, device=dev, dtype=dt).uniform_(val[0], val[1])
+    k = torch.empty(n, 1, 1, 1, device=dev, dtype=dt).uniform_(con[0], con[1])
+    x = (x * v - 0.5) * k + 0.5
+
+    return ((x.clamp_(0.0, 1.0)) - m) / s
+
+
 def as_tensor(paths):
     """Crops -> a normalised NCHW tensor, the same way for every caller."""
     import cv2
@@ -210,8 +306,36 @@ def main() -> int:
                          "20 cannot be trained OR scored -- it lands a handful "
                          "of crops in the held-out sessions and its recall is "
                          "then noise reported to two decimal places")
+    ap.add_argument("--golden", type=Path, default=Path("models/golden.json"),
+                    help="sessions never to train on, frozen by "
+                         "scripts/golden.py. Pass '' to ignore it, which makes "
+                         "the resulting model incomparable to every other")
+    ap.add_argument("--crop-profile", default="plain",
+                    help="the crop rule this model is being trained under. "
+                         "Recorded in the exported .json and read back by the "
+                         "runtime, so a model can never be served crops cut a "
+                         "different way")
+    ap.add_argument("--no-cover-classes", dest="cover_classes",
+                    action="store_false",
+                    help="allow a class to have ZERO training sessions. The "
+                         "default moves the cheapest session back so that "
+                         "cannot happen -- a class nobody taught scores 0%% by "
+                         "arithmetic and drags down the classes its crops "
+                         "land on")
     ap.add_argument("--reject", type=float, default=0.0,
                     help="softmax floor below which a crop is UNKNOWN (0 = never)")
+    ap.add_argument("--colour-aug", action="store_true",
+                    help="jitter hue and saturation during training, and grey "
+                         "a share of each batch outright. OFF by default, so "
+                         "every model built before this flag existed is still "
+                         "reproducible by omitting it. Without it the training "
+                         "set holds each character's hue perfectly fixed, and "
+                         "`scripts/colour_probe.py` measures what the network "
+                         "does with that: 97.9%% normal, 44.5%% greyscale")
+    ap.add_argument("--grey-p", type=float, default=0.3,
+                    help="share of each batch greyed outright by --colour-aug")
+    ap.add_argument("--hue", type=float, default=0.5,
+                    help="--colour-aug hue jitter, in turns (0.5 = +/-180 deg)")
     ap.add_argument("--backbone", default="mobilenet_v3_small",
                     choices=["mobilenet_v3_small", "resnet18"])
     ap.add_argument("--onnx", type=Path)
@@ -269,9 +393,23 @@ def main() -> int:
     for i, n in enumerate(names):
         print(f"  {n:22} {counts.get(i, 0):6d}" +
               ("   <- thin" if counts.get(i, 0) < 100 else ""))
-    if min(counts.values()) < 20:
+    thin = sorted((names[i], n) for i, n in counts.items() if n < 20)
+    if thin and args.min_class >= 20:
+        # The cut is at 20 or above and something under 20 still got through:
+        # that is a bug in the filter, not a choice, so it stops.
         print("\nA class under 20 crops cannot be trained or scored. Label more.")
         return 1
+    if thin:
+        # The cut was LOWERED on purpose. Refusing then would make
+        # `--min-class` a lie -- it exists precisely so a newly labelled class
+        # can be trained before it has 20 crops. Warn, loudly, and go on: the
+        # cost is that these classes cannot be SCORED, so their column in
+        # every report afterwards is arithmetic rather than a measurement.
+        print("\n  %d class(es) are under 20 crops and were kept because"
+              " --min-class is %d:" % (len(thin), args.min_class))
+        print("    " + ", ".join("%s %d" % t for t in thin))
+        print("  They can be learned. They cannot be scored reliably, so read"
+              "\n  their rows in any report as provisional.")
 
     try:
         import torch, torch.nn as nn
@@ -288,18 +426,78 @@ def main() -> int:
     print("device: " + str(dev) + (" (" + torch.cuda.get_device_name(0) + ")"
                                    if dev.type == "cuda" else ""))
 
-    uniq = sorted(set(sess.tolist()))
+    # THE GOLDEN SET IS NEVER TRAINED ON. It is frozen once, and every
+    # candidate model is scored on it, which is the only way "did this get
+    # better?" has an answer: two models split differently cannot be compared,
+    # and this project already read 97.9% against 94.9% for two models that
+    # were, on a common set, exactly as good.
+    golden = set()
+    if args.golden and Path(args.golden).exists():
+        golden = set(json.loads(Path(args.golden).read_text(
+            encoding="utf-8"))["sessions"])
+        held = sum(1 for s_ in sess if s_ in golden)
+        print("golden set: %d session(s) withheld from training and from the "
+              "held-out split alike (%d crops)" % (len(golden), held))
+    uniq = sorted(set(sess.tolist()) - golden)
+    if not uniq:
+        print("every session is in the golden set -- nothing left to train on.")
+        return 1
     if args.split == "random":
         rng = np.random.default_rng(args.seed)
         uniq = [uniq[i] for i in rng.permutation(len(uniq))]
     cut = max(1, int(len(uniq) * (1 - args.holdout)))
     train_s, test_s = set(uniq[:cut]), set(uniq[cut:])
+
+    # NO CLASS MAY HAVE ZERO TRAINING SESSIONS.
+    #
+    # A tsum is equipped for a run of consecutive rounds, so a character that
+    # appears in one session lands entirely on one side of any session split.
+    # Landing on the held-out side is not a hard test, it is no test at all:
+    # the model is never shown one example and then scored on every one.
+    # Cleo is the live case -- 41 held-out crops, 0 training crops, 0% recall,
+    # and its crops fell on Beast and dragged Beast's precision to 16%.
+    #
+    # So the smallest number of sessions is moved back, cheapest first, and
+    # every move is printed. This costs held-out data, which is the honest
+    # trade: a class that cannot be scored is better than one that cannot be
+    # learned, because only the second corrupts the classes around it.
+    if args.cover_classes:
+        by_session = defaultdict(Counter)
+        for i, s in enumerate(sess):
+            by_session[s][int(y[i])] += 1
+        moved = []
+        while True:
+            tr_have = Counter()
+            for s in train_s:
+                tr_have.update(by_session[s])
+            missing = [c for c in range(len(names))
+                       if not tr_have.get(c) and any(by_session[s].get(c)
+                                                     for s in test_s)]
+            if not missing or len(test_s) <= 1:
+                break
+            want = missing[0]
+            # Cheapest session that carries the class: the one whose move
+            # surrenders the fewest held-out crops overall.
+            pick = min((s for s in test_s if by_session[s].get(want)),
+                       key=lambda s: sum(by_session[s].values()))
+            test_s.discard(pick)
+            train_s.add(pick)
+            moved.append((names[want], pick, sum(by_session[pick].values())))
+        if moved:
+            print("\n  moved %d session(s) into training so no class is left "
+                  "with none:" % len(moved))
+            for cls, s, n in moved:
+                print("    %-18s <- %s  (%d crop(s) leave the held-out set)"
+                      % (cls, s, n))
+            cut = len(train_s)
+
     tr_i = np.array([i for i, s in enumerate(sess) if s in train_s])
-    te_i = np.array([i for i, s in enumerate(sess) if s not in train_s])
+    te_i = np.array([i for i, s in enumerate(sess)
+                     if s not in train_s and s not in golden])
     if not len(te_i):
         print("every crop is from one session -- cannot hold anything out.")
         return 1
-    print(f"\nsessions: train {cut} / test {len(uniq) - cut}   "
+    print(f"\nsessions: train {len(train_s)} / test {len(test_s)}   "
           f"crops: train {len(tr_i)} / test {len(te_i)}")
     print(f"  held out: {min(test_s)}"
           + (f" .. {max(test_s)}" if len(test_s) > 1 else "")
@@ -367,7 +565,14 @@ def main() -> int:
         th[:, 1, 0] = sin.to(b.device); th[:, 1, 1] = cos.to(b.device)
         g = nn.functional.affine_grid(th, b.shape, align_corners=False)
         b = nn.functional.grid_sample(b, g, align_corners=False, padding_mode="border")
-        return b * (1.0 + (torch.rand(n, 1, 1, 1, device=b.device) * 2 - 1) * 0.2)
+        b = b * (1.0 + (torch.rand(n, 1, 1, 1, device=b.device) * 2 - 1) * 0.2)
+        # Colour LAST, and only when asked. Last because it un-normalises to
+        # 0..1 and clamps, so running it before the brightness gain would let
+        # that gain push values back out of range unclamped.
+        if args.colour_aug:
+            b = colour_jitter(b, [0.485, 0.456, 0.406], [0.229, 0.224, 0.225],
+                              hue=args.hue, grey_p=args.grey_p)
+        return b
 
     tr_t = torch.from_numpy(tr_i).to(dev)
     best_acc, best_ep, keep = -1.0, 0, []
@@ -446,6 +651,25 @@ def main() -> int:
                         "epochs": args.epochs, "best_epoch": best_ep,
                         "held_out_accuracy": round(best_acc, 4),
                         "min_class": args.min_class, "seed": args.seed,
+                        # What the colour of a training crop was allowed to
+                        # do. Recorded because two models trained with and
+                        # without this are not comparable on a normal test
+                        # set -- the one that saw jitter gives up a little
+                        # accuracy on unperturbed crops and buys robustness
+                        # that only `colour_probe.py` can see.
+                        "colour_aug": bool(args.colour_aug),
+                        "colour_aug_hue": args.hue if args.colour_aug else None,
+                        "colour_aug_grey_p": (args.grey_p if args.colour_aug
+                                              else None),
+                        # THE CROP RULE THIS WAS TRAINED UNDER. The runtime
+                        # reads it back and cuts the same way; a name this
+                        # build does not have is refused rather than served
+                        # the default. See ttheart_sender/game/crop.py.
+                        "crop_profile": args.crop_profile,
+                        # The frozen set this model must be SCORED on, named
+                        # in the artifact so a later comparison cannot quietly
+                        # use a different one.
+                        "golden": sorted(golden),
                         # Which rounds this was scored on, INSIDE the artifact.
                         # A held-out number that lives only in a terminal
                         # scroll cannot be re-checked later, and every analysis

@@ -63,6 +63,7 @@ vars:
   settle_board: false
   ab: ""
   ab_off: ""
+  profile: ""
   chain_model: ""
   chain_bonus: 0.0
   step_px: 8
@@ -177,6 +178,7 @@ steps:
                   settle_board: "${settle_board}"
                   ab: "${ab}"
                   ab_off: "${ab_off}"
+                  profile: "${profile}"
                   chain_model: "${chain_model}"
                   chain_bonus: "${chain_bonus}"
                   step_px: "${step_px}"

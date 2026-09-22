@@ -76,11 +76,23 @@ Z_ALPHA, Z_POWER = 1.959964, 0.841621
 MIN_ROUNDS_PER_ARM = 20
 
 #: (field, label, higher-is-better). The order is the order it prints in.
-PRIMARY = [("cleared", "cleared", True)]
+#:
+#: `accepted` is co-primary and not a guardrail, because a rule that picks the
+#: chain the game will take is aimed at it directly: the chain ranker's whole
+#: offline result is +0.109 accepted members a press, and `cleared` is
+#: downstream of that through a clear rule this corpus has twice measured as
+#: noisy. Both are counts. Neither is a ratio, and that is deliberate --
+#: `accepted/proposed` improves by 19.6pp under a truncation that destroys 18%
+#: of the accepted members, because it shrinks its own denominator, so it must
+#: never be a decision metric here. `proposed` sits in MECHANISM instead: it is
+#: how a reader sees the denominator move without being asked to rank on it.
+PRIMARY = [("cleared", "cleared", True),
+           ("accepted", "accepted/press", True)]
 GUARDRAIL = [("score", "score", True),
              ("fever", "FEVER share", True),
              ("coins", "coins", True)]
 MECHANISM = [("rejected", "dead drags", False),
+             ("proposed", "proposed/press", None),
              ("s_per_frame", "seconds/frame", False),
              ("dragged", "dragged", None),
              ("rate", "clear rate", None),
@@ -125,6 +137,49 @@ def rounds_needed(values: list, lift: float):
     return math.ceil(2 * (Z_ALPHA + Z_POWER) ** 2 / d ** 2) if d else None
 
 
+def presses(sp: Path):
+    """The round's options, and what the game did with every chain it held.
+
+    One pass over `samples.jsonl`, which is the only place the per-member
+    verdict lives. `kept` is not the bot's opinion -- it is `marked_by_game`,
+    read while the chain was held -- so `accepted` here is the game's own
+    answer and needs no label.
+
+    The unit is the PRESS, matching `scripts/proposal_dataset.py` exactly:
+    a row with `kept` recorded and at least two proposed members, counting
+    `proposed[1:]` because `proposed[0]` is the tsum being held rather than
+    anything the game was asked to accept. Two definitions of "accepted" that
+    drift apart would make the offline prediction and the played result
+    incomparable, which is the one thing this number exists to allow.
+
+    Returns (options, accepted per press, proposed per press) with the two
+    rates None where the round recorded no usable press -- every round before
+    the proposal telemetry, which must read as absent and not as zero.
+    """
+    opts, acc, prop, n = {}, 0, 0, 0
+    if not sp.exists():
+        return opts, None, None
+    try:
+        with sp.open(encoding="utf-8") as fh:
+            for k, line in enumerate(fh):
+                try:
+                    o = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if k == 0:
+                    opts = (o or {}).get("options", {}) or {}
+                members, kept = o.get("proposed") or [], o.get("kept")
+                if kept is None or len(members) < 2:
+                    continue
+                keptset = set(kept)
+                n += 1
+                prop += len(members) - 1
+                acc += sum(1 for i in members[1:] if i in keptset)
+    except OSError:
+        return opts, None, None
+    return (opts, acc / n, prop / n) if n else (opts, None, None)
+
+
 def load(dataset: Path, rounds_file: Path):
     """One record per round: its totals, its score, its build and its arm."""
     scores = {}
@@ -147,14 +202,7 @@ def load(dataset: Path, rounds_file: Path):
         # The version and the arm both come off the round record where it has
         # them. `ab_arm` is written by builds that have --ab; older rounds fall
         # back to the samples, which carry the whole option set anyway.
-        opts = {}
-        sp = rj.parent / "samples.jsonl"
-        if sp.exists():
-            try:
-                with sp.open(encoding="utf-8") as fh:
-                    opts = (json.loads(fh.readline()) or {}).get("options", {})
-            except (OSError, json.JSONDecodeError, TypeError):
-                opts = {}
+        opts, accepted, proposed = presses(rj.parent / "samples.jsonl")
         arm = j.get("ab_arm") or ""
         option = j.get("ab") or opts.get("ab") or ""
         if not arm and option and option in opts:
@@ -169,6 +217,7 @@ def load(dataset: Path, rounds_file: Path):
             "cleared": j.get("cleared"), "dragged": j.get("dragged"),
             "rejected": j.get("rejected"), "frames": j.get("frames"),
             "score": s.get("final_score"), "coins": s.get("final_coins"),
+            "accepted": accepted, "proposed": proposed,
         }
         if j.get("frames") and dur > 0:
             rec["s_per_frame"] = dur / j["frames"]

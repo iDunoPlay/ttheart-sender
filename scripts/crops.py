@@ -50,6 +50,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from ttheart_sender.game import crop as crop_rules  # noqa: E402
+
 CROP = 64          #: saved at 64px; the classifier downsamples, a person cannot
 
 #: Half-width of a crop, in detected radii. **1.0, not 1.5, and the difference
@@ -73,26 +75,22 @@ ROOT = Path("crops")
 # --------------------------------------------------------------------------
 # stage 1: extract
 # --------------------------------------------------------------------------
-def _cut(img, x, y, radius, window=WINDOW):
+def _cut(img, x, y, radius, window=WINDOW, prof=None):
     """One square crop centred on a tsum, or None if it cannot be one.
 
-    REFUSES a crop the image edge would clip. Clamping to the bounds and
-    resizing anyway turns a thin strip at the top of the board rect into a
-    square, which is why a whole cluster came back looking "too zoomed in" --
-    it was a sliver of a tsum stretched to fill 64x64. A partial crop is not a
-    smaller picture of a character, it is a different picture, and it teaches
-    a classifier nothing except what the board edge looks like.
+    A thin wrapper now: the rule lives in `ttheart_sender.game.crop`, which the
+    RUNTIME imports too. Keeping two copies in step by reading them side by side
+    is how a training set and a play loop come to disagree about what a crop is,
+    and `tests/test_crop_profile.py` asserts they cannot.
+
+    `prof` names the crop profile; None means the historical `PLAIN` rule,
+    which refuses a crop the image edge would clip.
     """
-    half = max(4, int(round(radius * window)))
-    h, w = img.shape[:2]
-    x0, y0 = int(x) - half, int(y) - half
-    x1, y1 = int(x) + half + 1, int(y) + half + 1
-    if x0 < 0 or y0 < 0 or x1 > w or y1 > h:
-        return None
-    patch = img[y0:y1, x0:x1]
-    if patch.size == 0 or min(patch.shape[:2]) < 4:
-        return None
-    return cv2.resize(patch, (CROP, CROP), interpolation=cv2.INTER_AREA)
+    p = prof or crop_rules.PLAIN
+    if window != p.window or CROP != p.store:
+        p = crop_rules.CropProfile(p.name + "+adhoc", window=window,
+                                   store=CROP, pad=p.pad, border=p.border)
+    return crop_rules.cut(img, x, y, radius, p)
 
 
 def extract_corpus(root: Path, out: Path, limit: int, window=WINDOW,
@@ -266,7 +264,8 @@ def montage(paths, out: Path, cols=12, rows=8):
     return True
 
 
-def label_ui(cluster: str | None, cols: int, rows: int) -> int:
+def label_ui(cluster: str | None, cols: int, rows: int,
+             folder: Path | None = None) -> int:
     """Click the crops that are one character, name them, repeat.
 
     `assign` names a whole cluster, and that only works when a cluster IS one
@@ -280,29 +279,39 @@ def label_ui(cluster: str | None, cols: int, rows: int) -> int:
     decisions, and the crops nobody claims are simply left alone -- unlabelled
     is a perfectly good answer for a fragment or a character you do not know.
     """
-    man_path = ROOT / "clusters.json"
-    if not man_path.exists():
-        print("no clusters.json -- run `cluster` first")
-        return 1
-    man = json.loads(man_path.read_text(encoding="utf-8"))
-    if not cluster:
-        print("clusters: " + ", ".join(sorted(man)))
-        print("open one with:  python scripts/crops.py label 00")
-        return 0
-    key = cluster.zfill(2)
-    if key not in man:
-        print(f"no cluster {key} -- have {', '.join(sorted(man))}")
-        return 1
-
-    paths = [Path(p) for p in man[key] if Path(p).exists()]
-    if not paths:
-        print(f"cluster {key} has no files left (already labelled?)")
-        return 0
+    # Two sources, one UI. `--dir` opens ANY folder of crops, which is what a
+    # crop needs when the board it came from is gone -- 38 of the 39 crops
+    # `dedupe.py` quarantined came from sessions no longer in `dataset/`, so
+    # `label_board.py` cannot reach them and only the picture is left to judge.
+    if folder is not None:
+        paths = sorted(Path(folder).glob("*.png"))
+        if not paths:
+            print(f"no crops in {folder}")
+            return 0
+        key = str(folder)
+    else:
+        man_path = ROOT / "clusters.json"
+        if not man_path.exists():
+            print("no clusters.json -- run `cluster` first")
+            return 1
+        man = json.loads(man_path.read_text(encoding="utf-8"))
+        if not cluster:
+            print("clusters: " + ", ".join(sorted(man)))
+            print("open one with:  python scripts/crops.py label 00")
+            return 0
+        key = cluster.zfill(2)
+        if key not in man:
+            print(f"no cluster {key} -- have {', '.join(sorted(man))}")
+            return 1
+        paths = [Path(p) for p in man[key] if Path(p).exists()]
+        if not paths:
+            print(f"cluster {key} has no files left (already labelled?)")
+            return 0
 
     per = cols * rows
     page = 0
     picked: set[int] = set()
-    win = f"cluster {key} -- click to pick, then S to name them"
+    win = f"{key} -- click to pick, then S to name them"
     cv2.namedWindow(win, cv2.WINDOW_AUTOSIZE)
 
     def draw():
@@ -419,6 +428,10 @@ def main() -> int:
     lb.add_argument("cluster", nargs="?", help="cluster to open; omit to list them")
     lb.add_argument("--cols", type=int, default=12)
     lb.add_argument("--rows", type=int, default=8)
+    lb.add_argument("--dir", type=Path,
+                    help="open a FOLDER of crops instead of a cluster, e.g. "
+                         "crops/duplicates/22. For crops whose board is gone, "
+                         "the picture is the only thing left to judge")
 
     a = sub.add_parser("assign", help="name a WHOLE cluster -> crops/labelled/<name>/")
     a.add_argument("cluster")
@@ -513,7 +526,7 @@ def main() -> int:
         return 0
 
     if args.cmd == "label":
-        return label_ui(args.cluster, args.cols, args.rows)
+        return label_ui(args.cluster, args.cols, args.rows, args.dir)
 
     if args.cmd == "assign":
         man = json.loads((ROOT / "clusters.json").read_text(encoding="utf-8"))

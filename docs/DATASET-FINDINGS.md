@@ -3912,3 +3912,208 @@ D: `chain_ranker` ON against OFF, alternating, same build, ~272 rounds.
 Primary **accepted members per press**, which is what the change targets and
 what the offline number predicts; `cleared` co-primary; score and FEVER as
 guardrails. NOT accepted/proposed -- see above.
+
+## 2026-09-06 -- Experiment D: the ranker played, and the round it played was broken
+
+312 rounds, 156 ON / 156 OFF, one build, alternating. The harness worked; the
+thing it measured did not exist.
+
+### The result as reported
+
+    metric            ON        OFF       diff            95% CI       p
+    cleared        266.21     265.97     +0.244   [-12.36, +12.85]   0.970   PRIMARY
+    accepted/press   2.298      2.322    -0.024   [-0.113, +0.065]   0.601
+    score          537,755    532,807   +4,948   [-69.5k, +79.4k]   0.896
+    FEVER            43.9%      44.9%    -1.0pp   [-4.5pp, +2.6pp]   0.594
+    dead drags       1.058      1.250    -0.192   [-0.454, +0.069]   0.149
+    proposed/press   3.662      3.824    -0.162   [-0.427, +0.103]   0.231
+
+REJECT, at power, and the confidence interval on accepted-per-press
+**excludes the offline prediction of +0.109**. That is stronger than "not
+confirmed": the offline number was ruled out.
+
+### The mechanism was coherent, which is what made the bug hard to see
+
+The ranker fired on the share of presses it was supposed to -- 21%, 25%, 14%,
+19%, 30%, 23%, 25%, 21% per round against the offline 23.8% -- and what it did
+was internally sensible:
+
+    acceptance RATE per member   63.2% ON  vs  61.1% OFF   (+2.1pp)
+    members proposed per press    3.634 ON  vs   3.800 OFF   (-0.165)
+    accepted members per press    2.298 ON  vs   2.323 OFF   (-0.026)
+
+**It traded quantity for quality at almost exactly break-even.** Nothing about
+that looks like a broken model.
+
+### The bug: two of eighteen features were dead at play time
+
+`ChainModel.rank` read each tsum's colour off `Tsum.colour` -- the k-means
+CLUSTER colour -- to save a patch read, with a comment explaining why that was
+cheap. **A chain is same-kind by construction**, so every member shares the
+head's cluster colour and both colour features came out exactly **0.000**, on
+every member of every chain of every press.
+
+    trained on:  lab_prev  mean 0.424  sd 0.406  zeros 0.0%
+                 lab_head  mean 0.432  sd 0.397  zeros 0.0%
+    served:      lab_prev  [0. 0. 0. 0. 0. 0. 0. 0. 0.]
+                 lab_head  [0. 0. 0. 0. 0. 0. 0. 0. 0.]
+
+The two features are worth 0.027 AUC (0.8795 with, 0.8529 without), so the
+round was not played with a useless model -- it was played with a model being
+served constants it had been trained to read, which is worse than either.
+
+**The 312 rounds did not test the hypothesis.** They are a clean measurement of
+a different, unintended rule.
+
+### The fix, and the test that would have caught it
+
+There were two implementations of "each tsum's face colour": a 0.5r box mean
+in `scripts/proposal_dataset.py` and a 0.45r disc median in `tsum._face_lab`,
+plus the cluster-colour shortcut at play time. Now there is **one**: the
+trainer imports the runtime's function, `rank()` takes the frame, and
+`test_the_trainer_and_the_runtime_cut_the_same_colour` asserts they produce
+identical rows for the same board. `_cluster_lab` is deleted rather than left
+for someone to reach for again.
+
+Retrained on the shared function: **0.8670 AUC** held out by round, and the
+honest offline gain falls from +0.109 to **+0.074 accepted members a press**.
+Cost rose from 2.74ms to 7.24ms a frame, still ~1% of a frame.
+
+### And that is where this line ends
+
++0.074 on 2.31 is **+3.2%**. At this corpus's spread, resolving 3.2% on
+accepted-per-press needs **~469 rounds an arm -- 938 rounds, about 20 hours.**
+The knob does not help: a length bonus was swept at 0, 0.1, 0.2, 0.35 and 0.5
+and 0 is already best (+0.074, +0.071, +0.068, +0.059, +0.049).
+
+### Why the model cannot be used to BUILD chains either
+
+The obvious next idea is to grow a chain member by member on the model's
+advice instead of ranking what `adjacency` offers. Measured at matched length
+over 250 presses:
+
+    best of adjacency's candidates, ranked : 2.559
+    grown greedily, same-kind only         : 2.655   (+0.097)
+    grown greedily, ANY tsum               : 3.723   (+1.164)
+
+The third row is a fantasy, and it says so itself: 3.723 expected accepted
+over 4.72 members is 0.79 a member against a 63% base rate. The reason is in
+the training set --
+
+    same_kind_head:  mean 1.0000, zero variance, 7,352 of 7,352 rows
+
+**Every training row came from a chain `adjacency` built, and `adjacency` only
+builds same-kind chains.** The model has never seen a cross-kind member and its
+prediction for one is undefined extrapolation. Unbounded `sum of
+probabilities` is degenerate for the same reason it cannot truncate -- it is
+monotone in length, so "maximise it" always answers "longer".
+
+This is the off-policy limit stated concretely: **a model trained on what the
+bot already does can only price small deviations from what the bot already
+does.** Ranking is such a deviation. Rebuilding the candidate set is not.
+
+### Decision
+
+**REVERT, and do not re-run.** `chain_model: ""`. The fix is correct and the
+tests pin it, but the effect it now predicts is below what this project can
+measure at any reasonable cost.
+
+Version bumped to 1.11.8 so the fixed ranker cannot share 1.11.7b with the
+broken one.
+
+### Next experiment
+
+The only way past the off-policy wall is on-policy data from a policy that is
+not this one: play a share of presses on a deliberately different chain --
+random among candidates, or the shortest, or one `adjacency` would rank last --
+and collect the game's answers on them. That is the first collection this
+project would run for coverage rather than for a verdict, and it is what any
+attempt to improve candidate GENERATION needs underneath it.
+
+---
+
+## 2026-09-07/08 -- Experiment A, re-run on 1.20.0: the board filter, 98 rounds -- REVERT (again)
+
+`reject_model` was armed a second time, on a build eight minor versions newer
+than the one Experiment A retired it on. 98 rounds, v1.20.0, one machine,
+alternating inside `play_loop`: **48 on, 48 off**, plus two warm-up rounds with
+no arm. 2026-09-07 21:25 to 2026-09-08 00:59.
+
+**No play log survived these rounds -- the join was made from `round.json` and
+the saved results frames alone.** That path is the one `rounds_table.py` was
+built for, with the log as a fallback rather than a source, and it held: 94 of
+the 98 rounds recovered a derived score, 823 of 909 across the whole corpus.
+
+### The arm was real, and the model did what it claims
+
+Checked rather than assumed, from the option set every sample carries: ON loads
+`models/reject.onnx`, OFF loads nothing, and `bowl_reject: 40` stays armed in
+both, so the model is additive to the heuristic rather than replacing it.
+
+At chain level, 658 sampled chains against 683:
+
+| | proposed | cleared | clear/drag |
+|---|---|---|---|
+| ON | 4.52 | 3.18 | **0.704** |
+| OFF | 4.99 | 3.20 | 0.641 |
+
+It shortens proposals by ~0.47 links and clears the same number of tsums. It is
+trimming dead tail links, exactly as advertised. That is the strongest evidence
+this filter has ever produced, and it is still not enough.
+
+### It does not reach the scoreboard
+
+Paired, 48 pairs, ON minus OFF:
+
+| metric | effect | |
+|---|---|---|
+| `cleared` | +1.4 | p=0.89, ON wins 22/48 |
+| `played` | +1 | p=0.70 |
+| duration | -0.7s | p=0.65 |
+| clear rate | +3.7pp | p=0.25, ON wins 26/48 |
+| score | +8.3% | **95% CI -16%..+32%** |
+
+The saved drags do not convert. Rounds are time-boxed at ~75s and both arms
+play ~80 chains in them; the freed effort buys one extra chain, which is
+nothing. Drag cost is not what binds this round.
+
+### The reason the score column cannot be read
+
+**The derived score has CV 0.58.** At 48 pairs its minimum detectable effect is
+**34% of baseline**. The +8.3% headline is a coin flip -- ON won 24 of 45 scored
+pairs -- and detecting a 10% lift would need ~530 pairs, a 5% lift ~2,100.
+Adjusted for `fever_frames` and `cleared` as covariates, the arm coefficient is
++55,768 with se 41,805, t=1.33.
+
+`cleared` is the metric that *is* powered here (MDE ~10% at 48 pairs), and it
+says nothing. This is the third document to reach for score and the first to
+size it; it should be the last to be surprised by it.
+
+### Two things wrong with the instrumentation, found by using it
+
+* **`rejected` in `round.json` counts the BOWL heuristic, not this model.** It
+  went *down* when the model was on (53 vs 68), because shorter proposals reach
+  the heuristic less often. Nothing counts how often the model fired. That has
+  to exist before this is run a third time.
+* **Missingness is one-sided.** All three unscored ON/OFF rounds are OFF-arm,
+  and they are the ones that ended on `last_bonus` or `tsum_score` rather than
+  `timeup`. If those were weak rounds the OFF mean is biased *up*, which makes
+  the true ON edge smaller than +8.3%, not larger.
+
+### Decision
+
+**REVERT.** `reject_model: ""`, `ab: ""`. Both are back to the flow default and
+`tests/test_board_filter.py::test_it_ships_off` passes again -- it had been
+failing for the duration of the experiment, which is the test working.
+
+Not discarded. The chain-level result is real and reproducible, and the model is
+worth arming again on any build where drag cost binds -- a longer round, a
+slower stroke, a fever rule that rewards presses. It does not pay on this one.
+
+### Next experiment
+
+**Size it before playing it.** The rule this round earns: judge an arm on
+`cleared`, carry `fever_frames` as a covariate (+0.71 with score, and mostly
+luck), and quote a score delta only with its CI. Both notes are now written into
+`flows/play.yaml` beside the `ab` switch, where the next person to arm one will
+be standing.

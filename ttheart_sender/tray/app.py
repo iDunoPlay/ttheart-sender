@@ -21,10 +21,12 @@ import win32api
 import win32event
 import winerror
 
+from ..game import readout
 from ..version import __version__
 from .icon import MenuItem, TrayIcon
 from .modes import DEFAULT_MODE, MODES
 from .panel import ControlPanel
+from .recognition import RecognitionWindow
 from .service import AutomationService, RunState
 from ..housekeeping import clear_dataset, clear_logs
 from .settings import PanelSettings, settings_path
@@ -111,6 +113,12 @@ class TrayApp:
             on_clear_data=self._clear_dataset,
             on_exit=self._exit,
         )
+        # A window of its own, because the control panel has no room for a
+        # board's worth of names -- see `recognition.py`. Built lazily: it
+        # creates nothing until the box is ticked.
+        self._recognition = RecognitionWindow(
+            title="%s -- live recognition" % APP_TITLE,
+            on_close=self._recognition_closed)
         self._icon = TrayIcon(
             title=APP_TITLE,
             tooltip=self._tooltip,
@@ -131,6 +139,12 @@ class TrayApp:
                 APP_VERSION,
                 str(self._app.config.runner.stop_key).upper(),
             )
+            # The play loop publishes the opening board's names on the
+            # worker thread; this hands them to the GUI thread the same way
+            # every other background change gets there. Registered for the
+            # lifetime of the RUN rather than of the object, so a TrayApp that
+            # is built and dropped leaves nothing behind in a module list.
+            readout.watch(self._on_change)
             self._updater.start()
             if self._autostart:
                 self._service.start()
@@ -139,9 +153,13 @@ class TrayApp:
             # Queued rather than shown here because the panel must be created
             # on the thread that will pump it.
             self._icon.post(self._panel.show)
+            if self._settings.show_recognition:
+                self._icon.post(lambda: self._show_recognition(True))
             return self._icon.run()
         finally:
+            readout.unwatch(self._on_change)
             self._updater.shutdown()
+            self._recognition.destroy()
             self._service.shutdown()
             self._panel.destroy()
             win32api.CloseHandle(handle)
@@ -184,6 +202,7 @@ class TrayApp:
             "running": state is RunState.RUNNING,
             "stopping": state is RunState.STOPPING,
             "status": self._service.status_text(),
+            "show_recognition": self._settings.show_recognition,
         }
 
     def _save(self) -> None:
@@ -208,6 +227,9 @@ class TrayApp:
         elif name == "ab_experiment":
             self._service.set_ab_experiment(value)
             self._settings.ab_experiment = self._service.ab_experiment
+        elif name == "show_recognition":
+            self._settings.show_recognition = bool(value)
+            self._show_recognition(self._settings.show_recognition)
         elif name == "experiment":
             # `value` is (key, ticked) from the panel's tick boxes.
             # Read BACK off the service rather than storing `value`: the
@@ -335,9 +357,43 @@ class TrayApp:
     def _on_change(self) -> None:
         self._icon.post(self._refresh)
 
+    def _show_recognition(self, wanted: bool) -> None:
+        """Open or close the live window. GUI thread only.
+
+        Wrapped, because the first version of this raised inside window
+        creation -- `win32gui.CreateFont` does not exist -- and the only
+        symptom a person saw was a tick box that did nothing at all. A window
+        that cannot be built now says so and puts its own box out, which is
+        a bug report rather than a mystery.
+        """
+        if not wanted:
+            self._recognition.hide()
+            return
+        try:
+            self._recognition.set_lines(readout.latest())
+            # Parked beside the control panel rather than over it: a reading
+            # you have to move a window to see is one nobody reads.
+            self._recognition.show(beside=self._panel.hwnd)
+        except Exception:  # noqa: BLE001 - a view must not take the tray down
+            log.exception("the live recognition window could not be opened")
+            self._settings.show_recognition = False
+            self._save()
+            self._panel.refresh()
+            self._on_notify("Live recognition",
+                            "The window could not be opened -- see the log.",
+                            True)
+
+    def _recognition_closed(self) -> None:
+        """The window's own X was used. Put the tick box out to match."""
+        self._settings.show_recognition = False
+        self._save()
+        self._panel.refresh()
+
     def _refresh(self) -> None:
         self._icon.refresh()
         self._panel.refresh()
+        if self._recognition.visible:
+            self._recognition.set_lines(readout.latest())
 
     def _on_notify(self, title: str, message: str, is_error: bool) -> None:
         self._icon.post(lambda: self._icon.notify(title, message, error=is_error))

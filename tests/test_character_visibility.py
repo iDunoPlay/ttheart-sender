@@ -14,6 +14,8 @@ setting of it can, which is why the floor is a separate rule.
 
 from __future__ import annotations
 
+from collections import Counter
+
 import numpy as np
 import pytest
 import yaml
@@ -51,6 +53,12 @@ def model(min_visible=T.CHARACTER_MIN_VISIBLE):
     m.confidence = 0.85
     m.min_visible = min_visible
     m.named = m.seen = m.buried = 0
+    # Scored against the game's own marks -- a real model always carries
+    # these, so the stand-in has to as well or `summary` reads a half-built
+    # object rather than a round.
+    m.checked = m.agreed = 0
+    m.confused = Counter()
+    m.peak_names = Counter()
     m.failed = ""
     return m
 

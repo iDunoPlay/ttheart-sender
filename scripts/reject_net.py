@@ -69,7 +69,42 @@ from classify import NAME, SIZE, build_net  # noqa: E402
 #:
 #: Hence one folder, not a guess at several. An absence of a label is not a
 #: negative label; this is a label.
-NOT_TSUM = ("board",)
+#:
+#: **`coin` and `score` were both added here and both REVERTED, on evidence.**
+#:
+#: The player's instinct that a coin "should not be detected" is reasonable and
+#: the data says the opposite, measured over every crop whose session is still
+#: on disk:
+#:
+#: ===================  ========  =========  ==========
+#: class                marked    cleared    verdict
+#: ===================  ========  =========  ==========
+#: board                    0.0%      8.9%   clean negative
+#: coin                    76.2%     42.9%   the game says TSUM
+#: unknown_lightball       86.4%     22.9%   the link highlight
+#: a real character       15-25%    10-20%   for comparison
+#: ===================  ========  =========  ==========
+#:
+#: A `coin` crop is marked by the game MORE OFTEN than any real character, and
+#: **42.9% of them were cleared by a drag that actually worked.** Whatever is in
+#: that folder, the game treats it as a chainable tsum -- most likely a tsum
+#: with a coin drawn over it. Training against it would throw away detections
+#: that clear, which is the exact failure this file already records making once
+#: with `unknown_lightball`.
+#:
+#: `junk` is a folder the player asked for, and it needs no separate
+#: justification because the rescue above covers it: anything dropped in there
+#: that the game MARKED or CLEARED is handed back as a tsum at train time, with
+#: a count saying how many. So a mistaken junk call costs a line of output
+#: rather than a worse model -- which is exactly the guarantee `coin` did not
+#: have when it was added here on appearance and taken out on evidence.
+#:
+#: `score` STAYS, on the same test: 0.0% marked and 0.0% cleared over the 6 of
+#: its 10 crops that can be checked. Thin, but pointing the same way as `board`
+#: and never the other, and a person put them in that folder on purpose -- which
+#: is a label, by the rule above. It is 10 crops of 5,600 either way.
+#:
+NOT_TSUM = ("board", "score", "junk")
 
 #: The leftover pile, and it is NOT used by default -- see `--junk`.
 #:
@@ -160,25 +195,71 @@ def linked_positives(dataset: Path, limit: int, seed: int = 0):
     return out
 
 
-def load(labelled: Path, junk: Path, min_visible: float, keep=None):
-    """Crops, y (1 = a chainable tsum), and the session each came from."""
+def load(labelled: Path, junk: Path, min_visible: float, keep=None,
+         neg_min_visible: float = 0.0):
+    """Crops, y (1 = a chainable tsum), and the session each came from.
+
+    `neg_min_visible` is a SEPARATE floor for the negatives, and it exists
+    because of a retrain that made the model worse. Measured over the corpus:
+
+        board  721 crops   median 0.76 visible   99% at or above 0.55
+        junk  1495 crops   median 0.38 visible    8% at or above 0.55
+        real  8005 crops   median 0.72 visible
+
+    A `board` crop is a printed empty slot and looks like one at full size. A
+    `junk` crop, as the folder is actually used, is mostly a detection nobody
+    could identify -- and a detection nobody can identify is what a BURIED REAL
+    TSUM looks like. 70% of a live board is under 0.55 visible.
+
+    Train on those as negatives and the net learns "hard to see" rather than
+    "not a tsum". That is what happened: adding 1,347 junk crops took held-out
+    AUC from 0.9664 to 0.9114, the fake-catch rate at the shipped floor from
+    82.8% to 48.3%, and the real-tsum loss UP from 2.9% to 4.5% -- worse on
+    both sides at once, which is the signature of a shortcut rather than a
+    weaker model. 359 of the negatives were game-confirmed tsums outright.
+
+    So negatives may be held to a higher floor than positives. Below it a
+    person cannot tell either, and a label a person cannot make is not one the
+    net should be taught.
+    """
     paths, ys, sess = [], [], []
     rescued = 0
 
     def add(p: Path, y: int):
         m = NAME.match(p.stem)
-        if m and float(m.group("vis")) < min_visible:
+        floor = neg_min_visible if y == 0 else min_visible
+        if m and float(m.group("vis")) < max(floor, min_visible):
             return
         paths.append(p)
         ys.append(y)
         sess.append(m.group("sess") if m else "unknown")
 
+    rescued_labelled = 0
     for d in sorted(labelled.iterdir()) if labelled.exists() else []:
         if not d.is_dir():
             continue
         y = 0 if d.name in NOT_TSUM else 1
         for p in sorted(d.glob("*.png")):
+            if y == 0 and keep:
+                # A crop the GAME marked or cleared is a tsum whatever folder
+                # a person put it in, and that rule has to reach the negative
+                # FOLDER too -- it only ever ran on the leftover pile. 37 of
+                # the 418 checkable `board` crops (8.9%) are game-confirmed,
+                # and they were training as "not a tsum". This is also the
+                # guard against marking a class junk that the game plays with:
+                # press `j` on coins and they arrive here, 76% confirmed, and
+                # get handed back rather than poisoning the negatives.
+                m = NAME.match(p.stem)
+                key = ((m.group("sess"), int(m.group("sample")),
+                        int(m.group("idx"))) if m else None)
+                if key in keep:
+                    rescued_labelled += 1
+                    add(p, 1)
+                    continue
             add(p, y)
+    if rescued_labelled:
+        print(f"{rescued_labelled} crop(s) in the NEGATIVE folders were marked "
+              f"or cleared by the game and are counted as tsums, not junk")
     for p in sorted(junk.glob("*.png")) if junk and junk.exists() else []:
         m = NAME.match(p.stem)
         key = ((m.group("sess"), int(m.group("sample")), int(m.group("idx")))
@@ -242,7 +323,19 @@ def main() -> int:
     ap.add_argument("--batch", type=int, default=64)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--holdout", type=float, default=0.3, help="share of SESSIONS")
+    ap.add_argument("--golden", type=Path, default=Path("models/golden.json"),
+                    help="sessions NOTHING may train on. Frozen by "
+                         "scripts/golden.py for the character model, and this "
+                         "honours it too: a session kept clean for one question "
+                         "is not clean for another once a model has seen it. "
+                         "Pass '' to ignore, and expect promote.py to refuse "
+                         "the result")
     ap.add_argument("--min-visible", type=float, default=0.0)
+    ap.add_argument("--negative-min-visible", type=float, default=0.0,
+                    help="drop NEGATIVE crops below this visibility. A crop "
+                         "nobody can identify is what a buried real tsum looks "
+                         "like, and training on it teaches 'hard to see' "
+                         "instead of 'not a tsum' -- see load()")
     ap.add_argument("--backbone", default="mobilenet_v3_small",
                     choices=["mobilenet_v3_small", "resnet18"])
     ap.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
@@ -263,7 +356,8 @@ def main() -> int:
     keep = confirmed(args.dataset) if args.dataset.exists() else set()
     if keep:
         print(f"{len(keep)} detections the game itself confirmed")
-    paths, y, sess = load(args.dir, args.junk, args.min_visible, keep)
+    paths, y, sess = load(args.dir, args.junk, args.min_visible, keep,
+                          args.negative_min_visible)
     # Appended BEFORE the split, carrying their own session names, so a
     # harvested positive lands on the same side of the cut as every other crop
     # from its round. Added after the split they would leak.
@@ -293,13 +387,21 @@ def main() -> int:
                        or args.device == "cuda" else "cpu")
     print(f"device: {dev}")
 
-    uniq = sorted(set(sess.tolist()))
+    golden = set()
+    if args.golden and Path(args.golden).exists():
+        golden = set(json.loads(Path(args.golden).read_text(
+            encoding="utf-8"))["sessions"])
+        held = sum(1 for s_ in sess if s_ in golden)
+        print(f"golden set: {len(golden)} session(s) withheld entirely "
+              f"({held} crops)")
+    uniq = sorted(set(sess.tolist()) - golden)
     rng = np.random.default_rng(args.seed)
     uniq = [uniq[i] for i in rng.permutation(len(uniq))]
     cut = max(1, int(len(uniq) * (1 - args.holdout)))
     train_s, test_s = set(uniq[:cut]), set(uniq[cut:])
     tr = np.array([i for i, s in enumerate(sess) if s in train_s])
-    te = np.array([i for i, s in enumerate(sess) if s not in train_s])
+    te = np.array([i for i, s in enumerate(sess)
+                   if s not in train_s and s not in golden])
     if not len(te) or not len(tr):
         print("cannot split by session -- too few sessions")
         return 1
@@ -401,6 +503,7 @@ def main() -> int:
             "backbone": args.backbone, "held_out_auc": round(best, 4),
             "best_epoch": best_ep, "seed": args.seed,
             "not_tsum_classes": list(NOT_TSUM),
+            "golden": sorted(golden),
             "train_sessions": sorted(train_s),
             "test_sessions": sorted(test_s)}, indent=2), encoding="utf-8")
         print(f"\nexported {args.onnx} (+ .json, + .pt)")

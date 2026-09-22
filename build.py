@@ -57,7 +57,7 @@ DATA_FILES = ("config.yaml",)
 #: loader could not open the file and said so by raising SystemExit in a
 #: windowed process with no stderr. Both halves are fixed; this is the half
 #: that means the file is actually there.
-DATA_DIRS = ("flows", "templates", "models")
+DATA_DIRS = ("flows", "templates", "models", "profiles")
 
 #: What of `models/` the RUNTIME actually reads: an ONNX graph through
 #: `cv2.dnn`, and the `.json` beside it carrying the class order and the

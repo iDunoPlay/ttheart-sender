@@ -161,6 +161,11 @@ class PanelSettings:
     #: for every round, which is how every experiment before it was played.
     #: Read the result with `scripts/ab_eval.py`.
     ab_experiment: bool = False
+    #: Whether the separate live-recognition window is open. Remembered, so a
+    #: session spent watching what the model names does not begin by ticking
+    #: the same box -- and OFF by default, because it is a debugging view and
+    #: an extra window nobody asked for is an extra window in the way.
+    show_recognition: bool = False
     #: Install a newer release by itself once one is found. The *check* runs
     #: either way -- this only decides whether the panel acts on the answer.
     #: On by default: a bot left running unattended is exactly the thing that

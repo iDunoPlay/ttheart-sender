@@ -34,16 +34,19 @@ import json
 import logging
 import math
 import time
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass, field, replace
 from itertools import product
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional, Sequence
+from typing import Any, Callable, Iterable, List, Optional, Sequence
 
 import cv2
 import numpy as np
 
 from ..exceptions import StopRequested, TTHeartError
+from . import crop as crop_rules
+from . import profiles
+from . import readout
 
 log = logging.getLogger(__name__)
 
@@ -715,6 +718,9 @@ def load_character_model(path, confidence: float,
         _CHARACTER_CACHE[key] = model
     # Counters are per round, the net is not.
     model.named = model.seen = model.buried = 0
+    model.checked = model.agreed = 0
+    model.confused = Counter()
+    model.peak_names = Counter()
     model.failed = ""
     return model
 
@@ -761,32 +767,20 @@ def load_reject_model(path, floor: float) -> "RejectModel":
     return model
 
 
-def _character_crop(bgr, t, radius: float, size: int):
+def _character_crop(bgr, t, radius: float, size: int, prof=None):
     """The picture a crop-trained model was shown, or None.
 
-    Must match `scripts/crops.py` exactly -- window 1.0 radii, saved at 64px,
-    and REFUSED when the frame edge would clip it. A crop the edge clips is a
-    sliver stretched to a square, which the training set excluded; feeding one
-    in at play time asks the model about a picture it has never seen one
-    example of.
+    A thin wrapper now: the rule itself lives in
+    :mod:`ttheart_sender.game.crop`, which `scripts/crops.py` imports too. It
+    was duplicated here and there for a while, which is exactly how a training
+    set and a runtime come to disagree about what a crop is -- and this project
+    has already lost 312 rounds to one feature computed two ways.
 
-    Module level, and shared by every model that reads a crop, so a change to
-    the rule cannot reach one of them and not the other.
+    `prof` is the crop profile the MODEL was trained under, read from its own
+    `.json`. Passing None means the historical `PLAIN` rule.
     """
-    half = max(4, int(round(radius)))
-    h, w = bgr.shape[:2]
-    x0, y0 = int(t.x) - half, int(t.y) - half
-    x1, y1 = int(t.x) + half + 1, int(t.y) + half + 1
-    if x0 < 0 or y0 < 0 or x1 > w or y1 > h:
-        return None
-    patch = bgr[y0:y1, x0:x1]
-    if patch.size == 0 or min(patch.shape[:2]) < 4:
-        return None
-    # 64 then `size`, not straight to `size`: the training crops were written
-    # to disk at 64 and upsampled from there, and a single resize would hand
-    # the model a sharper image than it ever trained on.
-    small = cv2.resize(patch, (64, 64), interpolation=cv2.INTER_AREA)
-    return cv2.resize(small, (size, size), interpolation=cv2.INTER_LINEAR)
+    return crop_rules.for_model(bgr, t.x, t.y, radius, size,
+                                prof or crop_rules.PLAIN)
 
 
 class RejectModel:
@@ -819,6 +813,11 @@ class RejectModel:
     #: the ones it adds are progressively more often confirmed tsums.
     FLOOR = 0.10
 
+    #: The crop rule a model was trained under. A class attribute so that a
+    #: stub built without `__init__` -- as several tests do -- still reads as
+    #: the historical `PLAIN` rule rather than raising.
+    profile = None
+
     def __init__(self, path, floor: float = FLOOR):
         meta = json.loads(Path(str(path)).with_suffix(".json")
                           .read_text(encoding="utf-8"))
@@ -829,6 +828,11 @@ class RejectModel:
         self.mean = np.asarray(meta.get("mean", [0.485, 0.456, 0.406]), np.float32)
         self.std = np.asarray(meta.get("std", [0.229, 0.224, 0.225]), np.float32)
         self.floor = float(floor)
+        # The crop rule this model was TRAINED under, from its own metadata.
+        # An unknown name raises here rather than being served the default,
+        # which is the whole point: a model trained on padded crops and served
+        # unpadded ones fails silently and looks like a worse model.
+        self.profile = crop_rules.profile(meta.get("crop_profile"))
         self.seen = self.dropped = 0
         self.failed = ""
 
@@ -847,7 +851,7 @@ class RejectModel:
         self.seen += len(tsums)
         idx, batch = [], []
         for i, t in enumerate(tsums):
-            c = _character_crop(bgr, t, radius, self.size)
+            c = _character_crop(bgr, t, radius, self.size, self.profile)
             if c is not None:
                 idx.append(i)
                 batch.append(c)
@@ -936,17 +940,28 @@ class ChainModel:
         self.failed = ""
         _warm_up_rows(self.net, len(self.features))
 
-    def rank(self, chains, tsums, radius: float, fever: bool):
+    def rank(self, bgr: np.ndarray, chains, tsums, radius: float, fever: bool):
         """`chains` best-first by expected accepted members.
 
-        Returns the list unchanged on any failure. A ranker that quietly
-        stops ranking looks exactly like one that was never on, so a failure
+        Takes the FRAME, and that is a correction rather than a convenience.
+        The first version read each tsum's colour off `Tsum.colour` -- the
+        k-means cluster's colour -- to save a patch read. A chain is same-kind
+        by construction, so every member shares the head's cluster colour and
+        both colour features came out **exactly zero**, on every member of
+        every chain. The model was trained on real face distances (mean 0.42,
+        never zero) and served constants: two of its eighteen inputs were
+        silently dead. 312 rounds were played that way and measured nothing.
+
+        Returns the list unchanged on any failure. A ranker that quietly stops
+        ranking looks exactly like one that was never on, so a failure
         switches it off for the round and says so once.
         """
         if self.net is None or len(chains) < 2:
             return chains
         pts = np.array([[t.x, t.y] for t in tsums], np.float64)
-        lab = _cluster_lab(tsums)
+        # `_face_lab`, the same function `scripts/proposal_dataset.py` imports
+        # to build the training rows. One function, not two that agree today.
+        lab = _face_lab(bgr, tsums, radius)
         rows, spans = [], []
         for c in chains:
             f = _chain_rows(tsums, pts, lab, radius, list(c.nodes),
@@ -998,22 +1013,6 @@ def _warm_up_rows(net, width: int) -> None:
     """
     net.setInput(np.zeros((CHARACTER_BATCH, int(width)), np.float32))
     net.forward()
-
-
-def _cluster_lab(tsums):
-    """Each tsum's cluster colour in Lab, for the ranker's colour features.
-
-    NOT `_face_lab`, which already exists and reads patches out of a frame.
-    Naming this one the same shadowed it and broke six unrelated tests -- the
-    second shadowing bug in two days, after a dict-valued `experiments`
-    property hid a set-valued one and made every experiment read as armed.
-
-    Read off `Tsum.colour`, which is the cluster's own BGR, rather than
-    re-cutting the frame: the ranker runs on every candidate of every frame
-    and a per-tsum patch read would cost more than the model does.
-    """
-    bgr = np.asarray([[t.colour for t in tsums]], np.uint8)
-    return cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)[0].astype(np.float32)
 
 
 def _chain_rows(tsums, pts, lab, radius, nodes, fever, is_base, want):
@@ -1127,6 +1126,9 @@ class CharacterModel:
     #: Below the floor the tsum keeps its k-means `kind`, which agrees with the
     #: game 37% of the time. That is not good, but it is more than twice what
     #: the model manages there, and it does not come dressed as certainty.
+    #: See :attr:`RejectModel.profile`.
+    profile = None
+
     def __init__(self, path, confidence: float = 0.85,
                  min_visible: float = CHARACTER_MIN_VISIBLE):
         meta_path = Path(str(path)).with_suffix(".json")
@@ -1140,6 +1142,8 @@ class CharacterModel:
         self.std = np.asarray(meta.get("std", [0.229, 0.224, 0.225]), np.float32)
         self.confidence = float(confidence)
         self.min_visible = float(min_visible)
+        #: The crop rule this model was TRAINED under -- see `RejectModel`.
+        self.profile = crop_rules.profile(meta.get("crop_profile"))
         #: Counted so the end-of-round line can say how much of the board was
         #: never offered to the model, rather than lumping it in with crops it
         #: saw and declined.
@@ -1148,6 +1152,27 @@ class CharacterModel:
         #: is indistinguishable from one that is switched off.
         self.named = 0
         self.seen = 0
+        #: Agreement with the game's own marks, per round -- see `check_marks`.
+        #: This is the only thing a LIVE round can say about whether the
+        #: naming is right rather than merely happening.
+        self.checked = 0
+        self.agreed = 0
+        #: (what the group was called, what a member was called) -> how often.
+        self.confused: Counter = Counter()
+        #: The MOST of each character seen on any one frame this round.
+        #:
+        #: Per-frame counts made the panel unreadable -- the player's words
+        #: were "the tsum name appear and remove appear and remove from each
+        #: action". Of course they did: the board is re-read sixty times a
+        #: round, tsums are falling through most of it, and only the fifth of
+        #: the board above the visibility floor is ever named, so which fifth
+        #: changes every frame. A running TOTAL is no better; it grows without
+        #: bound and reads as nonsense by the end.
+        #:
+        #: The peak is stable, monotonic, and answers the question actually
+        #: being asked -- what is on this board -- rather than what happened to
+        #: be visible in one 16ms window.
+        self.peak_names: Counter = Counter()
         #: Set when the net is switched off mid-round, and reported at the end.
         self.failed = ""
 
@@ -1159,7 +1184,7 @@ class CharacterModel:
         the window, the 64px round trip or the edge refusal must reach both or
         neither.
         """
-        return _character_crop(bgr, t, radius, self.size)
+        return _character_crop(bgr, t, radius, self.size, self.profile)
 
     def probabilities(self, bgr: np.ndarray, tsums: Sequence["Tsum"],
                       radius: float) -> tuple[list[int], np.ndarray]:
@@ -1226,7 +1251,66 @@ class CharacterModel:
                 tsums[i].kind = CHARACTER_KIND + best
                 named += 1
         self.named += named
+        for name, n in Counter(self.named_on(tsums)).items():
+            if n > self.peak_names[name]:
+                self.peak_names[name] = n
         return named
+
+    def check_marks(self, tsums: Sequence["Tsum"], head: int,
+                    marked: Sequence[int]) -> None:
+        """Score this round's naming against the game's own answer.
+
+        Holding a tsum makes the game light up everything that is BOTH the
+        same character and reachable, so a sampled press hands back a free
+        label for one whole group. It is the only ground truth a live round
+        produces, and it costs nothing: `marked_by_game` already reads it for
+        the trim and the collector.
+
+        WHAT THIS MEASURES. The group's name comes from the model's own
+        reading of the PRESSED tsum, so this is agreement with itself across a
+        set the game says is one character. A model that calls the whole group
+        Dory when it is really Beast scores 100%. That is a real limit and it
+        is why `scripts/board_check.py` exists -- but the failure that costs a
+        round is one character read as SEVERAL, because that is what stops a
+        chain being found, and this catches exactly that.
+
+        Only tsums the model actually named count. One it was unsure of kept
+        its colour cluster and was never a claim, so scoring it here would
+        charge the model for the 0.85 floor doing its job.
+        """
+        if not marked or not (0 <= head < len(tsums)):
+            return
+        top = CHARACTER_KIND + len(self.classes)
+        if not CHARACTER_KIND <= tsums[head].kind < top:
+            # The pressed tsum kept its cluster, so there is no name for the
+            # group to agree with. Silent rather than counted as a failure.
+            return
+        called = self.classes[tsums[head].kind - CHARACTER_KIND]
+        for i in marked:
+            if not (0 <= i < len(tsums)) or i == head:
+                continue
+            kind = tsums[i].kind
+            if not CHARACTER_KIND <= kind < top:
+                continue
+            self.checked += 1
+            other = self.classes[kind - CHARACTER_KIND]
+            if other == called:
+                self.agreed += 1
+            else:
+                self.confused[(called, other)] += 1
+
+    def named_on(self, tsums: Sequence["Tsum"]) -> List[str]:
+        """The character each NAMED detection was given, for the panel readout.
+
+        `apply` writes identity into `kind` offset by `CHARACTER_KIND`, and
+        this is the one place that arithmetic is undone. A detection the model
+        was not confident about kept its colour cluster and has no name, so it
+        is absent here rather than present as a placeholder -- how much of the
+        board that accounts for is the summary line's job.
+        """
+        top = CHARACTER_KIND + len(self.classes)
+        return [self.classes[t.kind - CHARACTER_KIND] for t in tsums
+                if CHARACTER_KIND <= t.kind < top]
 
     def summary(self) -> str:
         if not self.seen:
@@ -1238,6 +1322,21 @@ class CharacterModel:
             out += (f", {self.buried} of them never asked "
                     f"({self.buried / self.seen:.0%} under "
                     f"{self.min_visible:.2f} visible)")
+        if self.checked:
+            worst = sorted(self.confused.items(), key=lambda kv: (-kv[1], kv[0]))
+            out += (f"; against the game's own marks it agreed on "
+                    f"{self.agreed}/{self.checked} "
+                    f"({self.agreed / self.checked:.0%})")
+            if worst:
+                out += ", worst: " + ", ".join(
+                    f"{a} read as {b} x{n}" for (a, b), n in worst[:3])
+        else:
+            # Not silence: a round with no marks read is a round that said
+            # nothing about whether the naming was right, and that is worth
+            # knowing before anyone reads the percentage above as quality.
+            out += ("; the game's marks were never read this round, so nothing "
+                    "here says the names were RIGHT -- turn on Data collection "
+                    "or set verify_reach")
         if self.failed:
             out += f" -- SWITCHED OFF mid-round: {self.failed}"
         return out
@@ -3325,6 +3424,18 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
     report = PlayReport()
     report.ab, report.ab_arm = (ab_option, report_arm) if report_arm else ("", "")
 
+    # The equipped tsum's own settings, if one was named. FIRST, because a
+    # profile may set `palette` and every loader below reads `opts`. Empty is
+    # the default and means exactly what it always meant: the flow's values,
+    # unchanged. A bad name raises here rather than playing a round under
+    # settings nobody chose.
+    profile = None
+    if getattr(opts, "profile", ""):
+        profile = profiles.load(opts.profile)
+        say(f"    profile: {profile.get('label', opts.profile)} "
+            f"({profile.get('rounds_played', '?')} rounds behind it)")
+        profiles.apply(opts, profile, say)
+
     # A palette learned offline from collected samples, or None for the
     # per-frame fit this has always done. Loaded once, here, so a bad path
     # fails before a round starts rather than in the middle of one.
@@ -3378,6 +3489,12 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
                 + _model_missing(opts.chain_model, exc)) from exc
 
     characters = None
+    # The panel readout belongs to THIS round from here on. Cleared BEFORE the
+    # load so a model that fails to load leaves an empty panel rather than the
+    # previous round's names, which would read as a model that is working.
+    readout.clear()
+    if not getattr(opts, "character", ""):
+        readout.publish((readout.OFF,))
     if getattr(opts, "character", ""):
         try:
             min_visible = float(getattr(opts, "character_min_visible",
@@ -3680,6 +3797,15 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
 
             if characters is not None:
                 characters.apply(crop, tsums, radius)
+                # LIVE, every frame. `readout.publish` drops an unchanged
+                # list, so a board the model keeps naming the same way costs
+                # one comparison rather than a window repaint -- and when the
+                # board does change, the panel changes with it, which is the
+                # half of this a person checks by eye against the screen.
+                named = characters.named_on(tsums)
+                readout.publish(readout.panel(
+                    characters.peak_names, characters.agreed,
+                    characters.checked, len(named), len(tsums)))
                 # `read_base_kind` answers with a palette index, and a named
                 # tsum no longer carries one -- so the equipped character has
                 # to be found again from the icon's own colour, exactly as
@@ -3698,6 +3824,12 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
                              "distance": round(float(base_dist), 1)}
                 say(f"base tsum: cluster #{base} (Lab distance {base_dist:.1f}, "
                     f"icon Lab {seen_base.get('icon_lab')})")
+                # A profile carries the icon colour it was measured on, so the
+                # one moment the icon is read is the moment to check that the
+                # profile named is the tsum actually equipped. Warned, never
+                # refused -- see `profiles.check_icon`.
+                if profile is not None:
+                    profiles.check_icon(profile, seen_base.get("icon_lab"), say)
             if (opts.recolour > 0 or opts.kinds > 0) and opts.use_base and base_icon:
                 # `read_base_kind` answers with an index into the PALETTE
                 # centres, and `--recolour` throws those away: it renumbers
@@ -3743,7 +3875,7 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
             # exactly the set that would otherwise be played longest-first,
             # and BEFORE the purity loop below, which takes chains[0] onwards.
             if ranker is not None and chains:
-                chains = ranker.rank(chains, tsums, radius, fever.active)
+                chains = ranker.rank(crop, chains, tsums, radius, fever.active)
 
             if not chains:
                 misses += 1
@@ -3953,6 +4085,13 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
                                 else (opts.verify_floor_mult
                                       if opts.verify_extend else 0.0)),
                     out=seen)
+                # The marks are the round's only ground truth and they have
+                # already been paid for -- by the trim, or by the collector.
+                # Scoring against them here costs nothing and is the whole
+                # reason the panel can say "correct" rather than "how many".
+                if characters is not None:
+                    characters.check_marks(tsums, best.nodes[0],
+                                           seen.get("marked") or ())
                 if collecting:
                     samples.record(
                         before, seen.get("marked_frame"), reading=seen,
@@ -4199,6 +4338,12 @@ def play_loop(drv: "Driver", opts, *, stop_when: Optional[Callable] = None) -> "
             if samples.summary():
                 say(samples.summary())
 
+    if characters is not None and not characters.checked:
+        # Only the HEADLINE is replaced. "no marks yet" is true during a round
+        # and misleading after one, but the names under it are the last thing
+        # the model actually read and are still worth looking at.
+        readout.publish(("no marks read -- tick Data collection",)
+                        + readout.latest()[1:])
     say(report.describe())
     if characters is not None and characters.summary():
         say("    " + characters.summary())
@@ -6349,6 +6494,12 @@ def add_play_args(play, *, merge_default: bool):
     play.add_argument("--no-dark", dest="include_dark", action="store_false")
     play.add_argument("--no-base", dest="use_base", action="store_false")
     play.add_argument("--base-only", action="store_true")
+    play.add_argument("--profile", default="",
+                      help="settings bundle for the equipped tsum, by file "
+                           "stem in profiles/ (e.g. beast). Empty is the "
+                           "default and changes nothing. Applied before every "
+                           "other option is read, announced line by line, and "
+                           "checked against the skill icon's own colour")
     play.add_argument("--no-prepare", action="store_true",
                       help="do not move/focus the emulator first")
     play.add_argument("--dry-run", action="store_true",

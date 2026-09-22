@@ -165,36 +165,61 @@ NO_EXPERIMENT = ""
 #: the label is where a person actually looks.
 EXPERIMENTS: tuple = (
     Experiment(
-        "chain_ranker", "chain_model", "models/chain.onnx", "",
-        "Pick the chain the game will accept",
-        "THE ONLY ROW WITH EVIDENCE BEHIND IT. Offline, on rounds it never "
-        "trained on: 0.876 AUC per member against `adjacency`'s 0.500, a "
-        "calibrated expected total (2.274 predicted, 2.310 actual), and "
-        "+0.109 accepted members a press that survives scoring by a second "
-        "independently trained model. Never played. Watch accepted members "
-        "per press, then `cleared`; +4.7% needs ~136 rounds an arm."),
-    Experiment(
-        "settle_board", "settle_board", True, False,
-        "Wait for the board, not the screen (no evidence)",
-        "PREMISE WITHDRAWN. It was proposed because score was said to track "
-        "chains played at r=+0.91 -- five rounds. Over the 140 scored rounds "
-        "of the clean single-build baseline that is -0.17, so more chains per "
-        "round is not the objective. The wait is still the biggest slice of a "
-        "round, so this may yet pay for some other reason; it has no case "
-        "today."),
-    Experiment(
-        "fast_stroke", "step_px", 12, 8,
-        "Faster stroke (no evidence)",
-        "PREMISE WITHDRAWN, the same one as `settle_board`: it is the second "
-        "throughput lever, and throughput is not what the 140-round baseline "
-        "says the score is made of."),
-    Experiment(
         "four_groups", "kinds", 4, 0,
-        "Force 4 colour groups (no evidence)",
-        "SCORED ON A DISQUALIFIED METRIC. The +3-4% that motivated it was "
-        "simulated tsums-cleared-per-drag, which the twenty-sixth round "
-        "disqualified when an ORACLE grouping scored BELOW the shipped rule "
-        "on it. Never played."),
+        "Force 4 colour groups",
+        "THE ONLY ROW LEFT, and the only grouping rule ever measured ABOVE the "
+        "baseline. Over 378 paired drags scored against the game's own marks "
+        "it clears +3.9% more than per-frame k-means, where naming characters "
+        "scores -9.6% and forcing the model into 5 groups scores -23.3%. The "
+        "caveat is unchanged and is why it still says nothing about a played "
+        "round: the metric is simulated tsums-cleared-per-drag, which the "
+        "twenty-sixth round disqualified when an ORACLE grouping scored BELOW "
+        "the shipped rule on it. Never played -- and playing it is the only "
+        "way that caveat is ever resolved."),
+    Experiment(
+        "board_filter", "reject_model", "models/reject.onnx", "",
+        "Drop detections that are not tsums",
+        "BACK, FOR A DIFFERENT MODEL. The last one was PLAYED AND LOST over "
+        "143 rounds: cleared -18.5 (p=0.036), FEVER -5.9pp (p=0.030), collapse "
+        "rate 1.4% -> 12.5%. The mechanism was not subtle -- it deleted 7.7% "
+        "of the board, and losing real tsums cost more than the false ones "
+        "did. Do not re-run THAT model. "
+        "What is different: it trained on 763 crops left UNLABELLED, which is "
+        "inference from silence, and an absence of a label is not a negative "
+        "label. The current one trains on crops a person pointed at on purpose "
+        "-- 148 in `junk` plus 721 in `board` -- cross-checked against the "
+        "game, which hands back anything it marked or cleared. At the shipped "
+        "floor of 0.10 it removes about 3% of the board rather than 7.7%, "
+        "catching 82.8% of fakes for 2.9% of real tsums, held-out AUC 0.9664 "
+        "with the golden sessions withheld. Whether that is enough is a played "
+        "question. Watch `cleared` first, then dead drags and the collapse "
+        "rate."),
+)
+
+#: Rows that were here and are gone, with why. Kept as a list because
+#: `normalize_experiment` drops unknown keys silently, so a saved settings file
+#: naming one of these opens clean -- and because a retired row is a result,
+#: not an embarrassment, and re-proposing it should cost somebody a read.
+#:
+#: * `board_filter`  -- PLAYED and LOST. 143 rounds, clean single-build A/B:
+#:   cleared -18.5 (p=0.036), FEVER -5.9pp (p=0.030), collapse rate 1.4% ->
+#:   12.5%. It deleted 7.7% of the board.
+#: * `chain_ranker`  -- PLAYED and REJECTED. 312 rounds, 156 an arm: cleared
+#:   266.2 against 266.0 (p=0.970), and the interval on accepted-members-per-
+#:   press EXCLUDED the +0.109 predicted offline. The build it was measured on
+#:   also had a train/serve bug; fixed, the honest gain is +3.2%, which needs
+#:   ~938 rounds to resolve. `chain_model` remains a flow var for anyone who
+#:   wants it back.
+#: * `settle_board`  -- PREMISE WITHDRAWN, never played. Proposed because score
+#:   was said to track chains played at r=+0.91, from five rounds. Over the
+#:   140-round single-build baseline that is -0.17.
+#: * `fast_stroke`   -- PREMISE WITHDRAWN, never played. The same throughput
+#:   premise as `settle_board`, refuted by the same measurement.
+#:
+#: All four remain ordinary options in `flows/play.yaml`. Retiring a row takes
+#: it off the panel; it does not take the lever out of the flow.
+RETIRED_EXPERIMENTS: tuple = (
+    "chain_ranker", "settle_board", "fast_stroke",
 )
 
 

@@ -63,6 +63,10 @@ def experiment_note(armed) -> str:
     return (f"{len(armed)} armed -- a round cannot say which one did it")
 
 
+#: Opens the separate live-recognition window. A VIEW, not an experiment --
+#: it changes nothing about how a round is played -- but it sits with the
+#: Experiments because it reports on exactly what they arm.
+ID_SHOW_RECOGNITION = 2597
 ID_EXPERIMENT_AB = 2598
 ID_EXPERIMENT_NOTE = 2599
 ID_EXPERIMENT_BASE = 2600
@@ -265,6 +269,16 @@ class ControlPanel:
 
     # -- visibility ------------------------------------------------------
     @property
+    def hwnd(self):
+        """The window, or None if it has not been created yet.
+
+        Read by the live-recognition window, which parks itself against this
+        one's left edge. `None` there simply means "park in the corner".
+        """
+        hwnd = self._hwnd
+        return hwnd if hwnd is not None and win32gui.IsWindow(hwnd) else None
+
+    @property
     def visible(self) -> bool:
         hwnd = self._hwnd
         return hwnd is not None and win32gui.IsWindow(hwnd) and win32gui.IsWindowVisible(hwnd)
@@ -402,11 +416,21 @@ class ControlPanel:
             y = self._add_check(ID_EXPERIMENT_BASE + 1 + index, spec.label, y)
         y = self._add_check(ID_EXPERIMENT_AB,
                             "Alternate it round by round (A/B)", y)
+        y = self._add_check(ID_SHOW_RECOGNITION, "Show live recognition", y)
         # Reads "baseline" until something is ticked, and warns the moment two
         # are: the panel is where the player is looking when they tick it.
         state = self._add_static("baseline round", y, ident=ID_EXPERIMENT_NOTE)
         y = state
         y += ROW + GAP
+
+        # The live list used to sit here, five rows of it. It is gone: the
+        # panel is a fixed-height window of controls, the list is neither
+        # fixed-height nor a control, and squeezing it in meant capping it at
+        # a handful of names -- which drops the long tail, the part worth
+        # reading. "Show live recognition" opens a window with room for all of
+        # it. What went with the rows is everything they needed in order to
+        # collapse when empty: recorded control positions, a reflow pass, and
+        # a window resize on every refresh.
 
         y += SECTION_GAP
         y = self._add_line(y)
@@ -717,6 +741,8 @@ class ControlPanel:
         self._set_check(ID_COLLECT_DATA, state.get("collect_data", False))
         armed = set(state.get("experiments", ()) or ())
         self._set_check(ID_EXPERIMENT_AB, bool(state.get("ab_experiment", False)))
+        self._set_check(ID_SHOW_RECOGNITION,
+                        bool(state.get("show_recognition", False)))
         for index, spec in enumerate(EXPERIMENTS):
             self._set_check(ID_EXPERIMENT_BASE + 1 + index, spec.key in armed)
         self._set_text(ID_EXPERIMENT_NOTE, experiment_note(armed))
@@ -874,6 +900,8 @@ class ControlPanel:
                 self._on_toggle("collect_data", self._get_check(ident))
             elif ident == ID_EXPERIMENT_AB:
                 self._on_toggle("ab_experiment", self._get_check(ident))
+            elif ident == ID_SHOW_RECOGNITION:
+                self._on_toggle("show_recognition", self._get_check(ident))
             elif ID_EXPERIMENT_BASE < ident <= ID_EXPERIMENT_BASE + len(EXPERIMENTS):
                 spec = EXPERIMENTS[ident - ID_EXPERIMENT_BASE - 1]
                 self._on_toggle("experiment",

@@ -68,6 +68,13 @@ def board():
     return far + near
 
 
+#: A frame the face-colour cut can actually read. The ranker takes the FRAME
+#: now: reading colour off `Tsum.colour` instead fed the model two constant
+#: zeros for 312 rounds, because a chain is same-kind and therefore
+#: same-cluster-colour by construction.
+FRAME = np.tile(np.arange(600, dtype=np.uint8).reshape(1, 600, 1), (400, 1, 3))
+
+
 def chain(nodes, is_base=False):
     return T.Chain(1, (40, 80, 120), list(nodes), is_base)
 
@@ -79,8 +86,7 @@ def test_a_shorter_chain_can_beat_a_longer_one():
     likelier to be taken, and three near-certainties beat five long shots.
     """
     ts = board()
-    ranked = model().rank([chain([0, 1, 2, 3, 4]), chain([6, 7, 8])],
-                          ts, 20.0, False)
+    ranked = model().rank(FRAME, [chain([0, 1, 2, 3, 4]), chain([6, 7, 8])], ts, 20.0, False)
     assert list(ranked[0].nodes) == [6, 7, 8], (
         "expected accepted members must beat raw length")
 
@@ -101,7 +107,7 @@ def test_expected_accepted_cannot_truncate():
     """
     ts = board()
     m = model()
-    ranked = m.rank([chain([6, 7, 8]), chain([6, 7, 8, 9, 10])], ts, 20.0, False)
+    ranked = m.rank(FRAME, [chain([6, 7, 8]), chain([6, 7, 8, 9, 10])], ts, 20.0, False)
     assert list(ranked[0].nodes) == [6, 7, 8, 9, 10], (
         "a superset of a chain always scores at least as well")
 
@@ -110,23 +116,21 @@ def test_the_base_chain_still_leads():
     """Clearing the equipped character charges the skill, which is a rule
     about the ROUND rather than about this press."""
     ts = board()
-    ranked = model().rank(
-        [chain([0, 1, 2]), chain([6, 7, 8, 9, 10, 11], is_base=True)],
-        ts, 20.0, False)
+    ranked = model().rank(FRAME, [chain([0, 1, 2]), chain([6, 7, 8, 9, 10, 11], is_base=True)], ts, 20.0, False)
     assert ranked[0].is_base, "is_base outranks expected accepted"
 
 
 def test_a_length_bonus_can_buy_length_back():
     ts = board()
     long_, short = chain([0, 1, 2, 3, 4]), chain([6, 7, 8])
-    assert list(model(0.0).rank([long_, short], ts, 20.0, False)[0].nodes) == [6, 7, 8]
-    assert list(model(9.0).rank([long_, short], ts, 20.0, False)[0].nodes) == [0, 1, 2, 3, 4]
+    assert list(model(0.0).rank(FRAME, [long_, short], ts, 20.0, False)[0].nodes) == [6, 7, 8]
+    assert list(model(9.0).rank(FRAME, [long_, short], ts, 20.0, False)[0].nodes) == [0, 1, 2, 3, 4]
 
 
 def test_one_chain_is_returned_untouched():
     ts = board()
     only = [chain([0, 1, 2])]
-    assert model().rank(only, ts, 20.0, False) is only
+    assert model().rank(FRAME, only, ts, 20.0, False) is only
 
 
 def test_a_failed_net_keeps_the_original_order():
@@ -141,7 +145,7 @@ def test_a_failed_net_keeps_the_original_order():
 
     m.net = Boom(FEATURES)
     chains = [chain([0, 1, 2, 3, 4, 5]), chain([6, 7, 8])]
-    assert m.rank(chains, board(), 20.0, False) == chains
+    assert m.rank(FRAME, chains, board(), 20.0, False) == chains
     assert m.net is None, "switched off for the rest of the round"
     assert "boom" in m.failed
 
@@ -149,8 +153,8 @@ def test_a_failed_net_keeps_the_original_order():
 def test_it_counts_how_often_it_changed_the_pick():
     ts = board()
     m = model()
-    m.rank([chain([0, 1, 2, 3, 4, 5]), chain([6, 7, 8])], ts, 20.0, False)  # moves
-    m.rank([chain([6, 7, 8, 9]), chain([0, 1, 2])], ts, 20.0, False)        # already right
+    m.rank(FRAME, [chain([0, 1, 2, 3, 4, 5]), chain([6, 7, 8])], ts, 20.0, False)  # moves
+    m.rank(FRAME, [chain([6, 7, 8, 9]), chain([0, 1, 2])], ts, 20.0, False)        # already right
     assert m.seen == 2
     assert m.moved == 1
     assert "1/2" in m.summary()
@@ -164,7 +168,7 @@ def test_the_feature_order_comes_from_the_model_not_from_here():
     """
     ts = board()
     pts = np.array([[t.x, t.y] for t in ts], float)
-    lab = T._cluster_lab(ts)
+    lab = T._face_lab(FRAME, ts, 20.0)
     want = ["visible", "position"]
     rows = T._chain_rows(ts, pts, lab, 20.0, [0, 1, 2], False, False, want)
     assert rows.shape == (2, 2)
@@ -182,7 +186,7 @@ def test_the_shipped_model_matches_the_feature_builder():
     meta = json.loads(open("models/chain.json", encoding="utf-8").read())
     ts = board()
     pts = np.array([[t.x, t.y] for t in ts], float)
-    rows = T._chain_rows(ts, pts, T._cluster_lab(ts), 20.0, [0, 1, 2],
+    rows = T._chain_rows(ts, pts, T._face_lab(FRAME, ts, 20.0), 20.0, [0, 1, 2],
                          False, False, meta["features"])
     assert rows.shape == (2, len(meta["features"]))
     assert np.isfinite(rows).all(), "every column the model wants is real"
@@ -199,3 +203,45 @@ def test_it_ships_off():
         (Config().flows_dir / "play.yaml").read_text(encoding="utf-8"))
     assert flow["vars"]["chain_model"] == ""
     assert flow["vars"]["chain_bonus"] == 0.0
+
+
+def test_the_trainer_and_the_runtime_cut_the_same_colour():
+    """The test that would have caught the 312 wasted rounds.
+
+    The model is trained on rows built by `scripts/proposal_dataset.py` and
+    served rows built by `ChainModel.rank`. Those were two implementations of
+    "each tsum's face colour" -- a 0.5r box mean in the trainer, and the
+    k-means CLUSTER colour at play time. A chain is same-kind by construction,
+    so the runtime's version was exactly zero on every member of every chain,
+    and two of the model's eighteen inputs were dead while it chose.
+
+    They are one function now. This pins that they stay one: same board, same
+    frame, identical rows to the bit.
+    """
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import proposal_dataset as PD
+
+    ts = board()
+    dicts = [{"x": t.x, "y": t.y, "r": t.r, "kind": t.kind} for t in ts]
+    trainer = PD._lab_faces(FRAME, dicts, 20.0)
+    runtime = T._face_lab(FRAME, ts, 20.0)
+    assert np.array_equal(trainer, runtime), (
+        "the trainer and the play loop must cut colour with ONE function")
+    assert runtime.std() > 0, (
+        "a constant colour column is the failure this test exists for")
+
+
+def test_the_colour_features_are_not_constant_within_a_chain():
+    """The specific symptom, stated so it cannot come back quietly."""
+    ts = board()
+    meta = json.loads(open("models/chain.json", encoding="utf-8").read())
+    rows = T._chain_rows(ts, np.array([[t.x, t.y] for t in ts], float),
+                         T._face_lab(FRAME, ts, 20.0), 20.0, [6, 7, 8, 9],
+                         False, False, meta["features"])
+    for name in ("lab_prev", "lab_head"):
+        col = rows[:, meta["features"].index(name)]
+        assert col.std() > 0 or col.any(), (
+            f"{name} is constant across a chain -- the model was trained on a "
+            f"varying feature and is being served a dead one")

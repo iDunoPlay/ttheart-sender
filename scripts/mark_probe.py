@@ -75,7 +75,7 @@ BANDS = [0.0, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.65, 1.01]
 #: `<session>_<sample>_<index>_v<visible>.png` -- the name `crops.py` writes,
 #: which is a primary key back into `samples.jsonl`: session, frame, and which
 #: detection in that frame. That is what makes a human label re-findable.
-CROP_NAME = re.compile(r"^(?P<sess>.+?)_(?P<sample>\d{4})_(?P<idx>\d{2})_v")
+CROP_NAME = re.compile(r"^(?P<sess>.+?)_(?P<sample>\d{4})_(?P<idx>\d{2,})_v")
 
 
 def human_names(root: Path) -> dict:

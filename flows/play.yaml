@@ -20,6 +20,31 @@ vars:
 
   level_cap_found: false
 
+  # `profile` -- THE EQUIPPED TSUM'S OWN SETTINGS.
+  #
+  # A file stem in profiles/. Empty is the default and changes nothing: the
+  # values below are used exactly as they always have been.
+  #
+  # Why it exists: 737 rounds were played with Beast equipped and 43 with
+  # another tsum on IDENTICAL settings, and the second scored 12 points less
+  # FEVER share -- because that tsum's colour covers 20.2% of the board against
+  # 14.2%, so the base preference fires on 50.9% of drags against 17.4% and
+  # pays its cost three times as often. Settings that suit one equipped tsum
+  # are not the settings that suit another, and this is where that is written
+  # down. See docs/BASE-TSUM-INVESTIGATION.md.
+  #
+  # profiles/beast.json is a BACKUP of what those 737 rounds actually ran,
+  # read off the collected samples rather than retyped. Selecting it changes
+  # nothing today; it exists so the known-good configuration cannot be lost.
+  #
+  # A profile can only set options that already exist -- an unknown key raises
+  # rather than being ignored -- and every change it makes is printed. If the
+  # profile's icon colour does not match the tsum you actually equipped, the
+  # round says so loudly and plays anyway.
+  #
+  # To revert: set back to "".
+  profile: ""
+
   # Stuck/crash watchdog. A screen showing none of the known landmarks AND
   # unchanged for thirty seconds is treated as a wedged game and restarts the
   # emulator. Stillness alone is never enough: a healthy menu is
@@ -99,14 +124,30 @@ vars:
   # at 20.8% against 16.6%. Marked detections had to be harvested as positives
   # before its rejections stopped being enriched for real tsums.
   #
-  # WHAT IS STILL UNKNOWN. After that fix its rejections are confirmed by the
+  # WHAT WAS STILL UNKNOWN. After that fix its rejections are confirmed by the
   # game 15.4% of the time against a 17.2% base rate -- no longer harmful, and
   # only just better than chance. That test can rule a filter OUT and cannot
-  # certify one, so this is where the offline work stops.
+  # certify one, so the offline work stopped there and a round decided.
   #
-  # OFF. Set to models/reject.onnx to arm it; revert to "". Watch `dragged`
-  # falling while `cleared` holds, which is the whole claim. If `cleared` falls
-  # with it, it is eating real tsums -- revert. Round 34.
+  # PLAYED, AND IT DID NOT EARN ITS PLACE. 98 rounds on v1.20.0, alternating
+  # 48 on / 48 off (2026-09-07/08). The claim below is the one it met: the
+  # model trims proposals from 4.99 links to 4.52 and clear/drag rises 0.641
+  # -> 0.704, so it really does cut dead tail links. But `cleared` is flat
+  # (267 vs 266, ON wins 22/48), `played` is flat, and the round is time-boxed
+  # -- the saved drags buy one extra chain, which is nothing. Score came out
+  # +8.3% with a 95% CI of -16%..+32%: at this variance (CV 0.58) score cannot
+  # decide a 48-pair A/B at all, and `cleared`, which CAN (MDE ~10%), says
+  # nothing. Adjusted for fever and cleared, the arm coefficient is t=1.33.
+  #
+  # So: OFF, and not discarded -- it is waiting for a use where drag cost
+  # actually binds. Set to models/reject.onnx to arm it; revert to "". Watch
+  # `dragged` falling while `cleared` holds, which is the whole claim. If
+  # `cleared` falls with it, it is eating real tsums -- revert. Rounds 34-36.
+  #
+  # NOTE for the next arm: `rejected` in round.json counts the BOWL heuristic,
+  # not this model -- it went DOWN when the model was on, because shorter
+  # proposals reach the heuristic less often. Nothing counts how often this
+  # model fired. Instrument that before running it again.
   reject_model: ""
   reject_floor: 0.10
 
@@ -139,7 +180,13 @@ vars:
   #
   # To run the board-filter experiment: set `reject_model` to
   # models/reject.onnx, `ab` to reject_model, and leave `ab_off` empty. Revert
-  # by clearing `ab`.
+  # by clearing `ab`. That experiment has been run -- 98 rounds, see
+  # `reject_model` above -- and this is cleared back to the baseline.
+  #
+  # SIZE THE NEXT ONE BEFORE PLAYING IT. The derived score has CV 0.58, so 48
+  # pairs resolve only a 34% effect; a 10% lift on score needs ~530 pairs.
+  # Judge an arm on `cleared` (MDE ~10% at 48 pairs) and carry `fever_frames`
+  # as a covariate -- it correlates +0.71 with score and is mostly luck.
   #
   # The arm is chosen INSIDE the play loop, not here, so no flow hop can drop
   # it -- and it records itself, because what changes is the option's own
@@ -335,6 +382,7 @@ steps:
 
         # The tunables. See the `vars:` block at the top of this file for what
         # each one does, the value to try, and the revert.
+        profile: "${profile}"
         bowl_reject: "${bowl_reject}"
         fit_effort: "${fit_effort}"
         verify_reach: "${verify_reach}"
